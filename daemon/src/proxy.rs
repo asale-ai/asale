@@ -1,0 +1,878 @@
+//! Consumer local proxy (spec §6). Listens on 127.0.0.1:<port> and exposes the
+//! compatible endpoints. Route decision (spec §6.1):
+//!
+//!   direct → forward to the official upstream with a locally imported
+//!            subscription token (pool-selected, injected here only; no trade,
+//!            never touches the asale server).
+//!   market → inject the asale API key (kept in the encrypted secret store,
+//!            never in the tool config) and forward to the asale server gateway.
+//!   auto   → direct when a local account with remaining quota can serve the
+//!            request's dialect natively; market otherwise.
+//!
+//! Market forwards write a local `consume_records` row (spec §8) with the
+//! usage parsed from the streamed response, for reconciliation.
+
+use asale_client_core::executor::accumulate_usage;
+use asale_client_core::protocol::Usage;
+use asale_client_core::store::LocalStore;
+use asale_client_core::{AccountPool, UpstreamErrorKind};
+use axum::{
+    body::Body,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Router,
+};
+use futures_util::StreamExt;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use tokio::sync::mpsc;
+
+#[derive(Clone)]
+pub struct ProxyState {
+    pub server_api_base: String, // http(s)://host:port (asale gateway API)
+    pub asale_key: Arc<tokio::sync::RwLock<Option<String>>>,
+    pub http: reqwest::Client,
+    pub store: Arc<LocalStore>,
+    pub pool: Arc<StdMutex<AccountPool>>,
+}
+
+/// Build the proxy router.
+pub fn router(state: ProxyState) -> Router {
+    Router::new()
+        .route("/v1/chat/completions", post(forward))
+        .route("/v1/completions", post(forward))
+        // Codex ≥ 0.146 rejects `wire_api = "chat"` outright, so the whole
+        // Codex family reaches us here and nowhere else.
+        .route("/v1/responses", post(forward))
+        .route("/v1/messages", post(forward))
+        // Claude Code's token-count preflight. Forwarded like a message call but
+        // never metered/settled (it is not a billable completion).
+        .route("/v1/messages/count_tokens", post(forward))
+        .route("/v1/models", get(forward))
+        .route("/v1beta/models/*rest", post(forward))
+        .route("/healthz", get(|| async { "ok" }))
+        .with_state(state)
+}
+
+/// Largest request body this proxy will buffer.
+///
+/// Deliberately above the asale gateway's own default
+/// (`ASALE_MAX_REQUEST_BYTES`, 100 MiB) so that an oversized market request is
+/// refused by the gateway with a 413 the caller can read, rather than dying
+/// here as an opaque local error. The direct route bypasses the gateway
+/// entirely and is bounded only by this.
+const MAX_BODY_BYTES: usize = 128 * 1024 * 1024;
+
+fn now_secs() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+use crate::tool_config::for_request_path as buy_tool_for_path;
+
+/// Segments that tag a build or environment rather than name a model.
+const MODEL_TAGS: &[&str] = &["latest", "preview", "exp", "e2e", "test", "dev", "staging", "canary"];
+
+/// A model id without the release stamp the market appends:
+/// `claude-fable-5-e2e-1784891711622250000` → `claude-fable-5`,
+/// `claude-opus-4-8-20260101` → `claude-opus-4-8`. Ids that carry no such
+/// suffix (`claude-3-5-haiku`) are returned whole.
+///
+/// Named `strip_release_stamp`, not `model_family`: the server's
+/// `metering::model_family` is an unrelated function that classifies an id into
+/// claude/gpt for token-estimation heuristics, and having both under one name
+/// made the two look like copies of each other that had drifted.
+pub fn strip_release_stamp(id: &str) -> &str {
+    let mut end = id.len();
+    while let Some(dash) = id[..end].rfind('-') {
+        // Never strip down to a single segment.
+        if !id[..dash].contains('-') {
+            break;
+        }
+        let seg = &id[dash + 1..end];
+        let stamp = seg.len() >= 6 && seg.bytes().all(|b| b.is_ascii_digit());
+        let tag = MODEL_TAGS.iter().any(|t| seg.eq_ignore_ascii_case(t));
+        if !stamp && !tag {
+            break;
+        }
+        end = dash;
+    }
+    &id[..end]
+}
+
+/// What the buy gate decided about a request.
+enum BuyDecision {
+    /// Forward as it stands.
+    Pass,
+    /// Do not forward; answer the caller with this instead.
+    Refuse(Response),
+    /// Forward, but relabel the request with this model first.
+    Substitute(String),
+}
+
+/// Gate a request on the originating tool's buy settings.
+///
+/// A tool whose switch is off should not be pointing at us at all — its config
+/// was restored — so that case only fires for a stale process still holding the
+/// old endpoint. Refusing beats silently spending the user's balance.
+async fn buy_gate(st: &ProxyState, path: &str, model: &str) -> BuyDecision {
+    let Some(tool) = buy_tool_for_path(path) else { return BuyDecision::Pass };
+    if !crate::commands::buy_is_enabled(&st.store, tool).await {
+        return BuyDecision::Refuse(
+            (
+                StatusCode::FORBIDDEN,
+                format!("buying is off for {tool} — turn it on in Asale to route this tool through the market"),
+            )
+                .into_response(),
+        );
+    }
+    // An empty selection means "any model the market offers". The UI stores a
+    // model *family* (`claude-fable-5`), while callers ask for a full release id
+    // (`claude-fable-5-e2e-1784891711622250000`), so compare on the family.
+    let allowed = crate::commands::buy_models(&st.store, tool).await;
+    if !allowed.is_empty()
+        && !model.is_empty()
+        && !allowed.iter().any(|m| strip_release_stamp(m) == strip_release_stamp(model))
+    {
+        // Codex is not only what the user typed into: the ChatGPT app runs
+        // thread titling, auto-review and compaction against model ids baked
+        // into its own catalog (`gpt-5.6-luna` and friends) that no picker or
+        // config key can redirect. Refusing those breaks app features over a
+        // request the user never made, so serve them with the model they did
+        // buy — the same one `config.toml`'s `model` points at.
+        if tool == "codex" {
+            return BuyDecision::Substitute(allowed[0].clone());
+        }
+        return BuyDecision::Refuse(
+            (
+                StatusCode::FORBIDDEN,
+                format!("model '{model}' is not in the buy list for {tool} (allowed: {})", allowed.join(", ")),
+            )
+                .into_response(),
+        );
+    }
+    BuyDecision::Pass
+}
+
+/// Providers whose native dialect matches this local path — candidates for
+/// direct routing. Claude Code and Claude Work accounts share the Anthropic
+/// dialect; codex OAuth tokens have no public compat endpoint, so codex paths
+/// stay on the market route.
+fn direct_candidates(path: &str) -> &'static [&'static str] {
+    if path.starts_with("/v1/messages") {
+        &["claude", "claude_work"]
+    } else if path.starts_with("/v1beta/") {
+        &["gemini"]
+    } else {
+        &[]
+    }
+}
+
+/// The official upstream URL + extra headers for a direct forward. `path` is the
+/// request path (e.g. `/v1/messages` or `/v1/messages/count_tokens`) so the same
+/// forwarder serves both message calls and the count_tokens preflight.
+fn direct_upstream(provider: &str, path: &str, path_and_query: &str) -> Option<(String, Vec<(&'static str, String)>)> {
+    match provider {
+        "claude" | "claude_work" => Some((
+            format!("https://api.anthropic.com{path}"),
+            vec![
+                ("anthropic-version", "2023-06-01".to_string()),
+                // OAuth (subscription) tokens require the oauth beta flag.
+                ("anthropic-beta", "oauth-2025-04-20".to_string()),
+                (
+                    "user-agent",
+                    if provider == "claude_work" { "claude-work/1.0 (desktop)" } else { "claude-cli/1.0 (external, cli)" }
+                        .to_string(),
+                ),
+            ],
+        )),
+        "gemini" => Some((
+            format!("https://generativelanguage.googleapis.com{path_and_query}"),
+            vec![("user-agent", "gemini-cli/1.0".to_string())],
+        )),
+        _ => None,
+    }
+}
+
+/// Resolve the effective route for this request: `Some(provider)` → direct.
+async fn decide_direct(st: &ProxyState, path: &str) -> Option<&'static str> {
+    let mode = st
+        .store
+        .get_setting("consume_mode")
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "market".to_string());
+    if mode == "market" {
+        return None;
+    }
+    let now = now_secs();
+    let candidates = direct_candidates(path);
+    let hit = {
+        let pool = st.pool.lock().ok()?;
+        candidates.iter().find(|p| pool.any_available(p, now)).copied()
+    };
+    // mode=direct with no local account still routes direct (and errors
+    // explicitly) so the user sees why; auto silently falls back to market.
+    match (mode.as_str(), hit) {
+        ("direct", Some(p)) => Some(p),
+        ("direct", None) => Some(candidates.first().copied().unwrap_or("")),
+        ("auto", p) => p,
+        _ => None,
+    }
+}
+
+async fn forward(
+    State(st): State<ProxyState>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    _headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let path = uri.path().to_string();
+    let path_and_query = uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
+
+    let mut bytes = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, "body read error").into_response(),
+    };
+
+    // Only meter billable model-call POSTs — not /v1/models listings, and not
+    // the count_tokens preflight (which has no usage to settle).
+    let is_count_tokens = path.ends_with("/count_tokens");
+    let meter = method == axum::http::Method::POST && !is_count_tokens;
+
+    // Enforce the originating tool's buy switch + model selection. count_tokens
+    // is a preflight Claude Code issues before the real call; gating it too
+    // would surface the refusal at a confusing point, and it costs nothing.
+    if !is_count_tokens {
+        match buy_gate(&st, &path, &extract_model_from_bytes(&bytes)).await {
+            BuyDecision::Pass => {}
+            BuyDecision::Refuse(refusal) => return refusal,
+            BuyDecision::Substitute(model) => bytes = relabel_model(&bytes, &model),
+        }
+    }
+
+    if let Some(provider) = decide_direct(&st, &path).await {
+        if provider.is_empty() {
+            return (StatusCode::SERVICE_UNAVAILABLE, "consume mode is 'direct' but no local subscription can serve this endpoint").into_response();
+        }
+        return forward_direct(st, provider, &path, &path_and_query, method, bytes, meter).await;
+    }
+    forward_market(st, &path_and_query, method, bytes, meter).await
+}
+
+/// Direct route: inject the pool-selected local subscription token and call the
+/// official upstream. No trade, no asale server involvement (spec §6.1).
+async fn forward_direct(
+    st: ProxyState,
+    provider: &'static str,
+    path: &str,
+    path_and_query: &str,
+    method: axum::http::Method,
+    bytes: axum::body::Bytes,
+    meter: bool,
+) -> Response {
+    // Lane-aware pick: a model that just failed upstream is backed off for
+    // local traffic too, while a *market* pause (breaker, sell switch) is not
+    // allowed to lock the operator out of their own subscription.
+    let model = extract_model_from_bytes(&bytes);
+    let picked = match st.pool.lock().ok().and_then(|mut p| p.pick_local(provider, &model, now_secs())) {
+        Some(p) => p,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "consume mode is 'direct' but no local account is available (cooldown/expired/exhausted)",
+            )
+                .into_response();
+        }
+    };
+    let token = match crate::keychain::get(&picked.keychain_ref).ok().flatten() {
+        Some(t) => t,
+        None => {
+            if let Ok(mut pool) = st.pool.lock() {
+                pool.on_error(provider, &picked.account_id, &model, UpstreamErrorKind::AuthFailed, "missing credential", now_secs());
+            }
+            return (StatusCode::SERVICE_UNAVAILABLE, "local account token missing from secret store").into_response();
+        }
+    };
+    let Some((url, extra_headers)) = direct_upstream(provider, path, path_and_query) else {
+        return (StatusCode::BAD_GATEWAY, "provider has no direct upstream").into_response();
+    };
+
+    let reqwest_method = reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::POST);
+    // Direct mode leaves asale entirely and hits the provider, so it needs the
+    // proxy-aware client — `st.http` is for the (unproxied) asale gateway.
+    let mut req = asale_client_core::http::upstream()
+        .request(reqwest_method, &url)
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json");
+    for (k, v) in extra_headers {
+        req = req.header(k, v);
+    }
+    // Same OAuth requirement the relay executor applies: Anthropic refuses
+    // subscription traffic that does not open with Claude Code's preamble, and
+    // dresses the refusal as a 429. Claude Code's own body already carries it
+    // (this is a no-op then); any other Anthropic-dialect caller would not.
+    let mut out_body = bytes.to_vec();
+    if provider == "claude" || provider == "claude_work" {
+        if let Some(patched) = asale_client_core::executor::with_claude_code_system(&out_body) {
+            out_body = patched;
+        }
+    }
+    let resp = match req.body(out_body).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            if let Ok(mut pool) = st.pool.lock() {
+                pool.on_error(provider, &picked.account_id, &model, UpstreamErrorKind::ServerError, &e.to_string(), now_secs());
+            }
+            return (StatusCode::BAD_GATEWAY, format!("upstream error: {e}")).into_response();
+        }
+    };
+
+    let status = resp.status();
+    // Pool feedback mirrors the executor's policy (spec §4).
+    if !status.is_success() {
+        let kind = match status.as_u16() {
+            429 => Some(UpstreamErrorKind::RateLimited { reset_at: None }),
+            401 | 403 => Some(UpstreamErrorKind::AuthFailed),
+            s if s >= 500 => Some(UpstreamErrorKind::ServerError),
+            _ => None,
+        };
+        if let Ok(mut pool) = st.pool.lock() {
+            match kind {
+                Some(k) => {
+                    pool.on_error(provider, &picked.account_id, &model, k, &format!("upstream {status}"), now_secs());
+                }
+                None => pool.on_success(provider, &picked.account_id, &model, 0),
+            }
+        }
+        if meter {
+            let task_id = format!("d_{}", uuid::Uuid::new_v4().simple());
+            let _ = st
+                .store
+                .insert_consume_record(&task_id, &model, 0, 0, 0, &format!("direct_upstream_{}", status.as_u16()))
+                .await;
+        }
+        return passthrough(resp);
+    }
+
+    // Success: stream through, metering usage; release the pool lease with the
+    // measured tokens when the stream ends.
+    let pool = st.pool.clone();
+    let account_id = picked.account_id.clone();
+    let store = st.store.clone();
+    let lane = model.clone();
+    let record = meter.then(|| (format!("d_{}", uuid::Uuid::new_v4().simple()), model, "direct".to_string()));
+    stream_with_metering(resp, move |usage, had_error| {
+        let tokens = (usage.input_tokens + usage.output_tokens).max(0) as u64;
+        if let Ok(mut p) = pool.lock() {
+            if had_error {
+                p.on_error(provider, &account_id, &lane, UpstreamErrorKind::ServerError, "stream aborted", now_secs());
+            } else {
+                p.on_success(provider, &account_id, &lane, tokens);
+            }
+        }
+        let store = store.clone();
+        let record = record.clone();
+        async move {
+            if let Some((task_id, model, status)) = record {
+                let status = if had_error { "stream_error".to_string() } else { status };
+                let _ = store
+                    .insert_consume_record(&task_id, &model, usage.input_tokens, usage.output_tokens, 0, &status)
+                    .await;
+            }
+        }
+    })
+}
+
+/// Market route: forward to the asale server gateway with the asale API key,
+/// recording a consume row from the streamed usage (spec §6.2/§8).
+async fn forward_market(
+    st: ProxyState,
+    path_and_query: &str,
+    method: axum::http::Method,
+    bytes: axum::body::Bytes,
+    meter: bool,
+) -> Response {
+    let key = match st.asale_key.read().await.clone() {
+        Some(k) => k,
+        None => {
+            return (StatusCode::UNAUTHORIZED, "Asale api key not configured").into_response();
+        }
+    };
+    let target = format!("{}{}", st.server_api_base.trim_end_matches('/'), path_and_query);
+    let reqwest_method = reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::POST);
+    let model = extract_model_from_bytes(&bytes);
+
+    let req = st
+        .http
+        .request(reqwest_method, &target)
+        .header("authorization", format!("Bearer {key}"))
+        .header("content-type", "application/json")
+        .body(bytes.to_vec());
+
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("upstream error: {e}")).into_response(),
+    };
+
+    let status = resp.status();
+    if !status.is_success() {
+        if meter {
+            let task_id = format!("c_{}", uuid::Uuid::new_v4().simple());
+            let _ = st
+                .store
+                .insert_consume_record(&task_id, &model, 0, 0, 0, &format!("upstream_{}", status.as_u16()))
+                .await;
+        }
+        return passthrough(resp);
+    }
+
+    let store = st.store.clone();
+    let record = meter.then(|| (format!("c_{}", uuid::Uuid::new_v4().simple()), model));
+    stream_with_metering(resp, move |usage, had_error| {
+        let store = store.clone();
+        let record = record.clone();
+        async move {
+            if let Some((task_id, model)) = record {
+                let status = if had_error { "stream_error" } else { "ok" };
+                let _ = store
+                    .insert_consume_record(&task_id, &model, usage.input_tokens, usage.output_tokens, 0, status)
+                    .await;
+            }
+        }
+    })
+}
+
+/// Rewrite a request body's `model`, so the forward — and the metering row that
+/// follows it — both name the model actually served. A body that is not a JSON
+/// object is passed through untouched: there is nothing to relabel, and the
+/// gateway's own parser is the right place for it to fail.
+fn relabel_model(bytes: &[u8], model: &str) -> axum::body::Bytes {
+    let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return axum::body::Bytes::copy_from_slice(bytes);
+    };
+    let Some(obj) = v.as_object_mut() else {
+        return axum::body::Bytes::copy_from_slice(bytes);
+    };
+    obj.insert("model".into(), serde_json::Value::String(model.to_string()));
+    match serde_json::to_vec(&v) {
+        Ok(out) => out.into(),
+        Err(_) => axum::body::Bytes::copy_from_slice(bytes),
+    }
+}
+
+fn extract_model_from_bytes(bytes: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|v| v.get("model").and_then(|m| m.as_str()).map(String::from))
+        .unwrap_or_default()
+}
+
+/// Pass a non-streamed upstream response straight through.
+fn passthrough(resp: reqwest::Response) -> Response {
+    let status = resp.status();
+    let ct = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    Response::builder()
+        .status(status)
+        .header("content-type", ct)
+        .body(Body::from_stream(resp.bytes_stream()))
+        .unwrap()
+}
+
+/// Stream the upstream body through while accumulating usage from SSE frames;
+/// invoke `finish(usage, had_error)` exactly once when the stream completes.
+fn stream_with_metering<F, Fut>(resp: reqwest::Response, finish: F) -> Response
+where
+    F: FnOnce(Usage, bool) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    let status = resp.status();
+    let ct = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+
+    let (tx, rx) = mpsc::unbounded_channel::<Result<axum::body::Bytes, std::io::Error>>();
+    tokio::spawn(async move {
+        let mut usage = Usage::default();
+        let mut had_error = false;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(b) => {
+                    accumulate_usage(&mut usage, &b);
+                    if tx.send(Ok(b)).is_err() {
+                        break; // client went away; still finish metering below
+                    }
+                }
+                Err(e) => {
+                    had_error = true;
+                    let _ = tx.send(Err(std::io::Error::other(e)));
+                    break;
+                }
+            }
+        }
+        finish(usage, had_error).await;
+    });
+
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|item| (item, rx)) });
+    Response::builder()
+        .status(status)
+        .header("content-type", ct)
+        .header("x-accel-buffering", "no")
+        .body(Body::from_stream(stream))
+        .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asale_client_core::Strategy;
+
+    /// A proxy state with every tool's buy switch on, so routing tests exercise
+    /// routing rather than the buy gate (which has its own tests below).
+    async fn state(key: Option<&str>) -> ProxyState {
+        let store = LocalStore::open_memory().await.unwrap();
+        for tool in crate::tool_config::TOOLS {
+            store.set_buy_tool(tool, Some(true), None, None, None).await.unwrap();
+        }
+        ProxyState {
+            server_api_base: "http://127.0.0.1:1".into(), // unreachable on purpose
+            asale_key: Arc::new(tokio::sync::RwLock::new(key.map(String::from))),
+            http: asale_client_core::http::plain(),
+            store: Arc::new(store),
+            pool: Arc::new(StdMutex::new(AccountPool::new(Strategy::RoundRobin))),
+        }
+    }
+
+    async fn post_message(port: u16, model: &str) -> reqwest::Response {
+        asale_client_core::http::plain()
+            .post(format!("http://127.0.0.1:{port}/v1/messages"))
+            .json(&serde_json::json!({"model": model, "messages": []}))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn buy_switch_off_refuses_instead_of_spending() {
+        // A tool whose switch is off has had its config restored, so this only
+        // happens for a stale process still pointed at us — refuse, don't bill.
+        let st = state(Some("sk-asale-test")).await;
+        st.store.set_buy_tool("claude", Some(false), None, None, None).await.unwrap();
+        let store = st.store.clone();
+        let port = serve(st).await;
+
+        let resp = post_message(port, "claude-sonnet-4-5").await;
+        assert_eq!(resp.status(), 403, "buying off for claude -> refused");
+        let (_, total) = store.list_consume_records(10, 0).await.unwrap();
+        assert_eq!(total, 0, "a refused request is never metered");
+    }
+
+    #[tokio::test]
+    async fn model_outside_the_buy_list_is_refused_per_tool() {
+        let st = state(Some("sk-asale-test")).await;
+        // Claude Code may only buy haiku; Gemini's list stays empty (= any).
+        st.store
+            .set_buy_tool("claude", None, Some(&["claude-3-5-haiku-latest".into()]), None, None)
+            .await
+            .unwrap();
+        let port = serve(st).await;
+
+        let resp = post_message(port, "claude-opus-4-1").await;
+        assert_eq!(resp.status(), 403, "model not in this tool's buy list");
+        let body = resp.text().await.unwrap();
+        assert!(body.contains("claude-3-5-haiku-latest"), "error names the allowed models");
+
+        // A model that *is* selected passes the gate and reaches routing (502:
+        // the market target is unreachable in tests).
+        let resp = post_message(port, "claude-3-5-haiku-latest").await;
+        assert_eq!(resp.status(), 502, "selected model passes the gate");
+    }
+
+    #[test]
+    fn strip_release_stamp_removes_stamps_and_tags_only() {
+        assert_eq!(strip_release_stamp("claude-fable-5-e2e-1784891711622250000"), "claude-fable-5");
+        assert_eq!(strip_release_stamp("claude-opus-4-8-20260101"), "claude-opus-4-8");
+        assert_eq!(strip_release_stamp("claude-3-5-haiku-latest"), "claude-3-5-haiku");
+        assert_eq!(strip_release_stamp("claude-3-5-haiku"), "claude-3-5-haiku");
+        assert_eq!(strip_release_stamp("gpt-5-codex"), "gpt-5-codex");
+        assert_eq!(strip_release_stamp("gemini-2.5-pro"), "gemini-2.5-pro");
+    }
+
+    /// The buy switch stores families, the market sells ids: a traded model
+    /// whose id got shortened here would never match the user's selection and
+    /// its traffic would be refused. Every id the platform prices
+    /// (`asale-server/src/catalog.rs`) must therefore survive unchanged.
+    #[test]
+    fn traded_model_ids_are_their_own_family() {
+        for id in [
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-4-5",
+            "gpt-5-codex",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+        ] {
+            assert_eq!(strip_release_stamp(id), id, "`{id}` must not be shortened");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_family_selection_admits_its_release_ids() {
+        let st = state(Some("sk-asale-test")).await;
+        // What the UI now stores: the family name, no release stamp.
+        st.store.set_buy_tool("claude", None, Some(&["claude-fable-5".into()]), None, None).await.unwrap();
+        let port = serve(st).await;
+
+        let resp = post_message(port, "claude-fable-5-e2e-1784891711622250000").await;
+        assert_eq!(resp.status(), 502, "a release id of the selected family passes the gate");
+
+        let resp = post_message(port, "claude-opus-4-8-20260101").await;
+        assert_eq!(resp.status(), 403, "another family is still refused");
+    }
+
+    #[tokio::test]
+    async fn buy_list_of_one_tool_does_not_restrict_another() {
+        let st = state(Some("sk-asale-test")).await;
+        st.store.set_buy_tool("claude", None, Some(&["claude-3-5-haiku-latest".into()]), None, None).await.unwrap();
+        let port = serve(st).await;
+        // /v1/chat/completions belongs to codex, whose list is empty = any model.
+        let resp = asale_client_core::http::plain()
+            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .json(&serde_json::json!({"model": "gpt-5-codex", "messages": []}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 502, "codex is gated by codex's own list, not claude's");
+    }
+
+    #[tokio::test]
+    async fn responses_endpoint_is_codex_traffic() {
+        // Codex ≥ 0.146 only speaks /v1/responses; it must land on codex's own
+        // buy switch and model list, not on some other tool's.
+        let st = state(Some("sk-asale-test")).await;
+        st.store.set_buy_tool("codex", None, Some(&["claude-fable-5".into()]), None, None).await.unwrap();
+        let port = serve(st).await;
+        let post = |model: &str| {
+            let body = serde_json::json!({"model": model, "input": "hi", "stream": true});
+            asale_client_core::http::plain().post(format!("http://127.0.0.1:{port}/v1/responses")).json(&body).send()
+        };
+
+        let resp = post("gpt-5.2").await.unwrap();
+        assert_eq!(resp.status(), 502, "codex's own catalog models are served, not refused");
+        let resp = post("claude-fable-5").await.unwrap();
+        assert_eq!(resp.status(), 502, "the selected model reaches routing (market unreachable in tests)");
+    }
+
+    #[tokio::test]
+    async fn codex_internal_models_are_relabelled_not_refused() {
+        // The ChatGPT app titles threads and runs auto-review against ids from
+        // its built-in catalog, which the user never picked and cannot change.
+        // Those requests must reach the market as the model that *was* bought.
+        let (tx, rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            if let Ok((mut sock, _)) = listener.accept().await {
+                // Read until the whole body has arrived: headers and body do
+                // not reliably land in one TCP segment.
+                let mut raw = Vec::new();
+                loop {
+                    let mut chunk = [0u8; 2048];
+                    match sock.read(&mut chunk).await {
+                        Ok(0) => break,
+                        Ok(n) => raw.extend_from_slice(&chunk[..n]),
+                        Err(_) => break,
+                    }
+                    let text = String::from_utf8_lossy(&raw).into_owned();
+                    let Some((head, body)) = text.split_once("\r\n\r\n") else { continue };
+                    let want: usize = head
+                        .lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().to_string()))
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    if body.len() >= want {
+                        break;
+                    }
+                }
+                let _ = tx.send(raw);
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                    .await;
+            }
+        });
+        let mut st = state(Some("sk-asale-test")).await;
+        st.server_api_base = format!("http://{addr}");
+        st.store.set_buy_tool("codex", None, Some(&["claude-fable-5".into(), "claude-haiku-4-5".into()]), None, None).await.unwrap();
+        let port = serve(st).await;
+
+        let resp = asale_client_core::http::plain()
+            .post(format!("http://127.0.0.1:{port}/v1/responses"))
+            .json(&serde_json::json!({"model": "gpt-5.6-luna", "input": "title this"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "an internal codex model is served, not 403'd");
+
+        let raw = String::from_utf8_lossy(&rx.await.unwrap()).into_owned();
+        let body = raw.split("\r\n\r\n").nth(1).unwrap_or_default().to_string();
+        let sent: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(sent["model"], "claude-fable-5", "relabelled to the first bought model");
+        assert_eq!(sent["input"], "title this", "the rest of the request survives");
+    }
+
+    #[tokio::test]
+    async fn responses_switch_off_refuses() {
+        let st = state(Some("sk-asale-test")).await;
+        st.store.set_buy_tool("codex", Some(false), None, None, None).await.unwrap();
+        let port = serve(st).await;
+        let resp = asale_client_core::http::plain()
+            .post(format!("http://127.0.0.1:{port}/v1/responses"))
+            .json(&serde_json::json!({"model": "claude-fable-5", "input": "hi"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 403);
+    }
+
+    async fn serve(st: ProxyState) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, router(st)).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        port
+    }
+
+    #[tokio::test]
+    async fn rejects_without_api_key() {
+        let st = state(None).await;
+        let port = serve(st).await;
+        let resp = asale_client_core::http::plain()
+            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .json(&serde_json::json!({"model": "x", "messages": []}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401, "no api key configured -> 401");
+    }
+
+    #[tokio::test]
+    async fn healthz_ok() {
+        let st = state(Some("sk-asale-test")).await;
+        let port = serve(st).await;
+        let resp =
+            asale_client_core::http::plain().get(format!("http://127.0.0.1:{port}/healthz")).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn market_failure_writes_consume_record() {
+        // The market target is unreachable → 502, but a failed forward with a
+        // reachable-but-erroring server records an upstream_<code> row. Here we
+        // exercise the unreachable branch: no row (send() failed before any
+        // upstream status). Then simulate an error status via a local stub.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock
+                    .write_all(b"HTTP/1.1 402 Payment Required\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                    .await;
+            }
+        });
+        let mut st = state(Some("sk-asale-test")).await;
+        st.server_api_base = format!("http://{addr}");
+        let store = st.store.clone();
+        let port = serve(st).await;
+
+        let resp = asale_client_core::http::plain()
+            .post(format!("http://127.0.0.1:{port}/v1/messages"))
+            .json(&serde_json::json!({"model": "claude-sonnet-4-5", "messages": []}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 402, "server error status passes through");
+        let (rows, total) = store.list_consume_records(10, 0).await.unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(rows[0].status, "upstream_402");
+        assert_eq!(rows[0].model, "claude-sonnet-4-5");
+    }
+
+    #[tokio::test]
+    async fn count_tokens_is_forwarded_but_not_metered() {
+        // A stub gateway that answers count_tokens with a normal 200 JSON body.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let body = b"{\"input_tokens\":42}";
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(body).await;
+            }
+        });
+        let mut st = state(Some("sk-asale-test")).await;
+        st.server_api_base = format!("http://{addr}");
+        let store = st.store.clone();
+        let port = serve(st).await;
+
+        let resp = asale_client_core::http::plain()
+            .post(format!("http://127.0.0.1:{port}/v1/messages/count_tokens"))
+            .json(&serde_json::json!({"model": "claude-sonnet-4-5", "messages": []}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "count_tokens forwarded to the gateway");
+        // No consume record: count_tokens is not a billable completion.
+        let (_, total) = store.list_consume_records(10, 0).await.unwrap();
+        assert_eq!(total, 0, "count_tokens must not be metered");
+    }
+
+    #[tokio::test]
+    async fn direct_mode_without_accounts_says_so() {
+        let st = state(Some("sk-asale-test")).await;
+        st.store.set_setting("consume_mode", "direct").await.unwrap();
+        let port = serve(st).await;
+        let resp = asale_client_core::http::plain()
+            .post(format!("http://127.0.0.1:{port}/v1/messages"))
+            .json(&serde_json::json!({"model": "claude-sonnet-4-5"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 503, "direct with no local account -> explicit 503");
+    }
+
+    #[tokio::test]
+    async fn auto_mode_falls_back_to_market_without_accounts() {
+        // auto + empty pool → market → 401 because no asale key is configured.
+        let st = state(None).await;
+        st.store.set_setting("consume_mode", "auto").await.unwrap();
+        let port = serve(st).await;
+        let resp = asale_client_core::http::plain()
+            .post(format!("http://127.0.0.1:{port}/v1/messages"))
+            .json(&serde_json::json!({"model": "claude-sonnet-4-5"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401, "auto fell back to the market route");
+    }
+}

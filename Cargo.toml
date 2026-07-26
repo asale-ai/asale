@@ -1,0 +1,40 @@
+# asale client workspace.
+#
+# The three crates used to be independent packages, each with its own
+# `Cargo.lock` and its own `target/` (2.7 + 6.8 + 13 GB). That meant
+# `asale-client-core` was compiled three times over, and the same dependency
+# could resolve to three different versions in the three lockfiles — including
+# for `asale-daemon`, which ships inside the Tauri shell.
+#
+# One workspace = one lockfile, one target dir, every shared dependency built
+# once. Versions of the crates all three use live in `[workspace.dependencies]`
+# so they can only ever be bumped together.
+
+[workspace]
+resolver = "2"
+members = ["protocol", "core", "daemon", "src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+# The wsrelay wire contract. Lives *inside* this repo on purpose: it is the
+# public half of the protocol, so anyone writing their own publisher has it,
+# and this repo stays buildable on its own. asale-server depends on this path.
+asale-protocol = { path = "protocol" }
+
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.7"
+base64 = "0.22"
+futures-util = "0.3"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }

@@ -1,0 +1,881 @@
+//! Publisher session wiring (spec §5/§9). Bridges the pure `asale-client-core`
+//! wsrelay client to this app's encrypted secret store, local store, and server REST:
+//!
+//!   - `ConfigSource`   registers the device with the server → device_token,
+//!                      resolving fresh credentials on every (re)connect.
+//!   - `SupplySource`   builds the supply declaration from imported accounts and
+//!                      their real rolling-window quota (plan cap − local usage).
+//!   - `TokenProvider`  hands the executor the upstream bearer token, read from
+//!                      the encrypted secret store only at injection time (never
+//!                      persisted elsewhere, never leaves the device — §5.4/§10.1).
+//!   - `RecordSink`     writes per-task metering into `provider_records` (§8).
+//!
+//! Plus the token-refresh loop (§3.4) that proactively renews access tokens.
+
+use crate::keychain;
+use crate::state::AppState;
+use asale_client_core::discovery::{self, RefreshedToken, ToolAdapter};
+use asale_client_core::protocol::{SupplyItem, Usage};
+use asale_protocol::ids::Vendor;
+use asale_client_core::store::LocalStore;
+use asale_client_core::{
+    spawn_publisher, AccountPool, AccountRuntime, ConfigSource, LeasedToken, PauseReason, PublisherDeps,
+    PublisherHandle, Provider, RecordSink, SupplySource, TaskOutcome, TokenProvider, UpstreamErrorKind, WsConfig,
+};
+use async_trait::async_trait;
+use serde_json::json;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::time::Duration;
+
+/// Rolling window used for the local quota estimate (5h, spec §P0-1).
+const WINDOW_SECS: i64 = 5 * 3600;
+
+// ── Sellable model catalog (server-authoritative) ──────────────────────────
+
+/// Settings key holding the last catalog pulled from `/market/models`.
+const CATALOG_KEY: &str = "sellable_catalog";
+
+/// How stale the cached catalog may get before it is pulled again. An operator
+/// enabling a model on the server should reach sellers within a coffee break,
+/// not at the next restart.
+const CATALOG_TTL: i64 = 600;
+
+/// What this device may advertise, per local provider, as of `fetched_at`.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+struct SellableCatalog {
+    fetched_at: i64,
+    by_provider: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+/// Fallback advertised models, used only until the first successful catalog
+/// pull (a fresh install that starts offline would otherwise sell nothing).
+///
+/// These are native vendor API ids, because the gateway relays the id a
+/// consumer asked for verbatim — see `native_model_name` on the server.
+fn fallback_models(provider: &str) -> &'static [&'static str] {
+    match provider {
+        "claude" | "claude_work" => &["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
+        "codex" => &["gpt-5-codex"],
+        "gemini" => &["gemini-2.5-pro", "gemini-2.5-flash"],
+        _ => &[],
+    }
+}
+
+/// Catalog vendor (`prices.provider`, an OpenRouter vendor slug) → the local
+/// providers whose subscriptions can serve it.
+///
+/// The mapping itself lives in `asale-protocol` (`Vendor::providers`) because
+/// the server's catalog writes those same slugs. Unknown slugs — including
+/// OpenRouter's own `~vendor` routing aliases (`claude-opus-latest`) — map to
+/// nothing on purpose: they are not ids any vendor API accepts, so relaying one
+/// would fail upstream.
+fn providers_for_vendor(vendor: &str) -> &'static [Provider] {
+    match Vendor::from_str_opt(vendor) {
+        Some(v) => v.providers(),
+        None => &[],
+    }
+}
+
+/// Whether a catalog row answers in text. A subscription relays chat traffic;
+/// an image/audio endpoint is a different API surface the executor cannot
+/// serve. An unknown modality is treated as text rather than dropped, so a
+/// sparse catalog row does not silently remove sellable capacity.
+fn produces_text(modality: &str) -> bool {
+    match modality.split_once("->") {
+        Some((_, out)) => out.contains("text"),
+        None => true,
+    }
+}
+
+/// Models this provider may advertise right now.
+///
+/// The server's `prices` table is the only authority on what can be traded —
+/// `gateway::relay` refuses to relay a model it has no enabled price row for,
+/// so anything advertised beyond that list is capacity no consumer can buy.
+/// A cached answer is used even when it is empty: "the platform trades nothing
+/// this subscription can serve" is a real answer, and falling back to the
+/// built-in list there would re-create the very mismatch this replaces.
+fn sellable_models(catalog: &Option<SellableCatalog>, provider: &str) -> Vec<String> {
+    match catalog {
+        Some(c) => c.by_provider.get(provider).cloned().unwrap_or_default(),
+        None => fallback_models(provider).iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+/// The cached catalog, or None when nothing has been pulled yet.
+async fn load_catalog(store: &LocalStore) -> Option<SellableCatalog> {
+    store
+        .get_setting(CATALOG_KEY)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<SellableCatalog>(&raw).ok())
+        .filter(|c| c.fetched_at > 0)
+}
+
+/// Pull the tradable catalog and cache it. Returns whether the model set moved,
+/// which is the caller's cue to rebuild the pool and re-declare.
+pub async fn refresh_sellable_catalog(store: &LocalStore, api_base: &str) -> anyhow::Result<bool> {
+    let http = asale_client_core::http::plain();
+    let resp = http.get(format!("{api_base}/api/v1/market/models")).send().await?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await?;
+    let rows = body
+        .get("models")
+        .and_then(|m| m.as_array())
+        .ok_or_else(|| anyhow::anyhow!("market/models returned {status}: {body}"))?;
+
+    let mut by_provider: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for row in rows {
+        let model = row.get("model").and_then(|v| v.as_str()).unwrap_or_default();
+        let vendor = row.get("provider").and_then(|v| v.as_str()).unwrap_or_default();
+        let modality = row.get("modality").and_then(|v| v.as_str()).unwrap_or_default();
+        if model.is_empty() || !produces_text(modality) {
+            continue;
+        }
+        for p in providers_for_vendor(vendor) {
+            by_provider.entry(p.as_str().to_string()).or_default().push(model.to_string());
+        }
+    }
+    for list in by_provider.values_mut() {
+        list.sort();
+        list.dedup();
+    }
+
+    let previous = store
+        .get_setting(CATALOG_KEY)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<SellableCatalog>(&raw).ok())
+        .unwrap_or_default();
+    let changed = previous.by_provider != by_provider;
+    let fresh = SellableCatalog { fetched_at: now_secs(), by_provider };
+    store.set_setting(CATALOG_KEY, &serde_json::to_string(&fresh)?).await?;
+    if changed {
+        tracing::info!("sellable catalog updated: {:?}", fresh.by_provider);
+    }
+    Ok(changed)
+}
+
+/// Whether the cached catalog is due for a pull.
+async fn catalog_is_stale(store: &LocalStore) -> bool {
+    let fetched_at = load_catalog(store).await.map(|c| c.fetched_at).unwrap_or(0);
+    now_secs() - fetched_at >= CATALOG_TTL
+}
+
+// ── Publisher policy (server-authoritative, mirrored locally) ──────────────
+
+/// Local mirror of the server's `PublishConfig` (`GET/PUT /me/publish-config`).
+///
+/// The server owns this: it is applied there at every supply.declare and is
+/// what a fresh install, a second device, or the operator sees. The mirror
+/// exists so the client can render and pre-apply the policy while offline —
+/// never as a second source of truth. Only `min_price` is applied locally
+/// (as the declared floor); the reserve floor and the model lists are left to
+/// the server, or they would be applied twice.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct PublishPolicy {
+    #[serde(default)]
+    pub reserve_floor: i64,
+    #[serde(default)]
+    pub max_rpm: i32,
+    #[serde(default)]
+    pub min_price: i64,
+    #[serde(default)]
+    pub model_whitelist: Vec<String>,
+    #[serde(default)]
+    pub model_blacklist: Vec<String>,
+}
+
+/// Settings key holding the mirrored policy JSON.
+pub const POLICY_KEY: &str = "publish_policy";
+
+/// The mirrored policy, or defaults when it has never been pulled.
+pub async fn local_policy(store: &LocalStore) -> PublishPolicy {
+    let raw = store.get_setting(POLICY_KEY).await.ok().flatten().unwrap_or_default();
+    let mut policy: PublishPolicy = serde_json::from_str(&raw).unwrap_or_default();
+    // Pre-mirror installs kept the price floor in its own setting; honour it
+    // until the first pull replaces the whole policy.
+    if policy.min_price == 0 {
+        if let Ok(Some(legacy)) = store.get_setting("publish_price_min").await {
+            policy.min_price = legacy.parse().unwrap_or(0);
+        }
+    }
+    policy
+}
+
+/// Replace the mirrored policy.
+pub async fn store_policy(store: &LocalStore, policy: &PublishPolicy) -> anyhow::Result<()> {
+    store.set_setting(POLICY_KEY, &serde_json::to_string(policy)?).await?;
+    Ok(())
+}
+
+/// Build the adapter for a provider using the resolved public client ids.
+pub fn adapter_for(provider: &str) -> Option<Box<dyn ToolAdapter>> {
+    match provider {
+        "claude" => Some(Box::new(discovery::ClaudeAdapter::new(false, crate::oauth::claude_client_id()))),
+        "claude_work" => Some(Box::new(discovery::ClaudeAdapter::new(true, crate::oauth::claude_client_id()))),
+        "codex" => Some(Box::new(discovery::CodexAdapter::new(crate::oauth::codex_client_id()))),
+        "gemini" => Some(Box::new(discovery::GeminiAdapter::new(
+            crate::oauth::gemini_client_id(),
+            crate::oauth::gemini_client_secret(),
+        ))),
+        _ => None,
+    }
+}
+
+// ── ConfigSource: register device → device_token for the WS handshake ───────
+
+struct RestConfigSource {
+    server_api_base: String,
+    gateway_ws_url: String,
+    device_id: String,
+    device_pubkey: String,
+}
+
+#[async_trait]
+impl ConfigSource for RestConfigSource {
+    async fn ws_config(&self) -> anyhow::Result<WsConfig> {
+        let access = keychain::get("access_token")?.ok_or_else(|| anyhow::anyhow!("not signed in"))?;
+        let http = asale_client_core::http::plain();
+        let resp = http
+            .post(format!("{}/api/v1/devices", self.server_api_base))
+            .header("authorization", format!("Bearer {access}"))
+            .json(&json!({"device_id": self.device_id, "device_pubkey": self.device_pubkey}))
+            .send()
+            .await?;
+        let v: serde_json::Value = resp.json().await?;
+        let device_token = v
+            .get("device_token")
+            .and_then(|t| t.as_str())
+            .ok_or_else(|| anyhow::anyhow!("device registration failed: {v}"))?
+            .to_string();
+        Ok(WsConfig {
+            gateway_ws_url: self.gateway_ws_url.clone(),
+            device_id: self.device_id.clone(),
+            device_token,
+        })
+    }
+}
+
+// ── SupplySource: the pool's lanes → supply items ───────────────────────────
+
+/// Builds the declaration from the account pool, one entry per `(provider,
+/// model)` lane.
+///
+/// The pool — not the `tools` table — is the source here because it is the only
+/// place that knows the *runtime* half of a lane's state: what is cooling after
+/// an upstream error, what the breaker has taken out, what a rate limit
+/// suspended until when. `rebuild_pool` keeps its stored half (sell switches,
+/// quota, daily caps) current, so reading one structure gives the whole
+/// picture.
+///
+/// A lane that cannot serve is still declared, with `available: false` and the
+/// reason. Dropping it instead would leave the seller staring at an empty
+/// market board with no explanation, and the gateway with no way to tell
+/// "withheld" from "this device fell over".
+struct PoolSupplySource {
+    store: Arc<LocalStore>,
+    pool: Arc<StdMutex<AccountPool>>,
+}
+
+/// What all of one provider+model's accounts add up to.
+#[derive(Default)]
+struct LaneOffer {
+    window_remaining: i64,
+    concurrency_free: i32,
+    /// Set only when nothing can serve the lane; the reason to show.
+    pause: Option<(String, i64)>,
+}
+
+#[async_trait]
+impl SupplySource for PoolSupplySource {
+    async fn declare_items(&self) -> serde_json::Value {
+        build_supply_items(&self.store, &self.pool).await
+    }
+}
+
+/// The declaration this device would send right now, as a JSON array of
+/// `SupplyItem`. Split out from the trait so it can be exercised directly.
+pub async fn build_supply_items(store: &LocalStore, pool: &StdMutex<AccountPool>) -> serde_json::Value {
+    let price_min: i64 = local_policy(store).await.min_price;
+    let now = now_secs();
+    let views = match pool.lock() {
+        Ok(p) => p.lane_views(now),
+        Err(_) => return json!([]),
+    };
+
+    let mut offers: std::collections::BTreeMap<(String, String), LaneOffer> = Default::default();
+    for v in views {
+        // An account the operator has not switched on for selling is not on
+        // the market at all — not even as a paused lane.
+        if !v.sell_enabled {
+            continue;
+        }
+        let offer = offers.entry((v.provider.clone(), v.model.clone())).or_default();
+        if v.status == "selling" {
+            // Each account's headroom is its own (spec §4): summing here
+            // never lets one account borrow another's quota, because
+            // `rebuild_pool` computed each figure from that account's own
+            // usage and its own daily cap.
+            offer.window_remaining += v.quota_remaining as i64;
+            offer.concurrency_free += 4;
+        } else {
+            let reason = v.paused_reason.clone().unwrap_or_else(|| match v.status.as_str() {
+                "cooldown" => "cooldown".into(),
+                "expired" => "auth".into(),
+                other => other.into(), // exhausted → quota, below
+            });
+            let reason = if reason == "exhausted" { "quota".into() } else { reason };
+            let resume_at = v.resume_at.max(v.cooldown_until.unwrap_or(0));
+            // Prefer the reason that comes back soonest, so a lane with one
+            // broken account and one merely cooling reads as "back in 30s"
+            // rather than "needs attention".
+            let better = match &offer.pause {
+                None => true,
+                Some((_, prev)) => soonest(resume_at, *prev),
+            };
+            if better {
+                offer.pause = Some((reason, resume_at));
+            }
+        }
+    }
+
+    // Built as the shared `SupplyItem`, not as a hand-spelled `json!` object:
+    // this is the frame the gateway deserializes into that very struct, so the
+    // field names are the server's to choose and ours to compile against.
+    let items: Vec<SupplyItem> = offers
+        .into_iter()
+        .filter_map(|((provider, model), o)| {
+            // A provider this build does not know is not declarable — the
+            // gateway would reject the whole frame on the unknown variant.
+            let provider = Provider::from_str_opt(&provider)?;
+            let item = SupplyItem::offered(
+                &model,
+                provider,
+                o.window_remaining,
+                price_min,
+                "",
+                o.concurrency_free,
+            );
+            Some(if o.window_remaining > 0 {
+                item
+            } else {
+                let (reason, resume_at) = o.pause.unwrap_or_else(|| ("quota".to_string(), 0));
+                item.paused(&reason, resume_at)
+            })
+        })
+        .collect();
+    json!(items)
+}
+
+/// Whether `a` is a nearer (and known) return time than `b`. 0 means "needs the
+/// operator", which is the furthest away there is.
+fn soonest(a: i64, b: i64) -> bool {
+    match (a, b) {
+        (0, _) => false,
+        (_, 0) => true,
+        (a, b) => a < b,
+    }
+}
+
+/// Resolve the plan label for a tool row: prefer the settings entry written at
+/// OAuth/import time, fall back to the tools column.
+async fn resolve_plan(store: &LocalStore, tool: &asale_client_core::store::ToolRow) -> Option<String> {
+    if let Ok(Some(p)) = store.get_setting(&format!("plan:{}:{}", tool.provider, tool.account_id)).await {
+        if !p.is_empty() {
+            return Some(p);
+        }
+    }
+    tool.plan.clone()
+}
+
+// ── TokenProvider: pool-selected account, secret-store lookup at injection ──
+
+/// A lane state change worth acting on outside the executor's hot path.
+///
+/// `report` runs on the task's thread holding the pool lock, so it must not
+/// touch SQLite or the socket. It posts one of these instead; `spawn_lane_loop`
+/// does the slow half — persist the pause, then re-declare supply so the
+/// gateway stops sending work this device has just decided it cannot do.
+#[derive(Debug, Clone)]
+pub struct LaneEvent {
+    pub provider: String,
+    pub account_id: String,
+    pub model: String,
+    /// None = the lane merely changed (cooldown, quota decay): re-declare only.
+    pub paused: Option<String>,
+    pub last_error: String,
+}
+
+pub type LaneSender = tokio::sync::mpsc::UnboundedSender<LaneEvent>;
+
+/// Pool-backed token provider (spec §4). `acquire` picks an account whose lane
+/// for the requested model is serving, reads its token from the encrypted
+/// secret store at injection time, and `report` feeds the outcome back into the
+/// lane's recovery ladder (§4.5).
+pub struct PoolTokens {
+    pub pool: Arc<StdMutex<AccountPool>>,
+    pub lanes: Option<LaneSender>,
+}
+
+impl PoolTokens {
+    fn emit(&self, provider: &str, account_id: &str, model: &str, paused: Option<PauseReason>, last_error: &str) {
+        let Some(tx) = &self.lanes else { return };
+        let _ = tx.send(LaneEvent {
+            provider: provider.to_string(),
+            account_id: account_id.to_string(),
+            model: model.to_string(),
+            paused: paused.map(|r| r.as_str().to_string()),
+            last_error: last_error.to_string(),
+        });
+    }
+}
+
+impl TokenProvider for PoolTokens {
+    fn token_for(&self, provider: &str) -> Option<String> {
+        self.acquire(provider, "").map(|l| l.token)
+    }
+
+    fn acquire(&self, provider: &str, model: &str) -> Option<LeasedToken> {
+        // Sale traffic may only ever be served by an account the user switched
+        // on for selling, on a lane that is not cooling or paused —
+        // `pick_for_sale`, not `pick`.
+        let picked = self.pool.lock().ok()?.pick_for_sale(provider, model, now_secs())?;
+        match keychain::get(&picked.keychain_ref).ok().flatten() {
+            Some(token) => Some(LeasedToken { token, account_id: picked.account_id }),
+            None => {
+                // Keychain entry vanished — release the lease and flag the account.
+                let paused = self.pool.lock().ok().and_then(|mut pool| {
+                    pool.on_error(provider, &picked.account_id, model, UpstreamErrorKind::AuthFailed, "missing credential", now_secs())
+                });
+                self.emit(provider, &picked.account_id, model, paused, "missing credential");
+                None
+            }
+        }
+    }
+
+    fn report(&self, provider: &str, account_id: &str, model: &str, outcome: TaskOutcome) {
+        if account_id.is_empty() {
+            return;
+        }
+        let now = now_secs();
+        let (paused, detail) = {
+            let Ok(mut pool) = self.pool.lock() else { return };
+            match outcome {
+                TaskOutcome::Success { tokens_used } => {
+                    pool.on_success(provider, account_id, model, tokens_used);
+                    (None, String::new())
+                }
+                TaskOutcome::RateLimited { reset_at } => {
+                    let d = "upstream rate limit (429)";
+                    (pool.on_error(provider, account_id, model, UpstreamErrorKind::RateLimited { reset_at }, d, now), d.to_string())
+                }
+                TaskOutcome::ServerError => {
+                    let d = "upstream error (5xx/transport)";
+                    (pool.on_error(provider, account_id, model, UpstreamErrorKind::ServerError, d, now), d.to_string())
+                }
+                TaskOutcome::AuthFailed => {
+                    let d = "authentication failed (401/403)";
+                    (pool.on_error(provider, account_id, model, UpstreamErrorKind::AuthFailed, d, now), d.to_string())
+                }
+            }
+        };
+        // A success is worth reporting too: it may have cleared a cooldown, and
+        // the market should hear about restored capacity as promptly as it
+        // hears about lost capacity.
+        self.emit(provider, account_id, model, paused, &detail);
+    }
+}
+
+/// Receives `control` frames the gateway sends when *its* backstop takes one of
+/// this device's lanes out (spec §4.5). The client usually gets there first;
+/// this is what keeps the two views from diverging when it does not.
+pub struct GatewayLaneControl {
+    pub pool: Arc<StdMutex<AccountPool>>,
+    pub lanes: Option<LaneSender>,
+}
+
+impl asale_client_core::LaneControl for GatewayLaneControl {
+    fn on_lane_pause(&self, model: &str, reason: &str, requires_user: bool) {
+        if model.is_empty() {
+            return;
+        }
+        // Which account served it is not in the frame — the gateway only knows
+        // the device — so every account that sells this model is paused. They
+        // share one device and one operator; a resume clears them together.
+        //
+        // Prefer the gateway's own reason: it distinguishes cases the client
+        // cannot infer (a model the platform stopped trading is not a rate
+        // limit), and `requires_user` alone would collapse them all into two.
+        let cause = PauseReason::parse(reason)
+            .unwrap_or(if requires_user { PauseReason::Breaker } else { PauseReason::RateLimit });
+        let mut touched: Vec<(String, String)> = Vec::new();
+        if let Ok(mut pool) = self.pool.lock() {
+            for v in pool.lane_views(now_secs()) {
+                if v.model == model && v.sell_enabled {
+                    touched.push((v.provider, v.account_id));
+                }
+            }
+            for (provider, account_id) in &touched {
+                pool.pause_lane(provider, account_id, model, cause, 0);
+            }
+        }
+        for (provider, account_id) in touched {
+            if let Some(tx) = &self.lanes {
+                let _ = tx.send(LaneEvent {
+                    provider,
+                    account_id,
+                    model: model.to_string(),
+                    paused: Some(cause.as_str().to_string()),
+                    last_error: format!("gateway: {reason}"),
+                });
+            }
+        }
+    }
+}
+
+/// Rebuild the pool's account set from the store (called at startup, after any
+/// account change, and periodically so quota estimates stay fresh). Preserves
+/// live cooldown state for accounts that persist.
+pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
+    let tools = match store.list_tools().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("pool rebuild: list_tools failed: {e}");
+            return;
+        }
+    };
+    let catalog = load_catalog(store).await;
+    let mut fresh = Vec::new();
+    for tool in &tools {
+        let plan = resolve_plan(store, tool).await;
+        let expires_at: Option<i64> = store
+            .get_setting(&exp_key(&tool.provider, &tool.account_id))
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok());
+        // Usage is attributed to the exact account that served it, so each
+        // account's window estimate is its own — no splitting a family total.
+        let used_window = store
+            .served_tokens_since_for_account(WINDOW_SECS, &tool.provider, &tool.account_id)
+            .await
+            .unwrap_or(0);
+        let used_today = store
+            .served_tokens_today_for_account(&tool.provider, &tool.account_id)
+            .await
+            .unwrap_or(0);
+        let mut quota = match Provider::from_str_opt(&tool.provider) {
+            Some(prov) => {
+                discovery::estimate_quota_window(prov, plan.as_deref(), used_window, None).est_serviceable_tokens
+            }
+            None => 0,
+        };
+        // The daily sell cap clamps the estimate, so an account that has hit its
+        // cap reports `exhausted` and drops out of selection until UTC midnight.
+        if tool.sell_daily_limit > 0 {
+            quota = quota.min((tool.sell_daily_limit as u64).saturating_sub(used_today));
+        }
+        let mut a = AccountRuntime::new(&tool.provider, &tool.account_id, &tool.keychain_ref)
+            .with_models(sellable_models(&catalog, &tool.provider));
+        a.plan = plan;
+        a.quota_remaining = quota;
+        a.expires_at = expires_at;
+        a.sell_enabled = tool.sell_enabled;
+        a.origin = tool.origin.clone();
+        a.used_today = used_today;
+        a.sell_daily_limit = tool.sell_daily_limit;
+        fresh.push(a);
+    }
+    // Pauses that need a person outlive the process: without this a restart
+    // would put a lane the operator was asked to fix straight back on the
+    // market, which is exactly the flapping the breaker exists to stop.
+    let persisted = store.list_lane_pauses().await.unwrap_or_default();
+    if let Ok(mut p) = pool.lock() {
+        p.set_accounts(fresh);
+        for (provider, account_id, model, reason, _err) in persisted {
+            if let Some(r) = PauseReason::parse(&reason) {
+                p.pause_lane(&provider, &account_id, &model, r, 0);
+            }
+        }
+    }
+}
+
+/// Drain lane state changes: persist the ones a person has to clear, then push
+/// the new offering to the gateway (spec §4.5 recovery).
+///
+/// The nudge is the whole point. A lane this device has paused but never
+/// re-declared stays in the gateway's rotation for up to a full refresh
+/// interval, and every request routed there in the meantime fails, costs the
+/// consumer a failover and this device a reputation hit.
+pub fn spawn_lane_loop(
+    store: Arc<LocalStore>,
+    publisher: Arc<tokio::sync::RwLock<Option<PublisherHandle>>>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<LaneEvent>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            match ev.paused.as_deref().and_then(PauseReason::parse) {
+                Some(r) if r.requires_user() => {
+                    tracing::warn!(
+                        provider = %ev.provider, account = %ev.account_id, model = %ev.model,
+                        "lane paused ({}) — waiting for the operator: {}", r.as_str(), ev.last_error
+                    );
+                    let _ = store
+                        .set_lane_pause(&ev.provider, &ev.account_id, &ev.model, r.as_str(), &ev.last_error, now_secs())
+                        .await;
+                }
+                Some(r) => tracing::info!(
+                    provider = %ev.provider, model = %ev.model,
+                    "lane paused ({}) — resumes on its own", r.as_str()
+                ),
+                None => {}
+            }
+            if let Some(h) = publisher.read().await.as_ref() {
+                h.nudge();
+            }
+        }
+    })
+}
+
+/// Wake up exactly when a lane becomes serviceable again and re-declare.
+///
+/// The clocks that bring capacity back on their own are a lane's own
+/// `resume_at` (a rate limit's reset, a cooldown rung), the UTC day rollover
+/// that clears the per-account daily sell caps, and the platform listing a
+/// model it was not trading before. The first two are known instants, so
+/// waiting for the 60s periodic re-declaration to stumble over them just
+/// leaves capacity idle and the seller unpaid for up to a minute; the third is
+/// polled on `CATALOG_TTL`.
+pub fn spawn_recovery_loop(
+    store: Arc<LocalStore>,
+    pool: Arc<StdMutex<AccountPool>>,
+    publisher: Arc<tokio::sync::RwLock<Option<PublisherHandle>>>,
+    server_api_base: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let now = now_secs();
+            let lane_at = pool.lock().ok().and_then(|p| p.next_auto_resume(now));
+            let midnight = next_utc_midnight(now);
+            // Cap the sleep so a lane that starts cooling *after* we computed
+            // this still gets a timely wake-up.
+            let wake = lane_at.unwrap_or(i64::MAX).min(midnight).min(now + 60);
+            let delay = (wake - now).max(1) as u64;
+            tokio::time::sleep(Duration::from_secs(delay)).await;
+
+            // A model the platform started (or stopped) trading changes which
+            // lanes exist at all, so this has to land before the rebuild.
+            let mut catalog_changed = false;
+            if catalog_is_stale(&store).await {
+                match refresh_sellable_catalog(&store, &server_api_base).await {
+                    Ok(changed) => catalog_changed = changed,
+                    Err(e) => tracing::warn!("sellable catalog refresh failed: {e}"),
+                }
+            }
+
+            // Recompute quota/daily-cap headroom, then let the pool decide
+            // whether anything actually became serviceable.
+            rebuild_pool(&store, &pool).await;
+            let ready = pool
+                .lock()
+                .map(|p| p.lane_views(now_secs()).iter().any(|v| v.status == "selling"))
+                .unwrap_or(false);
+            // A catalog change must be pushed even when nothing is serving:
+            // withdrawing a model the platform dropped is exactly as urgent as
+            // announcing one it added.
+            if ready || catalog_changed {
+                if let Some(h) = publisher.read().await.as_ref() {
+                    h.nudge();
+                }
+            }
+        }
+    })
+}
+
+/// Start of the next UTC day, in unix seconds.
+fn next_utc_midnight(now: i64) -> i64 {
+    const DAY: i64 = 86_400;
+    now - now.rem_euclid(DAY) + DAY
+}
+
+// ── RecordSink: per-task metering into provider_records ─────────────────────
+
+struct StoreRecordSink {
+    store: Arc<LocalStore>,
+}
+
+#[async_trait]
+impl RecordSink for StoreRecordSink {
+    async fn record(&self, task_id: &str, provider: &str, account_id: &str, model: &str, usage: &Usage, status: &str) {
+        let _ = self
+            .store
+            .insert_provider_record(
+                task_id,
+                provider,
+                account_id,
+                model,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_tokens,
+                usage.cache_write_tokens,
+                status,
+            )
+            .await;
+    }
+}
+
+// ── Public entry points (called by commands.rs) ─────────────────────────────
+
+/// Start the publisher session. Returns the handle whose state the UI polls.
+pub async fn start(state: &AppState) -> anyhow::Result<PublisherHandle> {
+    // Fail fast if not signed in — the device can't register otherwise.
+    if keychain::get("access_token")?.is_none() {
+        anyhow::bail!("sign in before publishing");
+    }
+    let lane_tx = state.lane_tx.clone();
+    let cfg_src: Arc<dyn ConfigSource> = Arc::new(RestConfigSource {
+        server_api_base: state.cfg.server_api_base.clone(),
+        gateway_ws_url: state.cfg.gateway_ws_url.clone(),
+        device_id: state.device_id.clone(),
+        device_pubkey: state.identity.public_key_b64(),
+    });
+
+    // Declare against what the platform trades *now*, not what it traded when
+    // the daemon last polled — going on the market is exactly the moment a
+    // stale catalog would cost the seller a lane.
+    if catalog_is_stale(&state.store).await {
+        if let Err(e) = refresh_sellable_catalog(&state.store, &state.cfg.server_api_base).await {
+            tracing::warn!("sellable catalog refresh failed, using the cached set: {e}");
+        }
+    }
+    // Make sure the pool reflects the current account set before serving.
+    rebuild_pool(&state.store, &state.pool).await;
+    // Resolved before the socket opens, and fatal when absent: a build with no
+    // pinned gateway key cannot tell an authorized dispatch from a forged one,
+    // and the cost of guessing wrong is the user's own subscription.
+    let deps = PublisherDeps::with_pinned_quota_key(
+        state.identity.clone(),
+        Arc::new(PoolTokens { pool: state.pool.clone(), lanes: Some(lane_tx.clone()) }),
+        Arc::new(PoolSupplySource { store: state.store.clone(), pool: state.pool.clone() }),
+        Some(Arc::new(StoreRecordSink { store: state.store.clone() })),
+        Some(Arc::new(GatewayLaneControl { pool: state.pool.clone(), lanes: Some(lane_tx) })),
+    )?;
+
+    Ok(spawn_publisher(cfg_src, deps))
+}
+
+/// The token-refresh loop (spec §3.4): every minute, renew any subscription
+/// access token nearing expiry using its refresh token, persisting the result.
+/// Also rebuilds the account pool so quota estimates and refreshed expiries
+/// propagate into selection (spec §4).
+pub fn spawn_refresh_loop(store: Arc<LocalStore>, pool: Arc<StdMutex<AccountPool>>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            if let Err(e) = refresh_due_tokens(&store).await {
+                tracing::warn!("token refresh cycle error: {e}");
+            }
+            rebuild_pool(&store, &pool).await;
+        }
+    })
+}
+
+async fn refresh_due_tokens(store: &LocalStore) -> anyhow::Result<()> {
+    let tools = store.list_tools().await?;
+    let now = now_secs();
+    for tool in tools {
+        let adapter = match adapter_for(&tool.provider) {
+            Some(a) => a,
+            None => continue,
+        };
+        let exp: Option<i64> = store
+            .get_setting(&exp_key(&tool.provider, &tool.account_id))
+            .await?
+            .and_then(|s| s.parse().ok());
+        if !discovery::needs_refresh(exp, adapter.refresh_lead(), now) {
+            continue;
+        }
+        let refresh_token = match keychain::get(&keychain::refresh_ref(&tool.provider, &tool.account_id))? {
+            Some(r) if !r.is_empty() => r,
+            _ => continue,
+        };
+        match adapter.refresh(&refresh_token).await {
+            Ok(t) => persist_refresh(store, &tool.provider, &tool.account_id, &t).await?,
+            Err(e) => tracing::warn!(provider = %tool.provider, "refresh failed: {e}"),
+        }
+    }
+    Ok(())
+}
+
+/// Persist a refreshed token set into the secret store + local store (spec §3.4).
+pub async fn persist_refresh(
+    store: &LocalStore,
+    provider: &str,
+    account_id: &str,
+    t: &RefreshedToken,
+) -> anyhow::Result<()> {
+    keychain::set(&keychain::token_ref(provider, account_id), &t.access_token)?;
+    if let Some(r) = &t.refresh_token {
+        keychain::set(&keychain::refresh_ref(provider, account_id), r)?;
+    }
+    if let Some(exp) = t.expires_at {
+        store.set_setting(&exp_key(provider, account_id), &exp.to_string()).await?;
+    }
+    Ok(())
+}
+
+pub fn exp_key(provider: &str, account_id: &str) -> String {
+    format!("tokexp:{provider}:{account_id}")
+}
+
+fn now_secs() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_vendors_a_subscription_can_serve_are_mapped() {
+        assert_eq!(
+            providers_for_vendor("anthropic"),
+            &[Provider::Claude, Provider::ClaudeWork]
+        );
+        assert_eq!(providers_for_vendor("openai"), &[Provider::Codex]);
+        assert_eq!(providers_for_vendor("google"), &[Provider::Gemini]);
+        // OpenRouter routing aliases are not ids any vendor API accepts.
+        assert!(providers_for_vendor("~anthropic").is_empty());
+        assert!(providers_for_vendor("meta-llama").is_empty());
+    }
+
+    #[test]
+    fn only_text_answering_models_are_sellable() {
+        assert!(produces_text("text->text"));
+        assert!(produces_text("text+image->text"));
+        assert!(!produces_text("text->image"));
+        // An unknown modality must not silently remove capacity.
+        assert!(produces_text(""));
+    }
+
+    /// A cached catalog is the answer even when it lists nothing for this
+    /// provider — falling back to the built-in list there would put capacity
+    /// back on the market that the platform refuses to relay.
+    #[test]
+    fn the_built_in_list_is_only_used_before_the_first_pull() {
+        let none = None;
+        assert_eq!(sellable_models(&none, "claude"), vec!["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"]);
+
+        let mut by_provider = std::collections::BTreeMap::new();
+        by_provider.insert("claude".to_string(), vec!["claude-sonnet-5".to_string()]);
+        let pulled = Some(SellableCatalog { fetched_at: 1, by_provider });
+        assert_eq!(sellable_models(&pulled, "claude"), vec!["claude-sonnet-5"]);
+        assert!(sellable_models(&pulled, "gemini").is_empty(), "the catalog's silence is an answer");
+    }
+}

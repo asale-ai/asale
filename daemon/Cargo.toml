@@ -1,0 +1,44 @@
+[package]
+name = "asale-daemon"
+version.workspace = true
+edition.workspace = true
+description = "asale client daemon — all native + server-communication logic behind a local HTTP API. The Tauri shell and any browser (Chrome, incl. remote/headless B/S) are thin frontends over this."
+default-run = "asaled"
+
+[lib]
+name = "asale_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "asaled"
+path = "src/main.rs"
+
+[dependencies]
+asale-client-core = { path = "../core" }
+asale-protocol.workspace = true
+
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+base64.workspace = true
+futures-util.workspace = true
+rand.workspace = true
+reqwest = { workspace = true, features = ["stream", "socks"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+chacha20poly1305 = "0.10"
+mime_guess = "2"
+# Best-effort "open the OAuth page in the local browser" when a desktop is present.
+open = "5"
+# Embedded web UI (../dist) so a single `asaled` binary serves the full app
+# in B/S mode (headless Linux + remote Chrome).
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
+# Format-preserving TOML edits for Codex's ~/.codex/config.toml.
+toml_edit = "0.22"
+tower-http = { version = "0.5", features = ["cors"] }

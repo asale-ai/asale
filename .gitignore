@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Frontend build output
+dist/
+
+# Rust build output (core/ and src-tauri/)
+target/
+
+# Tauri generated schemas
+src-tauri/gen/schemas/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+
+# Logs
+*.log
+.pnpm-debug.log*
+
+# OS
+.DS_Store
