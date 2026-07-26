@@ -95,15 +95,20 @@ jobs:
       TAURI_WINDOWS_CERT_THUMBPRINT: ${{ secrets.TAURI_WINDOWS_CERT_THUMBPRINT }}
 
     steps:
-      - uses: actions/checkout@v4
+      # 下面几个 action 都钉在 node24 运行时的大版本上：v4 系列跑的是 node20，
+      # runner 已经不再提供，只会被强制降级执行并每次打 deprecation 告警。
+      - uses: actions/checkout@v5
 
-      - uses: pnpm/action-setup@v4
+      # v6 才正式支持安装 pnpm 11（v4/v5 的版本解析不认），这里 version 钉了 11。
+      - uses: pnpm/action-setup@v6
         with:
           # package.json 里没有 packageManager 字段，版本得在这儿钉。
           # pnpm-workspace.yaml 用了 onlyBuiltDependencies（pnpm 10+ 才认）。
           version: 11
 
-      - uses: actions/setup-node@v4
+      # v5 起会在 package.json 有 packageManager 字段时自动开缓存；这里显式给了
+      # cache/cache-dependency-path，行为不变。
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: pnpm
@@ -214,7 +219,7 @@ jobs:
           # 别让 job 绿着过去。
           [[ -n "$(ls -A artifacts/)" ]] || { echo "::error::没有任何安装包产物"; exit 1; }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
           path: artifacts/*
@@ -228,9 +233,9 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dl
           merge-multiple: true # 三个平台的包平铺到 dl/
