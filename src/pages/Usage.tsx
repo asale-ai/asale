@@ -11,7 +11,7 @@ import { IconUsage, IconRefresh, IconInfo } from "../icons";
 const PERIODS: UsagePeriod[] = ["day", "week", "month", "total"];
 const SCOPES: UsageScope[] = ["used", "bought", "sold"];
 
-// Model → provider family, for grouping cards + coloring.
+// Model → provider family, for grouping the cards.
 const FAMILY = (model: string): "claude" | "codex" | "gemini" | "other" => {
   const m = model.toLowerCase();
   if (m.includes("claude")) return "claude";
@@ -19,13 +19,13 @@ const FAMILY = (model: string): "claude" | "codex" | "gemini" | "other" => {
   if (m.includes("gemini")) return "gemini";
   return "other";
 };
-const FAMILY_COLOR: Record<string, string> = { claude: "#d97757", codex: "#4b5fd6", gemini: "#4285f4", other: "#10a37f" };
-// A model's bar color: family base, lightened a touch per repeated model so
-// several models of the same family stay distinguishable in the distribution.
-const modelColor = (model: string, idx: number) => {
-  const base = FAMILY_COLOR[FAMILY(model)];
-  return `color-mix(in srgb, ${base} ${Math.max(45, 100 - idx * 14)}%, #808080)`;
-};
+
+/** One hue, six steps. A distribution is ordered data, not four unrelated
+ *  brands: ranking it by weight of the same accent reads instantly and keeps
+ *  the page to a single colour. */
+const rampStep = (idx: number) => Math.max(18, 100 - idx * 17);
+const rampColor = (idx: number) =>
+  `color-mix(in srgb, var(--accent) ${rampStep(idx)}%, var(--surface-3))`;
 
 /** Ease-out count-up between value changes. */
 function useCountUp(target: number, ms = 650): number {
@@ -125,18 +125,18 @@ export function Usage() {
         {/* ── Side column ── */}
         <div className="usage-side">
           {/* Rolling stat strip */}
-          <Card style={{ marginBottom: 0 }}>
+          <Card>
             <div className="ustat-strip">
               <StatCell loading={loading} val={fmtTokens(stats?.d7 ?? 0)} lab={t("usage.stat7d")} />
               <StatCell loading={loading} val={fmtTokens(stats?.d30 ?? 0)} lab={t("usage.stat30d")} />
               <StatCell loading={loading} val={fmtTokens(stats?.avg ?? 0)} lab={t("usage.statAvg")} />
               <StatCell loading={loading} val={String(data?.conversations ?? 0)} lab={t("usage.statConvs")} />
             </div>
-            <div className="mrank" style={{ marginTop: 12 }}>
+            <div className="mrank">
               {loading ? (
                 <div style={{ padding: "8px 0" }}><Skeleton h={14} style={{ marginBottom: 8 }} /><Skeleton h={14} w="70%" /></div>
               ) : models.length === 0 ? (
-                <div className="muted" style={{ fontSize: 12.5, padding: "8px 0" }}>{t("usage.noModels")}</div>
+                <div className="mrank-empty">{t("usage.noModels")}</div>
               ) : (
                 // The swatch, not the number, carries the colour — it is what
                 // ties the row to its slice of the distribution bar, and a
@@ -144,35 +144,35 @@ export function Usage() {
                 models.slice(0, 3).map((m, i) => (
                   <div key={m.model} className="mrank-row">
                     <span className="mr-idx">{i + 1}</span>
-                    <span className="mr-swatch" style={{ background: modelColor(m.model, i) }} />
+                    <span className="mr-swatch" style={{ background: rampColor(i) }} />
                     <span className="mr-name mono">{m.model}</span>
                     <span className="mr-pct">{m.share.toFixed(1)}%</span>
                   </div>
                 ))
               )}
             </div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)", fontSize: 12 }}>
-              <span className="muted">{t("usage.firstUsed")} <span style={{ color: "var(--fg-soft)" }}>{firstDay}</span></span>
-              <span className="muted">{t("usage.activeDays")} <span style={{ color: "var(--fg-soft)" }}>{stats?.active_days ?? 0}</span></span>
+            <div className="usage-foot">
+              <span>{t("usage.firstUsed")} <b>{firstDay}</b></span>
+              <span>{t("usage.activeDays")} <b>{stats?.active_days ?? 0}</b></span>
             </div>
           </Card>
 
           {/* Activity heatmap */}
-          <Card icon={<IconUsage />} title={t("usage.heatmapTitle")} style={{ marginBottom: 0 }}>
+          <Card icon={<IconUsage />} title={t("usage.heatmapTitle")}>
             {loading ? <Skeleton h={100} /> : <Heatmap cells={data?.heatmap ?? []} lang={i18n.language} weekdays={t("usage.weekdays")} less={t("usage.less")} more={t("usage.more")} />}
           </Card>
 
           {/* Usage trend */}
-          <Card title={t("usage.trendTitle")} style={{ marginBottom: 0 }}>
+          <Card title={t("usage.trendTitle")}>
             {loading ? <Skeleton h={120} /> : <Trend daily={daily} lang={i18n.language} />}
           </Card>
         </div>
 
         {/* ── Main column ── */}
         <div className="usage-main">
-          <Card style={{ marginBottom: 0 }}>
+          <Card>
             {/* Period tabs (refresh lives next to the page title) */}
-            <div className="tabstrip" style={{ marginBottom: 24 }}>
+            <div className="tabstrip usage-periods">
               {PERIODS.map((p) => (
                 <button key={p} className={period === p ? "active" : ""} onClick={() => setPeriod(p)}>{t(`usage.period.${p}`)}</button>
               ))}
@@ -182,27 +182,27 @@ export function Usage() {
             <div className="usage-headline">
               <div className="uh-label">{t("usage.totalLabel")}</div>
               {loading ? (
-                <div style={{ display: "flex", justifyContent: "center" }}><Skeleton w={260} h={64} r={16} /></div>
+                <div className="uh-skel"><Skeleton w={260} h={60} r={14} /></div>
               ) : (
                 <div className="uh-value" onClick={() => setFullFmt((v) => !v)} title={total.toLocaleString()}>
                   {fullFmt ? Math.round(animated).toLocaleString() : fmtTokens(animated)}
                 </div>
               )}
               {!loading && (data?.total_amount ?? 0) > 0 && (
-                <div className="uh-cost">{fmtUsdt(data!.total_amount)} USDT <IconInfo style={{ width: 15, height: 15, opacity: 0.8 }} /></div>
+                <div className="uh-cost">{fmtUsdt(data!.total_amount)} USDT <IconInfo /></div>
               )}
             </div>
 
             {/* Distribution + cards */}
             {loading ? (
-              <><Skeleton h={8} style={{ margin: "20px 0" }} /><Skeleton h={90} /></>
+              <><Skeleton h={6} style={{ margin: "24px 0" }} /><Skeleton h={90} /></>
             ) : models.length === 0 ? (
-              <div className="empty" style={{ padding: "24px 20px" }}><div className="empty-desc">{t("usage.noData")}</div></div>
+              <div className="empty"><div className="empty-desc">{t("usage.noData")}</div></div>
             ) : (
-              <div style={{ marginTop: 24, display: "flex", flexDirection: "column", gap: 20 }}>
+              <div className="usage-dist">
                 <div className="dist-bar" role="img" aria-label={t("usage.totalLabel")}>
                   {models.map((m, i) => (
-                    <span key={m.model} style={{ width: `${m.share}%`, background: modelColor(m.model, i) }} title={`${m.model}: ${m.share.toFixed(1)}%`} />
+                    <span key={m.model} style={{ width: `${m.share}%`, background: rampColor(i) }} title={`${m.model}: ${m.share.toFixed(1)}%`} />
                   ))}
                 </div>
                 <div className="uprov-grid">
@@ -210,18 +210,18 @@ export function Usage() {
                     className={`uprov-card ${expandProv === "__all__" ? "active" : ""}`}
                     onClick={() => setExpandProv((p) => (p === "__all__" ? null : "__all__"))}
                   >
-                    <div className="up-head"><IconUsage style={{ width: 14, height: 14 }} />{t("usage.allTools")}</div>
+                    <div className="up-head"><IconUsage />{t("usage.allTools")}</div>
                     <div className="up-pct">100.00%</div>
                     <div className="up-sub">{t("usage.modelCount", { n: models.length })}</div>
                   </button>
-                  {families.map((f) => (
+                  {families.map((f, i) => (
                     <button
                       key={f.id}
                       className={`uprov-card ${expandProv === f.id ? "active" : ""}`}
                       onClick={() => setExpandProv((p) => (p === f.id ? null : f.id))}
                     >
                       <div className="up-head">
-                        <span style={{ width: 10, height: 10, borderRadius: 3, background: FAMILY_COLOR[f.id] }} />
+                        <span className="up-swatch" style={{ background: rampColor(i) }} />
                         {t(`usage.family.${f.id}`, { defaultValue: f.id.toUpperCase() })}
                       </div>
                       <div className="up-pct">{f.share.toFixed(2)}%</div>
@@ -232,7 +232,7 @@ export function Usage() {
 
                 {/* Expanded per-model rows */}
                 {expandProv && (
-                  <div className="fade-in" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div className="fade-in umodel-list">
                     {models
                       .filter((m) => expandProv === "__all__" || FAMILY(m.model) === expandProv)
                       .map((m, i) => <ModelRow key={m.model} m={m} idx={i} t={t} />)}
@@ -243,33 +243,33 @@ export function Usage() {
           </Card>
 
           {/* Daily breakdown table */}
-          <Card title={t("usage.dailyTitle")} style={{ marginBottom: 0 }}>
+          <Card title={t("usage.dailyTitle")}>
             {loading ? (
               <Skeleton h={140} />
             ) : daily.length === 0 ? (
-              <div className="empty" style={{ padding: "24px 20px" }}><div className="empty-desc">{t("usage.noData")}</div></div>
+              <div className="empty"><div className="empty-desc">{t("usage.noData")}</div></div>
             ) : (
-              <div className="table-wrap" style={{ maxHeight: 380, overflowY: "auto" }}>
+              <div className="table-wrap tall">
                 <table className="tbl">
                   <thead>
                     <tr>
                       <th>{t("usage.colDate")}</th>
-                      <th style={{ textAlign: "right" }}>{t("usage.colTotal")}</th>
-                      <th style={{ textAlign: "right" }}>{t("usage.colInput")}</th>
-                      <th style={{ textAlign: "right" }}>{t("usage.colOutput")}</th>
-                      <th style={{ textAlign: "right" }}>{t("usage.colCache")}</th>
-                      <th style={{ textAlign: "right" }}>{t("usage.colConvs")}</th>
+                      <th className="num">{t("usage.colTotal")}</th>
+                      <th className="num">{t("usage.colInput")}</th>
+                      <th className="num">{t("usage.colOutput")}</th>
+                      <th className="num">{t("usage.colCache")}</th>
+                      <th className="num">{t("usage.colConvs")}</th>
                     </tr>
                   </thead>
                   <tbody>
                     {[...daily].reverse().map((d) => (
                       <tr key={d.date}>
                         <td className="tabular">{d.date}</td>
-                        <td className="mono tabular" style={{ textAlign: "right" }}>{d.total > 0 ? fmtTokens(d.total) : <span className="faint">—</span>}</td>
-                        <td className="mono tabular" style={{ textAlign: "right" }}>{d.input > 0 ? fmtTokens(d.input) : <span className="faint">—</span>}</td>
-                        <td className="mono tabular" style={{ textAlign: "right" }}>{d.output > 0 ? fmtTokens(d.output) : <span className="faint">—</span>}</td>
-                        <td className="mono tabular" style={{ textAlign: "right" }}>{d.cache > 0 ? fmtTokens(d.cache) : <span className="faint">—</span>}</td>
-                        <td className="mono tabular" style={{ textAlign: "right" }}>{d.count > 0 ? d.count : <span className="faint">—</span>}</td>
+                        <td className="mono tabular num">{d.total > 0 ? fmtTokens(d.total) : <span className="faint">—</span>}</td>
+                        <td className="mono tabular num">{d.input > 0 ? fmtTokens(d.input) : <span className="faint">—</span>}</td>
+                        <td className="mono tabular num">{d.output > 0 ? fmtTokens(d.output) : <span className="faint">—</span>}</td>
+                        <td className="mono tabular num">{d.cache > 0 ? fmtTokens(d.cache) : <span className="faint">—</span>}</td>
+                        <td className="mono tabular num">{d.count > 0 ? d.count : <span className="faint">—</span>}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -295,14 +295,14 @@ function StatCell({ loading, val, lab }: { loading: boolean; val: string; lab: s
 function ModelRow({ m, idx, t }: { m: UsageModelRow; idx: number; t: (k: string, o?: Record<string, unknown>) => string }) {
   return (
     <div>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontSize: 12.5, marginBottom: 4 }}>
-        <span className="mono" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.model}</span>
-        <span className="muted" style={{ flexShrink: 0 }}>
+      <div className="umodel-head">
+        <span className="mono umodel-name">{m.model}</span>
+        <span className="muted">
           <span className="mono">{fmtTokens(m.tokens)}</span> · {m.share.toFixed(1)}% · {t("usage.convsN", { n: m.count })}
         </span>
       </div>
-      <div className="bar" style={{ height: 4 }}>
-        <span style={{ width: `${Math.min(100, m.share)}%`, background: modelColor(m.model, idx) }} />
+      <div className="bar">
+        <span style={{ width: `${Math.min(100, m.share)}%`, background: rampColor(idx) }} />
       </div>
     </div>
   );
@@ -331,16 +331,16 @@ function Heatmap({ cells, lang, weekdays, less, more }: { cells: UsageHeatCell[]
           out of sight along with the oldest weeks. */}
       <div className="heatmap-wrap" ref={wrapRef}>
         {/* Month labels */}
-        <div style={{ display: "flex", marginLeft: 22, gap: 3, marginBottom: 4, fontSize: 10.5, color: "var(--faint)", height: 12 }}>
+        <div className="hm-months">
           {weeks.map((_, ci) => {
             const label = months.find((m) => m.col === ci);
-            return <div key={ci} style={{ width: 11, flexShrink: 0, whiteSpace: "nowrap" }}>{label ? label.text : ""}</div>;
+            return <div key={ci}>{label ? label.text : ""}</div>;
           })}
         </div>
-        <div style={{ display: "flex", gap: 3 }}>
+        <div className="hm-body">
           {/* Weekday labels */}
-          <div style={{ display: "grid", gridTemplateRows: "repeat(7, 11px)", gap: 3, marginRight: 4, fontSize: 9.5, color: "var(--faint)" }}>
-            {wd.map((d, i) => <div key={i} style={{ height: 11, lineHeight: "11px" }}>{d}</div>)}
+          <div className="hm-days">
+            {wd.map((d, i) => <div key={i}>{d}</div>)}
           </div>
           <div className="heatmap">
             {weeks.flatMap((week, ci) =>
@@ -409,7 +409,7 @@ function buildHeatmap(cells: UsageHeatCell[], lang: string) {
 
 // ── Trend: daily token bar chart over the selected period ──
 function Trend({ daily, lang }: { daily: UsageDailyRow[]; lang: string }) {
-  if (daily.length === 0) return <div className="muted" style={{ fontSize: 12.5, padding: "20px 0", textAlign: "center" }}>—</div>;
+  if (daily.length === 0) return <div className="trend-empty">—</div>;
   const max = Math.max(1, ...daily.map((d) => d.total));
   const fmt = (s: string) => {
     const dt = new Date(s + "T00:00:00");

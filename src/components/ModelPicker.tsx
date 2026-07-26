@@ -153,7 +153,7 @@ function ModelDialog({
               </button>
             )}
             <span className="modal-spacer" />
-            <span className="muted" style={{ fontSize: 12 }}>{t("modelPicker.shown", { n: list.length })}</span>
+            <span className="modal-count">{t("modelPicker.shown", { n: list.length })}</span>
           </div>
         </div>
 
@@ -300,7 +300,7 @@ export function ModelSingleSelect({
   return (
     <>
       <button type="button" className="model-select" onClick={() => setOpen(true)} disabled={disabled}>
-        <span className={value ? "mono" : "muted"} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <span className={value ? "mono" : "muted"}>
           {value ? labelOf(options, value) : (placeholder ?? t("modelPicker.choose"))}
         </span>
         <IconSearch />

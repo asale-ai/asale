@@ -78,7 +78,7 @@ export function Records() {
 
       <div className="card">
 
-        {data?.server_error && <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>{t("records.serverUnavailable", { msg: data.server_error })}</p>}
+        {data?.server_error && <p className="card-desc">{t("records.serverUnavailable", { msg: data.server_error })}</p>}
         {err && <Err>{err}</Err>}
 
         {loading ? (
@@ -145,7 +145,7 @@ export function Records() {
                 ))}
                 {useLocal && localRows.map((r) => (
                   <tr key={r.task_id}>
-                    <td className="tabular">{fmtTime(r.ts)} <span className="pill off plain" style={{ fontSize: 10 }}>{t("records.localBadge")}</span></td>
+                    <td className="tabular">{fmtTime(r.ts)} <span className="pill off plain tiny">{t("records.localBadge")}</span></td>
                     <td className="mono">{r.model || "—"}</td>
                     <td className="mono tabular">{r.in_tokens}<span className="faint"> / </span>{r.out_tokens}</td>
                     <td className="mono tabular">{fmtUsdt(r.amount_usdt)}</td>

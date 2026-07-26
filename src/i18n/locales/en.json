@@ -10,7 +10,7 @@
     "account": "Account",
     "settings": "Settings",
     "browserPreview": "browser preview",
-    "groupTrade": "Trade",
+    "groupTrade": "Sharing",
     "groupUsage": "Stats",
     "groupFinance": "Finance"
   },
@@ -178,7 +178,7 @@
       "manual": "paused",
       "cooldown": "cooling down",
       "quarantined": "paused by the platform",
-      "untradable": "not traded here"
+      "untradable": "not shared here"
     },
     "limitEdit": "Edit limit",
     "limitCancel": "Cancel",

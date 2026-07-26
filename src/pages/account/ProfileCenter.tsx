@@ -157,7 +157,7 @@ export function ProfileCenter({ profile, onProfile, onLogout }: Props) {
               const linked = profile.oauth_accounts.find((a) => a.provider === id);
               return (
                 <div className={`entity ${linked ? "is-on" : ""}`} key={id}>
-                  <span className="e-badge lr-ico"><Icon size={20} /></span>
+                  <span className="e-badge"><span className="mark md"><Icon size={17} /></span></span>
                   <div className="e-body">
                     <div className="e-title">{label}</div>
                     <div className="e-meta">{linked ? linked.email : t("account.security.notLinked")}</div>
@@ -169,7 +169,7 @@ export function ProfileCenter({ profile, onProfile, onLogout }: Props) {
               );
             })}
           </div>
-          {oauthBusy && <p className="muted" style={{ fontSize: 12.5, marginTop: 10 }}>{t("account.waitingAuth")}</p>}
+          {oauthBusy && <p className="micro-label card-foot">{t("account.waitingAuth")}</p>}
           <Ok>{oauthMsg}</Ok>
           <Err>{oauthErr}</Err>
         </Section>
@@ -182,7 +182,7 @@ export function ProfileCenter({ profile, onProfile, onLogout }: Props) {
             {LANGUAGES.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
           </select>
         </div>
-        <div className="field" style={{ marginBottom: 0 }}>
+        <div className="field">
           <label>{t("account.preferences.theme")}</label>
           <div className="segmented">
             {THEMES.map((th) => (
@@ -197,10 +197,12 @@ export function ProfileCenter({ profile, onProfile, onLogout }: Props) {
       <Card icon={<IconKey />} title={t("account.apiKey.title")} desc={t("account.apiKey.desc")}>
         {apiKey
           ? <CopyChip value={apiKey} wrap />
-          : <p className="muted" style={{ fontSize: 13, margin: 0 }}>{t("account.apiKey.provisioning")}</p>}
-        <button className="btn sm subtle" style={{ marginTop: 12 }} onClick={regenKey} disabled={!inTauri || keyBusy}>
-          <IconRefresh className={keyBusy ? "spin" : undefined} />{t("account.apiKey.regenerate")}
-        </button>
+          : <p className="micro-label">{t("account.apiKey.provisioning")}</p>}
+        <div className="btn-row card-foot">
+          <button className="btn sm subtle" onClick={regenKey} disabled={!inTauri || keyBusy}>
+            <IconRefresh className={keyBusy ? "spin" : undefined} />{t("account.apiKey.regenerate")}
+          </button>
+        </div>
         <Err>{keyErr}</Err>
       </Card>
     </div>

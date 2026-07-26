@@ -1,0 +1,262 @@
+# 客户端三平台打包
+#
+# Tauri 不能跨系统打包（.dmg 只能在 macOS 出，.msi/.exe 只能在 Windows 出，
+# .deb/.AppImage 只能在 Linux 出），所以三个 job 各跑一台 runner。
+#
+# 这里不重复实现打包逻辑：每个 job 都调 scripts/package.sh（Windows 调
+# scripts/package.ps1），校验规则、默认 target、产物路径全部沿用本地那一套，避免
+# CI 和本地打出来的包不一致。CI 唯一多做的事是：把 secrets 写成脚本要读的两个
+# 文件（./.env 和 ./asale-updater.key，两者都在 .gitignore 里）。
+#
+# macOS 不拆 arm/intel：package.sh 默认 universal-apple-darwin，一个包通吃，
+# 下载页也是按单个 universal .dmg 写的。
+#
+# 触发：推 v* tag，或手动 workflow_dispatch。
+#
+# 需要在仓库里配好（Settings → Secrets and variables → Actions）：
+#
+#   Secrets（必填）
+#     ASALE_QUOTA_PUBKEY              网关 quota 授权公钥。缺了打出来的客户端会拒绝
+#                                     上市卖出。取值见 .env.example
+#     TAURI_SIGNING_PRIVATE_KEY       asale-updater.key 的内容（updater 签名私钥）
+#
+#   Secrets（选填）
+#     TAURI_SIGNING_PRIVATE_KEY_PASSWORD   生成上面那把私钥时设的口令
+#     ASALE_OAUTH_CLIENT_ID_GEMINI         没有这两个，Gemini 登录在客户端里是关闭的
+#     ASALE_OAUTH_CLIENT_SECRET_GEMINI
+#     APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY
+#                                          没配 → .app/.dmg 未签名，别人机器上会被
+#                                          Gatekeeper 拦（“已损坏，无法打开”）
+#     APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID   公证用；三个都给才会走公证
+#     TAURI_WINDOWS_CERT_THUMBPRINT        没配 → 安装包触发 SmartScreen“未知发布者”
+#
+#   Variables（选填，留空则用 .env.example 里的生产默认值）
+#     ASALE_SERVER_API / ASALE_GATEWAY_API / ASALE_GATEWAY_WS / ASALE_PROXY_PORT
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      sign:
+        description: "给产物签 updater 签名（关掉则自动更新用不了，只适合试打）"
+        type: boolean
+        default: true
+      release:
+        description: "构建完成后建一个 draft Release 并挂上产物"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # 建 Release 用
+
+env:
+  # package.sh 在 macOS 上默认把 rustup 指到 rsproxy.cn（为国内网络准备的）。
+  # runner 在境外，官方源更快，这里显式盖掉。
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # 一个平台挂了，另外两个照样出包 —— 发版时能先拿到能拿的。
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS (universal)
+            os: macos-14
+            artifact: asale-macos-universal
+            # package.sh 在 Darwin 上默认 --universal，产物落在 target/<triple>/ 下。
+            bundle: target/universal-apple-darwin/release/bundle
+          - label: Windows (x64)
+            os: windows-latest
+            artifact: asale-windows-x64
+            bundle: target/release/bundle
+          - label: Linux (x64)
+            # 钉死 22.04：产物的 glibc 下限由构建机决定，24.04 打出来的包
+            # 在 Debian 12 / Ubuntu 22.04 上会因 glibc 太新起不来。
+            os: ubuntu-22.04
+            artifact: asale-linux-x64
+            bundle: target/release/bundle
+
+    env:
+      # Tauri CLI 自己会读这些做签名/公证；没配就是不签，脚本会打印告警。
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      TAURI_WINDOWS_CERT_THUMBPRINT: ${{ secrets.TAURI_WINDOWS_CERT_THUMBPRINT }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          # package.json 里没有 packageManager 字段，版本得在这儿钉。
+          # pnpm-workspace.yaml 用了 onlyBuiltDependencies（pnpm 10+ 才认）。
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # 三个平台共用一个 key 会互相踩，按 job 分开。
+          key: ${{ matrix.artifact }}
+
+      # Tauri v2 在 Linux 上链 webkit2gtk-4.1；缺了会在 cargo build 阶段报
+      # pkg-config 找不到。package.sh 会提前拦一次并打印这串包名。
+      - name: Linux 构建依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      # 两个脚本都从文件读配置（装机后没有 shell 环境，这些值必须编译期固定进
+      # 二进制），所以先把 secrets 落成它们要的文件。Windows runner 也有 bash。
+      - name: 写 .env / updater 私钥
+        shell: bash
+        env:
+          QUOTA_PUBKEY: ${{ secrets.ASALE_QUOTA_PUBKEY }}
+          SERVER_API: ${{ vars.ASALE_SERVER_API }}
+          GATEWAY_API: ${{ vars.ASALE_GATEWAY_API }}
+          GATEWAY_WS: ${{ vars.ASALE_GATEWAY_WS }}
+          PROXY_PORT: ${{ vars.ASALE_PROXY_PORT }}
+          KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          GEMINI_ID: ${{ secrets.ASALE_OAUTH_CLIENT_ID_GEMINI }}
+          GEMINI_SECRET: ${{ secrets.ASALE_OAUTH_CLIENT_SECRET_GEMINI }}
+          UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # 注意求值顺序：GitHub 的 && / || 返回操作数本身而不是布尔，写成
+          # `A && inputs.sign || true` 时 sign=false 会被 `|| true` 吃掉。
+          SIGN: ${{ github.event_name != 'workflow_dispatch' || inputs.sign }}
+        run: |
+          set -euo pipefail
+
+          # 脚本里也会拦一次，但那时它会先去 ssh 服务器抓公钥（CI 里没有私钥，
+          # 白等一次超时），所以在这儿先失败掉。
+          if [[ -z "$QUOTA_PUBKEY" ]]; then
+            echo "::error::secret ASALE_QUOTA_PUBKEY 为空。缺了它打出来的客户端会拒绝上市卖出" \
+                 "（无法验证网关授权，等于把订阅额度交给任何自称是网关的对端）。" \
+                 "取值：网关启动日志里的 'quota pubkey' 那一行"
+            exit 1
+          fi
+
+          {
+            echo "ASALE_QUOTA_PUBKEY=$QUOTA_PUBKEY"
+            echo "ASALE_SERVER_API=${SERVER_API:-https://api.asale.ai}"
+            echo "ASALE_GATEWAY_API=${GATEWAY_API:-https://gw.asale.ai}"
+            echo "ASALE_GATEWAY_WS=${GATEWAY_WS:-wss://gw.asale.ai/v1/ws}"
+            echo "ASALE_PROXY_PORT=${PROXY_PORT:-9787}"
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$KEY_PASSWORD"
+            # package.sh 是 `set -a; . ./.env`，所以写在这里的变量会被 export，
+            # daemon 的 option_env! 就能在编译期取到。用 if 而不是 `[[ ]] && echo`：
+            # 后者在条件不成立时返回 1，作为代码块最后一句会被 set -e 判成失败。
+            if [[ -n "$GEMINI_ID" ]]; then
+              echo "ASALE_OAUTH_CLIENT_ID_GEMINI=$GEMINI_ID"
+            fi
+            if [[ -n "$GEMINI_SECRET" ]]; then
+              echo "ASALE_OAUTH_CLIENT_SECRET_GEMINI=$GEMINI_SECRET"
+            fi
+          } > .env
+
+          if [[ "$SIGN" == "true" ]]; then
+            if [[ -z "$UPDATER_KEY" ]]; then
+              echo "::error::secret TAURI_SIGNING_PRIVATE_KEY 为空，但打包要求签名。" \
+                   "tauri.conf.json 的 createUpdaterArtifacts=true 会让构建直接失败；" \
+                   "手动跑可以把 sign 输入关掉试打。"
+              exit 1
+            fi
+            printf '%s' "$UPDATER_KEY" > asale-updater.key
+          else
+            echo "::warning::sign=false：产物不带 .sig，自动更新用不了，只能本地验证"
+          fi
+
+      # 参数拼在一行里：不签名时表达式求值成空串，写成续行会留下一个孤零零的
+      # 续行符（pwsh 的 ` 尤其容易在这上面报解析错）。
+      - name: 打包（macOS / Linux）
+        if: runner.os != 'Windows'
+        run: ./scripts/package.sh ${{ (github.event_name == 'workflow_dispatch' && !inputs.sign) && '--no-sign' || '' }}
+
+      - name: 打包（Windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh scripts/package.ps1 ${{ (github.event_name == 'workflow_dispatch' && !inputs.sign) && '-NoSign' || '' }}
+
+      # 产物散在 bundle/ 的各个子目录（dmg/、nsis/、deb/…），拍平成一个目录，
+      # 下载下来就是能直接丢上下载站的样子。
+      - name: 收集产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          find "${{ matrix.bundle }}" -type f \( \
+              -name '*.dmg' -o -name '*.app.tar.gz' \
+              -o -name '*.msi' -o -name '*-setup.exe' -o -name '*.nsis.zip' \
+              -o -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \
+              -o -name '*.sig' \) \
+            -exec cp {} artifacts/ \;
+          ls -lh artifacts/
+          # 一个文件都没有 = 打包静默失败了（比如只出了裸可执行文件），
+          # 别让 job 绿着过去。
+          [[ -n "$(ls -A artifacts/)" ]] || { echo "::error::没有任何安装包产物"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: draft Release
+    needs: build
+    # tag 触发时总建；手动触发要显式勾 release。
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dl
+          merge-multiple: true # 三个平台的包平铺到 dl/
+
+      - name: 建 draft Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ls -lh dl/
+
+          tag="${GITHUB_REF_NAME}"
+          # 手动触发时没有 tag，按 tauri.conf.json 的版本号造一个。
+          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
+            v="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+            tag="v${v}-${GITHUB_RUN_NUMBER}"
+          fi
+
+          # draft，不是正式发布：产物要先自己装一遍验过，再手动点发布。
+          gh release create "$tag" dl/* \
+            --draft \
+            --title "Asale 客户端 $tag" \
+            --notes "三平台安装包由 release workflow 构建。
+
+          发布前请确认：
+          - macOS 的 .dmg 已签名并公证（否则别人机器上会报“已损坏”）
+          - Windows 安装包已做 Authenticode 签名（否则 SmartScreen 告警）
+          - 每个包旁边都有对应的 .sig（自动更新要用）
+          - 装一遍跑通登录与上市，再手动点发布"

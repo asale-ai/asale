@@ -10,7 +10,7 @@
     "account": "帳戶",
     "settings": "設定",
     "browserPreview": "瀏覽器預覽",
-    "groupTrade": "交易",
+    "groupTrade": "共享",
     "groupUsage": "統計",
     "groupFinance": "資金"
   },
@@ -178,7 +178,7 @@
       "manual": "已暫停",
       "cooldown": "冷卻中",
       "quarantined": "已被平台暫停",
-      "untradable": "平台未開放交易"
+      "untradable": "平台未開放共享"
     },
     "limitEdit": "修改限額",
     "limitCancel": "取消",

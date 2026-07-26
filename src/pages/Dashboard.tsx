@@ -5,7 +5,7 @@ import {
   type ProxyStatus, type Wallet,
   type AccountStatus, type BuyTool, type BuyTools,
 } from "../lib";
-import { Card, SkeletonRows, StatTile, PageHead, Empty } from "../ui";
+import { Card, SkeletonRows, StatTile, PageHead, Empty, Mark } from "../ui";
 import {
   IconWallet, IconPublish, IconConsume, IconArrowRight,
   IconChip, IconCheck, IconServer,
@@ -13,24 +13,8 @@ import {
 
 type Tab = "dashboard" | "publish" | "consume" | "usage" | "limits" | "wallet" | "records" | "account" | "settings";
 
-const PROVIDER_COLORS: Record<string, string> = {
-  claude_work: "#b45309", claude: "#d97757", codex: "#10a37f", gemini: "#4285f4",
-};
-const colorFor = (id: string) =>
-  Object.entries(PROVIDER_COLORS).find(([k]) => id.startsWith(k))?.[1] ?? "var(--accent)";
-const badgeFor = (id: string) => (id.startsWith("codex") ? "O" : id.charAt(0).toUpperCase());
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const keyOf = (a: { provider: string; account_id: string }) => `${a.provider}:${a.account_id}`;
-
-function Badge({ color, label, size = 34 }: { color: string; label: string; size?: number }) {
-  return (
-    <span style={{
-      width: size, height: size, borderRadius: size * 0.28, flexShrink: 0,
-      display: "grid", placeItems: "center", background: color, color: "#fff",
-      fontSize: size * 0.44, fontWeight: 800,
-    }}>{label}</span>
-  );
-}
 
 export function Dashboard({ onNavigate }: { onNavigate: (t: Tab) => void }) {
   const { t } = useTranslation();
@@ -87,7 +71,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (t: Tab) => void }) {
       <PageHead title={t("dashboard.title")} sub={t("dashboard.sub")} />
 
       {daemonDown && (
-        <div className="callout danger" style={{ marginBottom: 14 }}>
+        <div className="callout danger card-lead">
           <IconServer /><span>{t("dashboard.daemonDown")}</span>
         </div>
       )}
@@ -141,11 +125,11 @@ export function Dashboard({ onNavigate }: { onNavigate: (t: Tab) => void }) {
               const pct = denom > 0 ? Math.min(100, (a.used_today / denom) * 100) : 0;
               return (
                 <div key={keyOf(a)} className={`entity ${a.sell_enabled ? "is-on" : "is-off"}`}>
-                  <span className="e-badge"><Badge color={colorFor(a.provider)} label={badgeFor(a.provider)} /></span>
+                  <span className="e-badge"><Mark id={a.provider} /></span>
                   <div className="e-body">
                     <div className="e-title">
                       {a.account_id}
-                      {a.plan && <span className="muted" style={{ fontWeight: 400 }}> · {a.plan}</span>}
+                      {a.plan && <span className="muted"> · {a.plan}</span>}
                     </div>
                     <div className="e-meta">
                       <span className="mono">{a.provider}</span>
@@ -187,7 +171,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (t: Tab) => void }) {
           <div className="entity-list">
             {tools.map((tool) => (
               <div key={tool.id} className={`entity ${tool.enabled ? "is-on" : tool.installed ? "" : "is-off"}`}>
-                <span className="e-badge"><Badge color={colorFor(tool.id)} label={badgeFor(tool.id)} /></span>
+                <span className="e-badge"><Mark id={tool.id} /></span>
                 <div className="e-body">
                   <div className="e-title">{tool.label}</div>
                   <div className="e-meta">
@@ -200,9 +184,9 @@ export function Dashboard({ onNavigate }: { onNavigate: (t: Tab) => void }) {
                     <span>{tool.installed ? (tool.account ?? t("dashboard.toolInstalled")) : t("dashboard.toolNotFound")}</span>
                   </div>
                 </div>
-                <div className="e-num" style={{ maxWidth: 240 }}>
+                <div className="e-num wrap">
                   <span className="n-k">{t("dashboard.buyModels")}</span>
-                  <span className="n-v mono" style={{ whiteSpace: "normal", wordBreak: "break-word" }}>
+                  <span className="n-v mono">
                     {tool.models.length > 0 ? tool.models.join(", ") : t("dashboard.anyModel")}
                   </span>
                 </div>

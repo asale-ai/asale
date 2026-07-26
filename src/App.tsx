@@ -102,7 +102,7 @@ export function App() {
       <aside className="sidebar">
         <div className="logo">
           <img className="logo-mark" src="/logo.svg" alt="Asale" />
-          <span style={{ color: "var(--fg)" }}>Asale</span>
+          <span>Asale</span>
         </div>
         {NAV.map((g, i) =>
           g === "spacer" ? (

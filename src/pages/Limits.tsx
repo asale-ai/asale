@@ -5,21 +5,16 @@ import {
   type UsageLimits, type LimitProvider, type LimitWindow,
 } from "../lib";
 import { computePace, resetToMs, formatReset, formatExactReset, type DisplayMode, type Pace } from "../lib/limit-pace";
-import { PageHead, IconAction } from "../ui";
+import { PageHead, IconAction, Mark } from "../ui";
 import { IconRefresh, IconPlus } from "../icons";
 
 const PROVIDERS = [
-  { id: "claude", label: "Claude Code", badge: "✳", color: "#d97757" },
-  { id: "claude_work", label: "Claude Work", badge: "✳", color: "#b45309" },
-  { id: "codex", label: "Codex", badge: "◍", color: "#4b5fd6" },
-  { id: "gemini", label: "Gemini", badge: "✦", color: "#4285f4" },
+  { id: "claude", label: "Claude Code" },
+  { id: "claude_work", label: "Claude Work" },
+  { id: "codex", label: "Codex" },
+  { id: "gemini", label: "Gemini" },
 ];
-const meta = (id: string) => PROVIDERS.find((p) => id.startsWith(p.id)) ?? { label: id, badge: id.charAt(0).toUpperCase(), color: "var(--accent)" };
-
-function ProviderMark({ id }: { id: string }) {
-  const m = meta(id);
-  return <span className="lg-icon" style={{ color: m.color, fontSize: 15, lineHeight: 1 }} aria-hidden>{m.badge}</span>;
-}
+const meta = (id: string) => PROVIDERS.find((p) => id.startsWith(p.id)) ?? { label: id };
 
 /** Threshold color; in "remaining" mode a low value is bad (mirrored). */
 function barTone(displayPct: number, mode: DisplayMode): "ok" | "warn" | "danger" {
@@ -78,7 +73,7 @@ function ToolGroup({
 }) {
   const header = (
     <div className="limit-group-head">
-      <span className="lg-mark"><ProviderMark id={id} /></span>
+      <Mark id={id} size="sm" />
       <span className="lg-name">{name}</span>
       {badge}
     </div>
@@ -184,7 +179,7 @@ export function Limits() {
               className="lane-resume"
               onClick={() => window.dispatchEvent(new CustomEvent("asale:nav", { detail: "publish" }))}
             >
-              <IconPlus style={{ width: 11, height: 11, verticalAlign: "-1px" }} /> {t("limits.connect")}
+              <IconPlus /> {t("limits.connect")}
             </button>
           </div>
         </ToolGroup>
@@ -199,10 +194,10 @@ export function Limits() {
     // (the weekly per-model ones).
     const reason = p.fallback_reason || "";
     const badge = p.live
-      ? <span className="pill on plain" style={{ fontSize: 9.5, padding: "1px 6px" }}>{t("limits.live")}</span>
+      ? <span className="pill on tiny">{t("limits.live")}</span>
       : (
         <span
-          className="pill warn plain" style={{ fontSize: 9.5, padding: "1px 6px" }}
+          className="pill warn tiny"
           title={reason ? t("limits.estimateFailed") : t("limits.estimateUnsupported")}
         >
           {t("limits.estimate")}

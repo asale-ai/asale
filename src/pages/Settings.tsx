@@ -152,7 +152,7 @@ export function Settings() {
         {proxy && (
           <>
             {proxy.env_override && (
-              <div className="callout" style={{ marginBottom: 14 }}>
+              <div className="callout card-lead">
                 <IconInfo />
                 <span>{t("settings.proxyEnvOverride", { name: proxy.env_var, value: proxy.env_override })}</span>
               </div>
@@ -187,7 +187,7 @@ export function Settings() {
               </div>
             )}
 
-            <div className="btn-row" style={{ marginTop: 4 }}>
+            <div className="btn-row">
               <button className="btn" onClick={saveProxy} disabled={proxyBusy !== "" || !proxyDirty}>
                 {proxyBusy === "save" ? <IconRefresh className="spin" /> : <IconCheck />}
                 {t("settings.proxySave")}
@@ -196,10 +196,10 @@ export function Settings() {
                 {proxyBusy === "test" ? <IconRefresh className="spin" /> : <IconRefresh />}
                 {proxyBusy === "test" ? t("settings.proxyTesting") : t("settings.proxyTest")}
               </button>
-              {proxySaved && !proxyDirty && <span className="pill on"><IconCheck style={{ width: 13, height: 13 }} />{t("settings.proxySaved")}</span>}
+              {proxySaved && !proxyDirty && <span className="pill on plain"><IconCheck />{t("settings.proxySaved")}</span>}
             </div>
 
-            <div className="fact-grid tight" style={{ marginTop: 16 }}>
+            <div className="fact-grid tight card-foot">
               <div className="fact">
                 <span className="fact-k">{t("settings.proxyEffective")}</span>
                 <span className="fact-v mono">{proxy.effective ?? t("settings.proxyDirect")}</span>
@@ -222,7 +222,7 @@ export function Settings() {
         <>
           <Card icon={<IconPower />} title={t("settings.autostartTitle")} desc={t("settings.autostartDesc")}>
             <div className="switch-row">
-              <span style={{ fontWeight: 550, fontSize: 13.5 }}>{t("settings.autostartLabel")}</span>
+              <span className="switch-label">{t("settings.autostartLabel")}</span>
               <label className="switch">
                 <input type="checkbox" checked={autostart === true} disabled={autostart === null || autostartBusy} onChange={toggleAutostart} />
                 <span className="track" />
@@ -232,12 +232,12 @@ export function Settings() {
           </Card>
 
           <Card icon={<IconDownload />} title={t("settings.updateTitle")} desc={t("settings.updateDesc", { version: version || "…" })}>
-            <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <div className="btn-row">
               <button className="btn ghost" onClick={checkForUpdate} disabled={phase === "checking" || phase === "downloading"}>
                 {phase === "checking" ? <IconRefresh className="spin" /> : <IconRefresh />}
                 {phase === "checking" ? t("settings.updateChecking") : t("settings.updateCheck")}
               </button>
-              {phase === "none" && <span className="pill on"><IconCheck style={{ width: 13, height: 13 }} />{t("settings.updateNone")}</span>}
+              {phase === "none" && <span className="pill on plain"><IconCheck />{t("settings.updateNone")}</span>}
               {phase === "available" && update && (
                 <>
                   <span className="pill warn">{t("settings.updateAvailable", { version: update.version })}</span>
@@ -246,15 +246,15 @@ export function Settings() {
               )}
               {phase === "ready" && (
                 <>
-                  <span className="pill on"><IconCheck style={{ width: 13, height: 13 }} />{t("settings.updateReady")}</span>
+                  <span className="pill on plain"><IconCheck />{t("settings.updateReady")}</span>
                   <button className="btn" onClick={() => relaunch()}>{t("settings.updateRestart")}</button>
                 </>
               )}
             </div>
 
             {phase === "downloading" && (
-              <div style={{ marginTop: 14 }}>
-                <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
+              <div className="card-foot">
+                <div className="micro-label">
                   {progress >= 0 ? t("settings.updateDownloading", { pct: progress }) : t("settings.updateDownloadingIndeterminate")}
                 </div>
                 <div className="bar"><span style={{ width: progress >= 0 ? `${progress}%` : "40%" }} className={progress < 0 ? "skel" : ""} /></div>
@@ -263,9 +263,9 @@ export function Settings() {
 
             {phase === "error" && <Err>{t("settings.updateError", { msg: updateErr })}</Err>}
             {update?.body && (phase === "available" || phase === "downloading" || phase === "ready") && (
-              <div style={{ marginTop: 14 }}>
-                <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>{t("settings.updateNotes")}</div>
-                <pre className="codeblock" style={{ whiteSpace: "pre-wrap", padding: 14 }}>{update.body}</pre>
+              <div className="card-foot">
+                <div className="micro-label">{t("settings.updateNotes")}</div>
+                <pre className="codeblock notes">{update.body}</pre>
               </div>
             )}
           </Card>

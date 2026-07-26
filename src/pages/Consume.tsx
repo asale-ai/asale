@@ -4,28 +4,9 @@ import {
   invoke, inTauri, pricePerMillion, fmtContext,
   type BuyTool, type BuyTools, type MarketModel,
 } from "../lib";
-import { Card, Ok, Err, SkeletonRows, PageHead, IconAction } from "../ui";
+import { Card, Ok, Err, SkeletonRows, PageHead, IconAction, Mark } from "../ui";
 import { ModelMultiSelect, type ModelOption } from "../components/ModelPicker";
-import { IconRoute, IconConsume, IconRefresh, IconCheck, IconAlert, IconTerminal } from "../icons";
-
-// Colors match the sell page's provider badges so one account reads the same
-// on both sides of the app.
-const TOOL_STYLE: Record<string, { badge: string; color: string }> = {
-  claude: { badge: "C", color: "#d97757" },
-  codex: { badge: "O", color: "#10a37f" },
-  gemini: { badge: "G", color: "#4285f4" },
-};
-
-function Badge({ id, size = 36 }: { id: string; size?: number }) {
-  const s = TOOL_STYLE[id] ?? { badge: id.charAt(0).toUpperCase(), color: "var(--accent)" };
-  return (
-    <span style={{
-      width: size, height: size, borderRadius: size * 0.28, flexShrink: 0,
-      display: "grid", placeItems: "center", background: s.color, color: "#fff",
-      fontSize: size * 0.44, fontWeight: 800,
-    }}>{s.badge}</span>
-  );
-}
+import { IconRoute, IconConsume, IconRefresh, IconCheck, IconAlert } from "../icons";
 
 const priceOf = (m: MarketModel, type: string) => m.prices.find((p) => p.token_type === type);
 const usd = (micros: number) => `$${pricePerMillion(micros).toFixed(2)}`;
@@ -163,12 +144,12 @@ export function Consume() {
               return (
                 <div key={tool.id} className={`acct ${tool.enabled ? "selling" : ""} ${tool.installed ? "" : "muted-row"}`}>
                   <div className="acct-head">
-                    <Badge id={tool.id} />
+                    <Mark id={tool.id} />
                     <div className="acct-id">
                       <div className="acct-name">{tool.label}</div>
                       <div className="acct-meta">
                         {tool.installed
-                          ? <span className="pill on"><IconCheck /> {t("consume.installed")}</span>
+                          ? <span className="pill on plain"><IconCheck /> {t("consume.installed")}</span>
                           : <span className="pill off">{t("consume.notInstalled")}</span>}
                         {tool.account
                           ? <span className="mono muted">{tool.account}{tool.plan && ` · ${tool.plan}`}</span>
@@ -210,13 +191,13 @@ export function Consume() {
                         title={t("consume.pickModelsFor", { tool: tool.label })}
                       />
                       {models.length === 0 && (
-                        <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>{t("consume.noModels")}</div>
+                        <div className="acct-sub-label after">{t("consume.noModels")}</div>
                       )}
                       {/* Codex takes the model from its own catalog, not from
                           the request, so "any model" leaves it on models the
                           market cannot serve. */}
                       {tool.id === "codex" && tool.models.length === 0 && (
-                        <div className="callout warn compact" style={{ marginTop: 10 }}>
+                        <div className="callout warn compact card-foot">
                           <IconAlert /><span>{t("consume.codexNeedsModel")}</span>
                         </div>
                       )}
@@ -225,7 +206,7 @@ export function Consume() {
 
                   <div className="acct-detail">
                     <div className="ad-row">
-                      <span className="meta-k"><IconTerminal style={{ width: 12, height: 12, verticalAlign: "-2px" }} /> {t("consume.configPaths")}</span>
+                      <span className="meta-k">{t("consume.configPaths")}</span>
                       <div className="ad-chips">
                         {tool.config_paths.map((p) => (
                           <span key={p} className="pill mono plain" title={p}><span>{p}</span></span>
@@ -241,7 +222,7 @@ export function Consume() {
         <Ok>{msg}</Ok>
         <Err>{err}</Err>
         {!loading && (
-          <div className="callout" style={{ marginTop: 14 }}>
+          <div className="callout card-foot">
             <IconRoute /><span>{t("consume.restartHint")}</span>
           </div>
         )}

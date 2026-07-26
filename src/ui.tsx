@@ -74,6 +74,22 @@ export function SkeletonRows({ rows = 2 }: { rows?: number }) {
   );
 }
 
+/* Identity mark for a provider / CLI (Claude, Codex, Gemini …).
+   Deliberately monochrome and shared by every page: a screenful of vendor
+   colours is the loudest thing on the screen and says nothing the label next
+   to it does not already say. The tile it sits in carries the state instead. */
+const MARK_LETTER: Record<string, string> = {
+  claude: "C", claude_work: "C", codex: "O", gemini: "G",
+};
+export function Mark({ id, size = "md" }: { id: string; size?: "md" | "sm" }) {
+  const key = Object.keys(MARK_LETTER).find((k) => id.startsWith(k));
+  return (
+    <span className={`mark ${size}`} aria-hidden>
+      {key ? MARK_LETTER[key] : id.charAt(0).toUpperCase()}
+    </span>
+  );
+}
+
 /* A card with an optional icon + title header. */
 export function Card({
   icon,

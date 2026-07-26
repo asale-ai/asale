@@ -52,18 +52,18 @@ export function Account() {
   return (
     <div className="auth-wrap">
       <div className="auth-card">
-        <div style={{ textAlign: "center", marginBottom: 22 }}>
-          <div className="logo" style={{ justifyContent: "center", padding: 0, marginBottom: 14 }}>
-            <img className="logo-mark" src="/logo.svg" alt="Asale" style={{ width: 40, height: 40 }} />
+        <div className="auth-head">
+          <div className="logo">
+            <img className="logo-mark" src="/logo.svg" alt="Asale" />
           </div>
-          <h1 style={{ fontSize: 22 }}>{mode === "login" ? t("account.signIn") : t("account.createAccount")}</h1>
-          <p className="muted" style={{ fontSize: 13.5, marginTop: 4 }}>{t("account.subSignedOut")}</p>
+          <h1>{mode === "login" ? t("account.signIn") : t("account.createAccount")}</h1>
+          <p className="sub">{t("account.subSignedOut")}</p>
         </div>
 
-        <div className="card" style={{ marginBottom: 0 }}>
-          <div className="segmented" style={{ width: "100%", marginBottom: 18 }}>
+        <div className="card auth-panel">
+          <div className="segmented block card-lead">
             {(["login", "register"] as const).map((m) => (
-              <button key={m} className={mode === m ? "active" : ""} style={{ flex: 1, justifyContent: "center" }} onClick={() => setMode(m)}>
+              <button key={m} className={mode === m ? "active" : ""} onClick={() => setMode(m)}>
                 {t(`account.${m}`)}
               </button>
             ))}
@@ -82,9 +82,11 @@ export function Account() {
           </button>
 
           <div className="divider">{t("account.or")}</div>
-          <button className="btn oauth" onClick={() => oauth("google")} disabled={disabled}><GoogleIcon size={18} />{t("account.continueWithGoogle")}</button>
-          <button className="btn oauth" style={{ marginTop: 8 }} onClick={() => oauth("github")} disabled={disabled}><GitHubIcon size={18} />{t("account.continueWithGithub")}</button>
-          {oauthBusy && <p className="muted" style={{ fontSize: 13, marginTop: 10, textAlign: "center" }}>{t("account.waitingAuth")}</p>}
+          <div className="stack-gap">
+            <button className="btn oauth" onClick={() => oauth("google")} disabled={disabled}><GoogleIcon size={17} />{t("account.continueWithGoogle")}</button>
+            <button className="btn oauth" onClick={() => oauth("github")} disabled={disabled}><GitHubIcon size={17} />{t("account.continueWithGithub")}</button>
+          </div>
+          {oauthBusy && <p className="auth-note">{t("account.waitingAuth")}</p>}
 
           {!inTauri && <Err>{t("account.runInside")}</Err>}
           <Err>{err}</Err>

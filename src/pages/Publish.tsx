@@ -4,17 +4,15 @@ import {
   invoke, inTauri, runOAuthFlow, fmtTokens,
   type AccountStatus, type ImportAllResult, type Lane,
 } from "../lib";
-import { Card, Ok, Err, SkeletonRows, PageHead, IconAction, Empty } from "../ui";
+import { Card, Ok, Err, SkeletonRows, PageHead, IconAction, Empty, Mark } from "../ui";
 import { IconTrash, IconShield, IconChip, IconRefresh, IconPlus, IconPencil } from "../icons";
 
 const PROVIDERS = [
-  { id: "claude", label: "Claude Code", badge: "C", color: "#d97757" },
-  { id: "claude_work", label: "Claude Work", badge: "C", color: "#b45309" },
-  { id: "codex", label: "Codex / OpenAI", badge: "O", color: "#10a37f" },
-  { id: "gemini", label: "Gemini", badge: "G", color: "#4285f4" },
+  { id: "claude", label: "Claude Code" },
+  { id: "claude_work", label: "Claude Work" },
+  { id: "codex", label: "Codex / OpenAI" },
+  { id: "gemini", label: "Gemini" },
 ];
-const providerColor = (id: string) => PROVIDERS.find((p) => id.startsWith(p.id))?.color ?? "var(--accent)";
-const providerBadge = (id: string) => (PROVIDERS.find((p) => id.startsWith(p.id))?.badge ?? id.charAt(0).toUpperCase());
 
 const fmtTime = (secs: number | null) => (secs ? new Date(secs * 1000).toLocaleString() : "—");
 
@@ -37,16 +35,6 @@ const shortSource = (s: string) =>
   s === "oauth" ? "Asale OAuth"
     : s.startsWith("keychain:") ? s.slice("keychain:".length)
     : s.split("/").filter(Boolean).slice(-2).join("/");
-
-function Badge({ id, size = 36 }: { id: string; size?: number }) {
-  return (
-    <span style={{
-      width: size, height: size, borderRadius: size * 0.28, flexShrink: 0,
-      display: "grid", placeItems: "center", background: providerColor(id), color: "#fff",
-      fontSize: size * 0.44, fontWeight: 800,
-    }}>{providerBadge(id)}</span>
-  );
-}
 
 /** Selling is per subscription account — there is no device-wide sell switch.
  *  The market session simply follows these switches (the daemon connects on the
@@ -218,7 +206,7 @@ export function Publish() {
     <div className="pick-grid">
       {PROVIDERS.map((p) => (
         <button key={p.id} className="pick" onClick={() => connect(p.id)} disabled={busy || !inTauri}>
-          <span className="pick-ico" style={{ background: "transparent" }}><Badge id={p.id} size={34} /></span>
+          <span className="pick-ico"><Mark id={p.id} /></span>
           <span>
             <span className="pick-title">{p.label}</span>
             <span className="pick-sub">{t("publish.connectVia")}</span>
@@ -282,11 +270,11 @@ export function Publish() {
               return (
                 <div key={k} className={`acct ${a.sell_enabled ? "selling" : ""}`}>
                   <div className="acct-head">
-                    <Badge id={a.provider} />
+                    <Mark id={a.provider} />
                     <div className="acct-id">
                       <div className="acct-name">
                         {a.account_id}
-                        {a.plan && <span className="muted" style={{ fontWeight: 400 }}> · {a.plan}</span>}
+                        {a.plan && <span className="muted"> · {a.plan}</span>}
                       </div>
                       <div className="acct-meta">
                         <span className="mono">{a.provider}</span>
@@ -333,7 +321,7 @@ export function Publish() {
 
                   <div className="acct-grid">
                     {/* Daily cap: a value with a pencil, an input once clicked */}
-                    <div className="field" style={{ marginBottom: 0 }}>
+                    <div className="field">
                       <label>{t("publish.limitLabel")}</label>
                       {limitEditing === k ? (
                         <div className="input-row">
@@ -442,7 +430,7 @@ export function Publish() {
                               </span>
                             ))}
                             {a.sources.length > 1 && (
-                              <span className="muted" style={{ fontSize: 11.5 }} title={t("publish.mergedHint")}>
+                              <span className="faint ad-note" title={t("publish.mergedHint")}>
                                 {t("publish.mergedBadge", { n: a.sources.length })}
                               </span>
                             )}
@@ -458,7 +446,7 @@ export function Publish() {
         )}
         <Ok>{importMsg}</Ok>
         {importWarnings.length > 0 && (
-          <div className="callout warn" style={{ marginTop: 10 }}>
+          <div className="callout warn card-foot">
             <IconShield /><span>{t("publish.envWarning", { vars: importWarnings.join(", ") })}</span>
           </div>
         )}

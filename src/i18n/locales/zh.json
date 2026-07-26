@@ -10,7 +10,7 @@
     "account": "账户",
     "settings": "设置",
     "browserPreview": "浏览器预览",
-    "groupTrade": "交易",
+    "groupTrade": "共享",
     "groupUsage": "统计",
     "groupFinance": "资金"
   },
@@ -178,7 +178,7 @@
       "manual": "已暂停",
       "cooldown": "冷却中",
       "quarantined": "已被平台暂停",
-      "untradable": "平台未开放交易"
+      "untradable": "平台未开放共享"
     },
     "limitEdit": "修改限额",
     "limitCancel": "取消",

@@ -162,7 +162,7 @@ export function WalletPage() {
         }
       />
 
-      {err && <div className="callout danger" style={{ marginBottom: 16 }}><IconWallet /><span>{err} — {t("wallet.signInFirst")}</span></div>}
+      {err && <div className="callout danger card-lead"><IconWallet /><span>{err} — {t("wallet.signInFirst")}</span></div>}
 
       {/* ── Balance hero ── */}
       <div className="wallet-hero">
@@ -193,7 +193,7 @@ export function WalletPage() {
 
       {/* ── Deposit / withdraw ── */}
       <Card>
-        <div className="segmented" style={{ marginBottom: 18 }}>
+        <div className="segmented card-lead">
           {panes.map((p) => (
             <button key={p.id} className={pane === p.id ? "active" : ""} onClick={() => setPane(p.id)}>
               {p.id === "deposit" ? <IconDownload /> : <IconArrowRight />}{p.label}
@@ -211,7 +211,7 @@ export function WalletPage() {
 
             {!addr && (
               <div className="wallet-cta">
-                <p className="card-desc" style={{ margin: "0 0 14px" }}>{t("wallet.depositNote")}</p>
+                <p className="card-desc">{t("wallet.depositNote")}</p>
                 <button className="btn" onClick={getAddress} disabled={!inTauri || addrBusy}>
                   {addrBusy ? <IconRefresh className="spin" /> : <IconDownload />}
                   {addrBusy ? t("wallet.gettingAddress") : t("wallet.getAddress")}
@@ -227,7 +227,7 @@ export function WalletPage() {
                   <span className="qr-cap">{t("wallet.scanToPay")}</span>
                 </div>
                 <div className="deposit-side">
-                  <div className="field" style={{ marginBottom: 12 }}>
+                  <div className="field">
                     <label>{t("wallet.yourAddress")}</label>
                     <CopyChip value={addr} wrap />
                   </div>
@@ -250,14 +250,14 @@ export function WalletPage() {
               <label>{t("wallet.withdrawAddress")}</label>
               <input className={`input mono ${to.trim() && !addrValid ? "invalid" : ""}`} value={to}
                 onChange={(e) => setTo(e.target.value)} placeholder="T…" spellCheck={false} />
-              <div className="hint" style={to.trim() && !addrValid ? { color: "var(--danger)" } : undefined}>
+              <div className={`hint${to.trim() && !addrValid ? " bad" : ""}`}>
                 {to.trim() && !addrValid ? t("wallet.invalidAddress") : t("wallet.addressHint")}
               </div>
             </div>
 
             <div className="field">
               <label>{t("wallet.withdrawAmount")}</label>
-              <div style={{ display: "flex", gap: 8 }}>
+              <div className="input-row">
                 <input className={`input mono ${amount && !amountValid ? "invalid" : ""}`} value={amount}
                   onChange={(e) => setAmount(e.target.value)} placeholder="0.00" inputMode="decimal" />
                 <button className="btn ghost" onClick={() => setAmount((availableMicros / 1_000_000).toString())}
@@ -283,7 +283,7 @@ export function WalletPage() {
             </div>
 
             {limits?.whitelist_only && (
-              <div className="callout warn" style={{ marginBottom: 14 }}>
+              <div className="callout warn card-lead">
                 <IconShield /><span>{t("wallet.whitelistOnly")}</span>
               </div>
             )}
@@ -300,8 +300,8 @@ export function WalletPage() {
 
       {/* ── Deposit / withdrawal history ── */}
       <Card>
-        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
-          <h3 style={{ flex: 1 }}>{t("wallet.historyTitle")}</h3>
+        <div className="card-toolbar">
+          <h3>{t("wallet.historyTitle")}</h3>
           <div className="tabstrip">
             {histTabs.map((h) => (
               <button key={h.id} className={histTab === h.id ? "active" : ""} onClick={() => setHistTab(h.id)}>{h.label}</button>
@@ -311,7 +311,7 @@ export function WalletPage() {
 
         {loading ? (
           <div className="stack-gap">
-            {Array.from({ length: 3 }, (_, i) => <Skeleton key={i} h={44} r={10} />)}
+            {Array.from({ length: 3 }, (_, i) => <Skeleton key={i} h={40} r={10} />)}
           </div>
         ) : rows.length === 0 ? (
           <Empty icon={<IconRecords />} title={t("wallet.histEmpty")} desc={t("wallet.histEmptyDesc")} />
@@ -322,7 +322,7 @@ export function WalletPage() {
                 <tr>
                   <th>{t("wallet.colTime")}</th>
                   <th>{t("wallet.colType")}</th>
-                  <th style={{ textAlign: "right" }}>{t("wallet.colAmount")}</th>
+                  <th className="num">{t("wallet.colAmount")}</th>
                   <th>{t("wallet.colStatus")}</th>
                   <th>{t("wallet.colTx")}</th>
                 </tr>
@@ -330,18 +330,18 @@ export function WalletPage() {
               <tbody>
                 {rows.map((f) => (
                   <tr key={f.key}>
-                    <td className="tabular" style={{ whiteSpace: "nowrap" }}>{fmtTime(f.ts)}</td>
+                    <td className="tabular nowrap">{fmtTime(f.ts)}</td>
                     <td>
                       <span className={`flow-kind ${f.kind}`}>
                         {f.kind === "deposit" ? <IconDownload /> : <IconArrowRight />}
                         {t(f.kind === "deposit" ? "wallet.kindDeposit" : "wallet.kindWithdraw")}
                       </span>
                     </td>
-                    <td className="mono tabular" style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                    <td className="mono tabular num nowrap">
                       <span className={f.kind === "deposit" ? "amt-in" : "amt-out"}>
                         {f.kind === "deposit" ? "+" : "−"}{fmtUsdt(f.amount)}
                       </span>
-                      {f.fee > 0 && <div className="faint" style={{ fontSize: 11 }}>{t("wallet.feeN", { amount: fmtUsdt(f.fee) })}</div>}
+                      {f.fee > 0 && <div className="td-note">{t("wallet.feeN", { amount: fmtUsdt(f.fee) })}</div>}
                     </td>
                     <td>{statusPill(f)}</td>
                     <td>
