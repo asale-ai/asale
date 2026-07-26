@@ -19,7 +19,9 @@
     pwsh scripts/package.ps1 -Bundles msi
     pwsh scripts/package.ps1 -NoSign -Debug
 #>
-[CmdletBinding()]
+# 不要加 [CmdletBinding()]：那会给脚本自动带上 -Debug 等通用参数，和下面自己声明的
+# -Debug 撞名，PowerShell 直接拒绝执行（MetadataError: A parameter with the name
+# 'Debug' was defined multiple times）。这里保留 -Debug 是为了和 package.sh 的 --debug 对齐。
 param(
     [string]$Target  = "",              # 例：x86_64-pc-windows-msvc / aarch64-pc-windows-msvc
     [string]$Bundles = "msi,nsis",

@@ -27,7 +27,18 @@
 #     APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY
 #                                          没配 → .app/.dmg 未签名，别人机器上会被
 #                                          Gatekeeper 拦（“已损坏，无法打开”）
-#     APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID   公证用；三个都给才会走公证
+#     公证凭据，两组二选一（只签名不公证的话，macOS 10.15+ 照样拦）：
+#       APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID
+#                                          APPLE_PASSWORD 是 appleid.apple.com 生成的
+#                                          App 专用密码，不是账号密码
+#       APPLE_API_ISSUER / APPLE_API_KEY / APPLE_API_KEY_CONTENT
+#                                          App Store Connect API Key，CI 更合适：不绑
+#                                          个人账号、不受 2FA 影响、可单独吊销。
+#                                          APPLE_API_KEY 是 Key ID（10 位），
+#                                          APPLE_API_KEY_CONTENT 是 .p8 文件的全文，
+#                                          本 workflow 会把它落成 tauri 要的
+#                                          APPLE_API_KEY_PATH。
+#                                          别和上面那组同时配，tauri 只会用其中一组。
 #     TAURI_WINDOWS_CERT_THUMBPRINT        没配 → 安装包触发 SmartScreen“未知发布者”
 #
 #   Variables（选填，留空则用 .env.example 里的生产默认值）
@@ -84,16 +95,6 @@ jobs:
             artifact: asale-linux-x64
             bundle: target/release/bundle
 
-    env:
-      # Tauri CLI 自己会读这些做签名/公证；没配就是不签，脚本会打印告警。
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      TAURI_WINDOWS_CERT_THUMBPRINT: ${{ secrets.TAURI_WINDOWS_CERT_THUMBPRINT }}
-
     steps:
       # 下面几个 action 都钉在 node24 运行时的大版本上：v4 系列跑的是 node20，
       # runner 已经不再提供，只会被强制降级执行并每次打 deprecation 告警。
@@ -145,6 +146,18 @@ jobs:
           GEMINI_ID: ${{ secrets.ASALE_OAUTH_CLIENT_ID_GEMINI }}
           GEMINI_SECRET: ${{ secrets.ASALE_OAUTH_CLIENT_SECRET_GEMINI }}
           UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # 代码签名/公证证书。故意只在这一步定义、下面按需转发（见 run 里的说明），
+          # 不能写在 job 级 env 里。
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+          TAURI_WINDOWS_CERT_THUMBPRINT: ${{ secrets.TAURI_WINDOWS_CERT_THUMBPRINT }}
           # 注意求值顺序：GitHub 的 && / || 返回操作数本身而不是布尔，写成
           # `A && inputs.sign || true` 时 sign=false 会被 `|| true` 吃掉。
           SIGN: ${{ github.event_name != 'workflow_dispatch' || inputs.sign }}
@@ -188,6 +201,35 @@ jobs:
             printf '%s' "$UPDATER_KEY" > asale-updater.key
           else
             echo "::warning::sign=false：产物不带 .sig，自动更新用不了，只能本地验证"
+          fi
+
+          # 代码签名证书：只把**非空**的转发给后面的步骤。
+          # `env: X: ${{ secrets.X }}` 在 secret 没配时给的是"定义了但为空"，不是没定义；
+          # tauri 判的是变量在不在，于是会拿着空证书去跑 security import / signtool 然后失败
+          # （macOS 上就是 SecKeychainItemImport: One or more parameters ... were not valid，
+          # 表现成 failed codesign application，而不是我们想要的"跳过签名"）。
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+                      APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID \
+                      APPLE_API_ISSUER APPLE_API_KEY TAURI_WINDOWS_CERT_THUMBPRINT; do
+            value="${!name}"
+            [[ -n "$value" ]] || continue
+            # 用分隔符写法：证书是多行 base64 时 `NAME=value` 会把 $GITHUB_ENV 写坏。
+            printf '%s<<__ASALE_EOF__\n%s\n__ASALE_EOF__\n' "$name" "$value" >> "$GITHUB_ENV"
+          done
+
+          # App Store Connect API Key 走公证：tauri 要的是文件路径（APPLE_API_KEY_PATH），
+          # 而 secret 只能存内容，所以在这儿落盘。文件名按 notarytool 的惯例带上 Key ID。
+          # 只在 macOS runner 上写：另外两个平台用不到，没必要把私钥摊到磁盘上。
+          if [[ "$RUNNER_OS" == "macOS" && -n "$APPLE_API_KEY_CONTENT" ]]; then
+            if [[ -z "$APPLE_API_KEY" || -z "$APPLE_API_ISSUER" ]]; then
+              echo "::error::配了 APPLE_API_KEY_CONTENT 但缺 APPLE_API_KEY（Key ID）或" \
+                   "APPLE_API_ISSUER（Issuer UUID），公证三个都要。"
+              exit 1
+            fi
+            key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+            printf '%s\n' "$APPLE_API_KEY_CONTENT" > "$key_path"
+            chmod 600 "$key_path"
+            echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
           fi
 
       # 参数拼在一行里：不签名时表达式求值成空串，写成续行会留下一个孤零零的
