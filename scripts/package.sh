@@ -117,6 +117,9 @@ step "安装前端依赖"
 pnpm install --frozen-lockfile
 
 args=(tauri build)
+# 光是不 export 私钥还不够：tauri.conf.json 里有 pubkey，bundler 会认定"配了公钥却
+# 没私钥"直接报错。要跳过就得明说。
+if [[ $SIGN == 0 ]]; then args+=(--no-sign); fi
 if [[ -n "$PROFILE" ]]; then args+=("$PROFILE"); fi
 if [[ -n "$TARGET"  ]]; then args+=(--target "$TARGET"); fi
 if [[ -n "$BUNDLES" ]]; then args+=(--bundles "$BUNDLES"); fi

@@ -108,6 +108,9 @@ if ($LASTEXITCODE -ne 0) { Die "pnpm install 失败" }
 # `tauri build` 出的就是 release，v2 的 CLI 没有 --release 这个参数
 # （给了直接报 "unexpected argument"）。只有反过来的 --debug。
 $tauriArgs = @("tauri", "build")
+# 光是不设私钥还不够：tauri.conf.json 里有 pubkey，bundler 会认定"配了公钥却
+# 没私钥"直接报错。要跳过就得明说。
+if ($NoSign) { $tauriArgs += "--no-sign" }
 if ($Debug) { $tauriArgs += "--debug" }
 if ($Target)  { $tauriArgs += @("--target", $Target) }
 if ($Bundles) { $tauriArgs += @("--bundles", $Bundles) }
