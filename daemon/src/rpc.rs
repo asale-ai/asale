@@ -164,6 +164,10 @@ macro_rules! rpc_args {
 rpc_args! {
     ProxyArgs      { mode: String, #[serde(default)] url: Option<String> }
     CredentialArgs { email: String, password: String }
+    // Registration takes the country the sign-up screen collected; the server
+    // requires it, and it is the only moment the platform can learn one.
+    RegisterArgs   { email: String, password: String, #[serde(default)] region: String }
+    EmailArgs      { email: String }
     LabelArgs      { #[serde(default)] label: Option<String> }
     ProviderArgs   { provider: String }
     OauthLoginArgs { provider: String, #[serde(default, alias = "open_local")] open_local: Option<bool> }
@@ -172,6 +176,8 @@ rpc_args! {
         provider: String,
         #[serde(default)] link: Option<bool>,
         #[serde(default, alias = "open_local")] open_local: Option<bool>,
+        /// Only honoured when the exchange creates a new account.
+        #[serde(default)] region: Option<String>,
     }
     ProfileArgs    { #[serde(default)] name: Option<String>, #[serde(default)] region: Option<String> }
     PasswordArgs   {
@@ -272,12 +278,16 @@ async fn rpc(
 
         // ── auth + profile ──────────────────────────────────────────────
         "register" => {
-            let p: CredentialArgs = args(&a)?;
-            commands::register(st, p.email, p.password).await?
+            let p: RegisterArgs = args(&a)?;
+            commands::register(st, p.email, p.password, p.region).await?
         },
         "login" => {
             let p: CredentialArgs = args(&a)?;
             commands::login(st, p.email, p.password).await?
+        },
+        "resend_verification" => {
+            let p: EmailArgs = args(&a)?;
+            commands::resend_verification(st, p.email).await?
         },
         "update_profile" => {
             let p: ProfileArgs = args(&a)?;
@@ -307,8 +317,14 @@ async fn rpc(
         },
         "platform_oauth_login" => {
             let p: PlatformOauthArgs = args(&a)?;
-            commands::platform_oauth_login(st, p.provider, p.link.unwrap_or(false), p.open_local.unwrap_or(false))
-                .await?
+            commands::platform_oauth_login(
+                st,
+                p.provider,
+                p.link.unwrap_or(false),
+                p.open_local.unwrap_or(false),
+                p.region.unwrap_or_default(),
+            )
+            .await?
         },
 
         // ── accounts + lanes ────────────────────────────────────────────

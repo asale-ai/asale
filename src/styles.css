@@ -102,6 +102,9 @@
   --s6: 24px;
   --s7: 32px;
 
+  /* Width of the sidebar icon column (logo mark, nav glyphs, user avatar). */
+  --nav-ico-w: 26px;
+
   /* Radii — three steps */
   --r1: 8px;
   --r2: 10px;
@@ -187,13 +190,16 @@ h4 { font-size: var(--fs-sub); font-weight: 600; letter-spacing: -0.006em; margi
   flex-direction: column;
   gap: 1px;
 }
+/* The sidebar is a two-column list: a --nav-ico-w icon column starting at the
+   row padding, then the label. The logo, every nav item and the user card all
+   use it, so their labels share one left edge. */
 .logo {
-  display: flex; align-items: center; gap: var(--s2);
+  display: flex; align-items: center; gap: var(--s3);
   font-size: 17px; font-weight: 600; letter-spacing: -0.02em;
   padding: 0 var(--s2) var(--s6);
 }
 .logo .logo-mark {
-  width: 26px; height: 26px; border-radius: var(--r1); flex-shrink: 0;
+  width: var(--nav-ico-w); height: var(--nav-ico-w); border-radius: var(--r1); flex-shrink: 0;
   object-fit: contain; display: block;
 }
 
@@ -209,6 +215,13 @@ h4 { font-size: var(--fs-sub); font-weight: 600; letter-spacing: -0.006em; margi
   font-size: var(--fs-sub); font-weight: 500; width: 100%;
   white-space: nowrap; overflow: hidden;
   transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+/* Glyphs sit at the start of the column, not centred in it: that keeps their
+   left edge on the same line as the logo mark, the avatar and the group
+   labels, so the sidebar reads as one two-column grid. */
+.nav-ico {
+  width: var(--nav-ico-w); flex-shrink: 0;
+  display: flex; align-items: center; justify-content: flex-start;
 }
 .navitem svg { width: 17px; height: 17px; flex-shrink: 0; }
 .navitem:hover { color: var(--fg); background: var(--surface-2); }
@@ -228,7 +241,7 @@ h4 { font-size: var(--fs-sub); font-weight: 600; letter-spacing: -0.006em; margi
 .sidebar-user.active { background: var(--surface-2); }
 .sidebar-user.active .su-name { color: var(--fg); }
 .su-avatar {
-  width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0;
+  width: var(--nav-ico-w); height: var(--nav-ico-w); border-radius: 50%; flex-shrink: 0;
   object-fit: cover; display: grid; place-items: center;
 }
 .su-initial {

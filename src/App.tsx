@@ -73,7 +73,10 @@ export function App() {
 
   const navBtn = (id: Tab) => (
     <button key={id} className={`navitem ${tab === id ? "active" : ""}`} onClick={() => setTab(id)}>
-      {ICONS[id]}
+      {/* Fixed-width icon slot: nav glyphs are 17px but the logo mark and the
+          user avatar are 26px, so without it the three label columns in the
+          sidebar start at three different x. */}
+      <span className="nav-ico">{ICONS[id]}</span>
       {t(`nav.${id}`)}
     </button>
   );

@@ -8,18 +8,60 @@ use super::server_client::{authed, finish_auth, resp_json};
 use super::{R, err};
 
 /// Register a new account on the server; stores tokens in the secret store.
-pub async fn register(state: &AppState, email: String, password: String) -> R<Value> {
+///
+/// `region` is the ISO 3166-1 alpha-2 country picked on the sign-up screen. The
+/// server rejects a missing or malformed one: nothing about a user's location is
+/// ever inferred, so sign-up is the only place it can be established.
+///
+/// Registering does **not** sign the user in: the server withholds the token
+/// pair until the link it mails has been clicked. The answer is therefore a
+/// pending state for the UI to render, not a session — passing it to
+/// `finish_auth` would read the absent tokens as an authentication failure and
+/// report "auth failed" for a registration that in fact succeeded.
+pub async fn register(state: &AppState, email: String, password: String, region: String) -> R<Value> {
     let http = asale_client_core::http::plain();
     let resp = http
         .post(format!("{}/api/v1/auth/register", state.cfg.server_api_base))
-        .json(&json!({"email": email, "password": password}))
+        .json(&json!({"email": email, "password": password, "region": region}))
         .send()
         .await
         .map_err(err)?;
-    finish_auth(&resp_json(resp).await?).await
+    let v = resp_json(resp).await?;
+    if v.get("verification_required").and_then(Value::as_bool).unwrap_or(false) {
+        return Ok(json!({
+            "verification_required": true,
+            "verification_sent": v.get("verification_sent").and_then(Value::as_bool).unwrap_or(false),
+            "user_id": v["user_id"],
+            "email": v["email"],
+        }));
+    }
+    // No gate configured on this server — the old immediate-session contract.
+    finish_auth(&v).await
+}
+
+/// Ask the server to mail a fresh verification link.
+///
+/// Needed on the desktop client too: without it a user whose verification mail
+/// never arrived has no way forward from this app at all, since the account
+/// exists (so re-registering is refused) but cannot sign in.
+pub async fn resend_verification(state: &AppState, email: String) -> R<Value> {
+    let http = asale_client_core::http::plain();
+    let resp = http
+        .post(format!("{}/api/v1/auth/resend-verification", state.cfg.server_api_base))
+        .json(&json!({"email": email}))
+        .send()
+        .await
+        .map_err(err)?;
+    resp_json(resp).await
 }
 
 /// Log in; stores tokens in the secret store.
+///
+/// An unverified address is reported as the same `verification_required` shape
+/// `register` returns, rather than as an error. The password was correct and the
+/// account exists — the user needs the resend button, and `resp_json` would
+/// flatten the server's `email_unverified` code into a bare message the UI
+/// cannot branch on.
 pub async fn login(state: &AppState, email: String, password: String) -> R<Value> {
     let http = asale_client_core::http::plain();
     let resp = http
@@ -28,7 +70,15 @@ pub async fn login(state: &AppState, email: String, password: String) -> R<Value
         .send()
         .await
         .map_err(err)?;
-    finish_auth(&resp_json(resp).await?).await
+    let status = resp.status();
+    let v: Value = resp.json().await.map_err(err)?;
+    if !status.is_success() {
+        if v["error"]["code"].as_str() == Some("email_unverified") {
+            return Ok(json!({"verification_required": true, "email": email}));
+        }
+        return Err(v["error"]["message"].as_str().unwrap_or("request failed").to_string());
+    }
+    finish_auth(&v).await
 }
 
 /// Personal center: profile snapshot (name, avatar, linked providers, …).

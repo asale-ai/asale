@@ -399,6 +399,8 @@
     "email": "電子郵件",
     "password": "密碼",
     "region": "地區",
+    "regionPlaceholder": "請選擇國家/地區",
+    "regionHint": "用於市場分佈與地區結算規則，之後可在個人資料中修改。",
     "signIn": "登入",
     "createAccount": "建立帳戶",
     "runInside": "請在桌面應用程式中執行以登入。",
@@ -442,7 +444,14 @@
       "desc": "登入後自動產生並快取在本機；本機代理會自動使用。如有需要可重新產生。",
       "provisioning": "正在產生 API 金鑰…",
       "regenerate": "重新產生"
-    }
+    },
+    "verifySentTitle": "請查收郵件",
+    "verifySentSubtitle": "我們已向 {{email}} 寄送了一封驗證郵件。",
+    "verifySentHint": "點擊郵件中的連結完成註冊，然後回到這裡登入。連結 24 小時內有效。若幾分鐘後仍未收到，請檢查垃圾郵件，或重新寄送一封。",
+    "verifyResend": "重新寄送連結",
+    "verifyResent": "新的驗證連結已寄出。",
+    "verifySendFailed": "帳號已建立，但驗證郵件寄送失敗，請重新取得連結。",
+    "backToSignIn": "返回登入"
   },
   "settings": {
     "title": "設定",

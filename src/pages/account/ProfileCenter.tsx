@@ -1,7 +1,8 @@
 // Personal center (signed-in view): profile, security (password + linked
 // accounts), preferences (language/theme), API key, sign-out.
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { countryOptions } from "@shared/countries";
 import { invoke, inTauri, runOAuthFlow, type Profile } from "../../lib";
 import { LANGUAGES, setLanguage, type Language } from "../../i18n";
 import { THEMES, useTheme, type Theme } from "../../theme";
@@ -26,6 +27,7 @@ export function ProfileCenter({ profile, onProfile, onLogout }: Props) {
 
   const [name, setName] = useState(profile.name ?? "");
   const [region, setRegion] = useState(profile.region ?? "");
+  const countries = useMemo(() => countryOptions(i18n.language), [i18n.language]);
   const [profileMsg, setProfileMsg] = useState("");
   const [profileErr, setProfileErr] = useState("");
 
@@ -122,7 +124,14 @@ export function ProfileCenter({ profile, onProfile, onLogout }: Props) {
           </div>
           <div className="field">
             <label>{t("account.region")}</label>
-            <input className="input" value={region} onChange={(e) => setRegion(e.target.value)} placeholder="—" />
+            {/* A picker, not a text box: the server takes ISO codes only, and
+                the world map counts one country per exact code. */}
+            <select className="input" value={region} onChange={(e) => setRegion(e.target.value)}>
+              <option value="">{t("account.regionPlaceholder")}</option>
+              {countries.map((c) => (
+                <option key={c.code} value={c.code}>{c.name}</option>
+              ))}
+            </select>
           </div>
         </div>
         <button className="btn" onClick={saveProfile}>{t("account.profile.save")}</button>

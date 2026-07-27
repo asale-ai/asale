@@ -133,7 +133,13 @@ pub(crate) async fn finish_provider_oauth(
 /// loopback callback; the server builds the authorize URL and exchanges the
 /// code. `link=false` logs in and stores tokens; `link=true` binds the
 /// identity to the currently signed-in account. Two-step like `oauth_login`.
-pub async fn platform_oauth_login(state: &Arc<AppState>, provider: String, link: bool, open_local: bool) -> R<Value> {
+pub async fn platform_oauth_login(
+    state: &Arc<AppState>,
+    provider: String,
+    link: bool,
+    open_local: bool,
+    region: String,
+) -> R<Value> {
     if provider != "google" && provider != "github" {
         return Err("unknown provider".to_string());
     }
@@ -156,6 +162,10 @@ pub async fn platform_oauth_login(state: &Arc<AppState>, provider: String, link:
             ("redirect_uri", redirect_uri.as_str()),
             ("state", csrf.as_str()),
             ("code_challenge", pkce.challenge.as_str()),
+            // Picks the provider registration that accepts an ephemeral
+            // loopback callback; the web app's cannot. Must be repeated on the
+            // exchange, or the code goes to a different client_id.
+            ("client", "desktop"),
         ])
         .send()
         .await
@@ -178,7 +188,16 @@ pub async fn platform_oauth_login(state: &Arc<AppState>, provider: String, link:
             let http = asale_client_core::http::plain();
             let mut req = http
                 .post(format!("{}/api/v1/auth/oauth/{}/exchange", st.cfg.server_api_base, prov))
-                .json(&json!({"code": code, "redirect_uri": redirect_uri, "code_verifier": pkce.verifier}));
+                // `region` is the country the sign-up screen collected; the
+                // server applies it only if this exchange creates an account,
+                // so sending it on a returning user's login is a no-op.
+                .json(&json!({
+                    "code": code,
+                    "redirect_uri": redirect_uri,
+                    "code_verifier": pkce.verifier,
+                    "region": region,
+                    "client": "desktop",
+                }));
             if let Some(token) = link_token {
                 req = req.header("authorization", format!("Bearer {token}"));
             }

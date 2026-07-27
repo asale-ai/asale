@@ -399,6 +399,8 @@
     "email": "Email",
     "password": "Password",
     "region": "Region",
+    "regionPlaceholder": "Select your country",
+    "regionHint": "Used for market distribution and regional settlement rules; you can change it later in your profile.",
     "signIn": "Sign in",
     "createAccount": "Create account",
     "runInside": "Run inside the desktop app to sign in.",
@@ -442,7 +444,14 @@
       "desc": "Generated automatically after sign-in and cached locally; the proxy uses it automatically. Regenerate if you need to.",
       "provisioning": "Generating API key…",
       "regenerate": "Regenerate"
-    }
+    },
+    "verifySentTitle": "Check your inbox",
+    "verifySentSubtitle": "We sent a verification link to {{email}}.",
+    "verifySentHint": "Click the link in that email to finish creating your account, then sign in here. The link expires in 24 hours. If it hasn't arrived in a few minutes, check your spam folder or send a new one.",
+    "verifyResend": "Send a new link",
+    "verifyResent": "A new verification link is on its way.",
+    "verifySendFailed": "Your account was created, but the verification email could not be sent. Please request a new link.",
+    "backToSignIn": "Back to sign in"
   },
   "settings": {
     "title": "Settings",

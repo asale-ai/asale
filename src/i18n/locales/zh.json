@@ -399,6 +399,8 @@
     "email": "邮箱",
     "password": "密码",
     "region": "地区",
+    "regionPlaceholder": "请选择国家/地区",
+    "regionHint": "用于市场分布与地区结算规则，之后可在个人资料中修改。",
     "signIn": "登录",
     "createAccount": "创建账户",
     "runInside": "请在桌面应用中运行以登录。",
@@ -442,7 +444,14 @@
       "desc": "登录后自动生成并缓存在本地；本地代理会自动使用。如需可重新生成。",
       "provisioning": "正在生成 API 密钥…",
       "regenerate": "重新生成"
-    }
+    },
+    "verifySentTitle": "请查收邮件",
+    "verifySentSubtitle": "我们已向 {{email}} 发送了一封验证邮件。",
+    "verifySentHint": "点击邮件中的链接完成注册，然后回到这里登录。链接 24 小时内有效。若几分钟后仍未收到，请检查垃圾邮件，或重新发送一封。",
+    "verifyResend": "重新发送链接",
+    "verifyResent": "新的验证链接已发送。",
+    "verifySendFailed": "账号已创建，但验证邮件发送失败，请重新获取链接。",
+    "backToSignIn": "返回登录"
   },
   "settings": {
     "title": "设置",

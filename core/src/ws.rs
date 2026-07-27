@@ -431,6 +431,14 @@ async fn run_session(
 
     // Hello + supply declaration up front.
     //
+    // The hello carries the device id and nothing else. It used to also send
+    // the app version and `std::env::consts::OS`; the gateway has no arm for
+    // `hello` at all (it authenticates the device from the handshake headers
+    // and drops the frame), so those two fields were telemetry that no one
+    // read — and a client that ships them cannot honestly say it doesn't
+    // profile the machine it runs on. Anything the gateway genuinely needs
+    // about this device arrives signed, in the handshake.
+    //
     // Every declaration is a full snapshot of what this device currently
     // offers, stamped with a per-session sequence so the gateway can drop one
     // that arrives out of order (a nudge and a periodic tick can overlap) and
@@ -438,7 +446,7 @@ async fn run_session(
     let seq = Arc::new(std::sync::atomic::AtomicU64::new(1));
     let _ = out_tx.send(Envelope::new(
         protocol::T_HELLO,
-        serde_json::json!({"device_id": cfg.device_id, "app_version": env!("CARGO_PKG_VERSION"), "os": std::env::consts::OS}),
+        serde_json::json!({"device_id": cfg.device_id}),
     ));
     let items = deps.supply.declare_items().await;
     let _ = out_tx.send(Envelope::new(
