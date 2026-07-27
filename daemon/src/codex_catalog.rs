@@ -44,12 +44,6 @@ use std::time::{Duration, Instant};
 /// How long `codex debug models` may take before we give up on it.
 const DUMP_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Native slugs the desktop app hard-codes into its "power" slider, labelled
-/// there from a table compiled into the app rather than from the catalog.
-/// Renaming one would leave the slider saying "5.6 Sol" over a Claude model, so
-/// they never carry a market model even when they are otherwise eligible.
-const POWER_SLIDER_SLUGS: &[&str] = &["gpt-5.6-sol", "gpt-5.6-terra"];
-
 fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
 }
@@ -282,18 +276,20 @@ fn slug_of(entry: &Value) -> &str {
 
 /// The native entries a market model may be published under, best first.
 ///
-/// Only entries the picker already lists qualify — a slug OpenAI hides is a
-/// slug their allowlist need not carry either. `use_responses_lite` models are
-/// skipped because their slimmed-down request shape is tied to a specific
-/// OpenAI model generation, as are the two the desktop app labels from its own
-/// hard-coded power-slider table.
+/// Everything here is read off the dump rather than named, so a new OpenAI
+/// generation changes which slugs get used without changing this code:
+///   - only entries the picker already lists qualify — a slug OpenAI hides is
+///     a slug their allowlist need not carry either;
+///   - `use_responses_lite` entries are skipped. Their slimmed-down request
+///     shape is tied to one OpenAI model generation, and it is that same
+///     current-generation set the desktop app labels from its own compiled-in
+///     "power slider" table — a label our `display_name` cannot override.
 fn pick_carriers(models: &[Value]) -> Vec<String> {
     let mut usable: Vec<&Value> = models
         .iter()
         .filter(|m| {
             m.get("visibility").and_then(Value::as_str) == Some("list")
                 && m.get("use_responses_lite").and_then(Value::as_bool) != Some(true)
-                && !POWER_SLIDER_SLUGS.contains(&slug_of(m))
                 && !slug_of(m).is_empty()
         })
         .collect();

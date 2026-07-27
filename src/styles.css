@@ -1007,6 +1007,16 @@ code { background: var(--bg-2); padding: 1px 5px; border-radius: 5px; font-size:
 .callout.danger { background: var(--danger-soft); }
 .callout.danger svg { color: var(--danger); }
 .callout.compact { padding: var(--s2) var(--s3); margin: 0; }
+/* Dismiss button on a callout the user can put away — far edge, top-aligned
+   with the first line of text. */
+.callout-x {
+  display: grid; place-items: center; width: 20px; height: 20px; flex-shrink: 0;
+  margin: -1px -3px -1px auto; padding: 0;
+  border: none; border-radius: var(--r1); background: transparent; color: var(--fg-3); cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.callout-x:hover { background: var(--surface-2); color: var(--fg); }
+.callout .callout-x svg { width: 11px; height: 11px; margin-top: 0; color: currentColor; }
 /* A callout (or control) closing a card, below whatever it qualifies — and its
    mirror, opening one above whatever it introduces. */
 .card-foot { margin-top: var(--s3); }
@@ -1310,6 +1320,12 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 }
 .opt:hover { background: var(--surface-2); }
 .opt.on { background: var(--accent-soft); }
+/* Priced but nobody is selling it: still listed, so the catalog does not
+   appear to lose models every time supply moves — just not pickable. */
+.opt.off { cursor: not-allowed; }
+.opt.off:hover { background: transparent; }
+.opt.off .opt-box { opacity: 0.4; }
+.opt.off .opt-name, .opt.off .opt-meta { color: var(--fg-3); }
 .opt-box {
   width: 16px; height: 16px; flex-shrink: 0; border-radius: 5px;
   border: 1.5px solid var(--fg-3); display: grid; place-items: center; color: transparent;
@@ -1325,6 +1341,7 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
   flex-shrink: 0; white-space: nowrap; font-size: var(--fs-micro); font-weight: 500;
   padding: 2px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent);
 }
+.opt-tag.muted { background: var(--surface-2); color: var(--fg-3); }
 .opt-empty { text-align: center; color: var(--fg-2); font-size: var(--fs-sub); padding: var(--s7) var(--s3); }
 .opt-empty svg { width: 22px; height: 22px; color: var(--fg-3); margin-bottom: var(--s2); }
 

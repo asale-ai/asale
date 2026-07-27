@@ -23,6 +23,14 @@ export interface ModelOption {
   meta?: string;
   /** Short right-hand tag, e.g. a discount. */
   tag?: string;
+  /**
+   * Why this model cannot be picked right now (e.g. nobody is supplying it).
+   * Set = the row is shown greyed with this label and does not respond to a
+   * click. Shown rather than hidden on purpose: supply moves by the second, and
+   * dropping rows in and out of the list reads as the catalog losing models.
+   * A model that is *already* picked stays clickable so it can be removed.
+   */
+  unavailable?: string;
 }
 
 const UNKNOWN_VENDOR = "__other__";
@@ -166,13 +174,21 @@ function ModelDialog({
           ) : (
             list.map((o) => {
               const on = draft.includes(o.id);
+              const blocked = !!o.unavailable && !on;
               return (
-                <button key={o.id} type="button" className={`opt ${on ? "on" : ""}`} onClick={() => pick(o.id)}>
+                <button
+                  key={o.id}
+                  type="button"
+                  className={`opt ${on ? "on" : ""} ${blocked ? "off" : ""}`}
+                  aria-disabled={blocked}
+                  onClick={() => { if (!blocked) pick(o.id); }}
+                >
                   <span className={`opt-box ${multiple ? "" : "radio"} ${on ? "on" : ""}`}><IconCheck /></span>
                   <span className="opt-main">
                     <span className="opt-name" title={o.id}>{o.label ?? o.id}</span>
                     <span className="opt-meta mono">{o.id}{o.meta && ` · ${o.meta}`}</span>
                   </span>
+                  {o.unavailable && <span className="opt-tag muted">{o.unavailable}</span>}
                   {o.tag && <span className="opt-tag">{o.tag}</span>}
                 </button>
               );
@@ -186,8 +202,12 @@ function ModelDialog({
               <button
                 type="button"
                 className="btn sm subtle"
-                onClick={() => setDraft((d) => [...new Set([...d, ...list.map((o) => o.id)])])}
-                disabled={list.length === 0}
+                onClick={() =>
+                  setDraft((d) => [
+                    ...new Set([...d, ...list.filter((o) => !o.unavailable).map((o) => o.id)]),
+                  ])
+                }
+                disabled={list.every((o) => !!o.unavailable)}
               >
                 {t("modelPicker.selectAll")}
               </button>

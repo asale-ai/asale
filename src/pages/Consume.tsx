@@ -6,7 +6,7 @@ import {
 } from "../lib";
 import { Card, Ok, Err, SkeletonRows, PageHead, IconAction, Mark } from "../ui";
 import { ModelMultiSelect, type ModelOption } from "../components/ModelPicker";
-import { IconRoute, IconConsume, IconRefresh, IconCheck, IconAlert } from "../icons";
+import { IconRoute, IconConsume, IconRefresh, IconCheck, IconAlert, IconX } from "../icons";
 
 const priceOf = (m: MarketModel, type: string) => m.prices.find((p) => p.token_type === type);
 const usd = (micros: number) => `$${pricePerMillion(micros).toFixed(2)}`;
@@ -15,6 +15,11 @@ const usd = (micros: number) => `$${pricePerMillion(micros).toFixed(2)}`;
  * Market catalog → picker options. The catalog is a few hundred models wide, so
  * each row carries the numbers a buyer actually chooses on: per-million in/out
  * price, context window, and the market's discount off the reference price.
+ *
+ * A model is listed because it is *priced*, which is not the same as being
+ * *available*: the catalog carries every model the platform knows how to
+ * settle, and at any moment some of them have nobody selling them. Those are
+ * greyed rather than dropped — see `ModelOption.unavailable`.
  */
 function toOptions(
   market: MarketModel[],
@@ -38,6 +43,7 @@ function toOptions(
         vendor: m.provider,
         meta: bits.join(" · ") || undefined,
         tag: off > 0 ? `-${off}%` : undefined,
+        unavailable: m.supply_capacity_tokens > 0 ? undefined : t("consume.noSupply"),
       };
     })
     .sort((a, b) => (a.label ?? a.id).localeCompare(b.label ?? b.id));
@@ -52,6 +58,10 @@ export function Consume() {
   const [loading, setLoading] = useState(inTauri);
   /** Tools with an action in flight, keyed by tool id. */
   const [pending, setPending] = useState<Record<string, boolean>>({});
+  /** Tools changed since this page was opened. A running CLI reads its config
+   *  once at startup, so neither the switch nor a model edit reaches a session
+   *  that is already up — the row keeps saying so until the user dismisses it. */
+  const [restart, setRestart] = useState<Record<string, boolean>>({});
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
   const [refreshing, setRefreshing] = useState(false);
@@ -96,7 +106,10 @@ export function Consume() {
       });
       if (enabled !== tool.enabled) {
         setMsg(enabled ? t("consume.buyOnDone", { tool: tool.label }) : t("consume.buyOffDone", { tool: tool.label }));
+      } else if (nextModels !== undefined) {
+        setMsg(t("consume.modelsDone", { tool: tool.label }));
       }
+      setRestart((r) => ({ ...r, [tool.id]: true }));
       await loadTools();
     } catch (e) {
       setErr(String((e as Error).message));
@@ -171,6 +184,24 @@ export function Consume() {
                   {drifted && (
                     <div className="callout warn compact">
                       <IconAlert /><span>{t("consume.drifted", { path: tool.config_path })}</span>
+                    </div>
+                  )}
+
+                  {/* The change is on disk; the tool won't see it until it is
+                      started again. Dismissible — it is a reminder, not a state
+                      we can observe. */}
+                  {restart[tool.id] && (
+                    <div className="callout info compact">
+                      <IconRefresh />
+                      <span>{t("consume.restartNeeded", { tool: tool.label })}</span>
+                      <button
+                        type="button"
+                        className="callout-x"
+                        onClick={() => setRestart((r) => ({ ...r, [tool.id]: false }))}
+                        title={t("consume.restartDismiss")}
+                      >
+                        <IconX />
+                      </button>
                     </div>
                   )}
 
