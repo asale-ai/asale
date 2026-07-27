@@ -1,0 +1,147 @@
+<div align="center">
+
+<img src="public/logo.svg" width="88" alt="Asale">
+
+# Asale 用戶端
+
+### 把沒用完的 Token，分享給需要的人
+
+閒置額度換成收益，撞上限額時有人接力。
+
+[English](README.md) · [简体中文](README.zh-CN.md) · **繁體中文** · [日本語](README.ja.md)
+
+[官網](https://asale.ai) · [模型市場](https://asale.ai/zh-TW/market) ·
+[全球分佈](https://asale.ai/zh-TW/distribution) · [錢包](https://asale.ai/zh-TW/wallet) ·
+[**⬇ 下載用戶端**](#下載與安裝)
+
+</div>
+
+---
+
+## 這是什麼
+
+你買了 Claude Pro / Max、ChatGPT Plus / Codex 這類**按訂閱計費**的方案。
+額度按時間窗刷新，用不完就作廢；而在地球另一端，有人正卡在限額上等視窗重置。
+
+**Asale 是一個 Token 共享網路**，把這兩件事接起來：
+
+- **賣出** —— 你的閒置訂閱額度進入市場，別人撞限額時接過去用，你收 USDT。
+- **買入** —— 你的 AI CLI 指向 Asale，以低於官方 API 的價格用別人的閒置額度頂上。
+
+平台只做**媒合、轉發與計費**，一分鐘結一次帳，錢走 USDT（TRC20）。
+
+這裡是它的**桌面用戶端** —— 賣出方和買入方都在這個應用裡，一次安裝兩件事。
+
+![Asale 用戶端 · 總覽](docs/screenshots/zh-TW/dashboard.jpg)
+
+### Token 來源平台
+
+Claude Pro / Max · ChatGPT / Codex · Google Gemini · Kimi · xAI Grok
+
+其中用戶端已實作登入與設定切換的是 **Claude Code**、**Codex**、**Gemini CLI**，
+其餘在協定裡已有位置，隨轉接器補齊。
+
+---
+
+## 功能
+
+### 賣出 · 把閒置訂閱共享出去
+
+![賣出](docs/screenshots/zh-TW/sell.jpg)
+
+每個已連接的訂閱帳號**各有一個開關**，只有你打開的帳號才會接市場請求。每日賣出限額
+按帳號設定，到額自動停；視窗剩餘、到期時間、當日已售一目了然。
+
+憑證來自本機已登入的 CLI（`Claude Code credentials`、`.codex/auth.json` …），也可以在
+用戶端裡走 OAuth 重新登入。**憑證只留在本機**，進 OS keychain，資料庫裡只存參照。
+
+### 買入 · 讓本機的 AI CLI 走 Asale
+
+![買入](docs/screenshots/zh-TW/buy.jpg)
+
+自動偵測本機裝了哪些工具（Claude Code / Codex / Gemini CLI），每個工具一個開關。打開
+時改寫該工具的設定指向 Asale，並**備份原檔案**；關閉時原樣還原 —— 隨時可以退回官方。
+買入的模型按工具個別選，可多選。
+
+### 用量與限額 · 別把自己的日常用量賣光
+
+![用量](docs/screenshots/zh-TW/usage.jpg)
+
+按「我使用的 / 我買的 / 我賣的」三個口徑統計 token 用量、模型分佈與每日明細，配熱力圖
+與趨勢圖。限額頁把賣出上限設成**訂閱額度的百分比**，給自己留足日常餘量。
+
+### 錢包與記錄
+
+錢包頁對帳 USDT 收支：可用餘額、凍結（預先授權）、待結算收益，儲值提領走 TRON。記錄頁
+列出每一筆中轉，**賣出方與買入方的記錄可以互相核對**，平台抽成比例是否生效一目了然。
+同一套資料在 [網頁主控台](https://asale.ai/zh-TW/records) 也能看。
+
+---
+
+## 下載與安裝
+
+最新版 **v0.1.0**，免費。也可以直接從[官網首頁](https://asale.ai)下載，會自動辨識你的系統。
+
+| 平台 | 安裝包 | 狀態 |
+|---|---|---|
+| macOS（Apple 晶片 / Intel 通用） | [Asale_0.1.0_universal.dmg](https://asale.ai/download/Asale_0.1.0_universal.dmg) | ✅ 可下載 |
+| Windows | `Asale_0.1.0_x64-setup.exe` | 即將推出 |
+| Linux AppImage | `Asale_0.1.0_amd64.AppImage` | 即將推出 |
+| Linux .deb | `Asale_0.1.0_amd64.deb` | 即將推出 |
+
+<sup>Windows / Linux 版需要在對應系統上建置（Tauri 不能跨系統打包），見
+[開發文件 · 打包](docs/DEVELOPMENT.zh-TW.md#打包)。</sup>
+
+### macOS 安裝
+
+1. 下載 `.dmg`，開啟後把 **Asale** 拖進「應用程式」。
+2. 目前版本**未做 Apple 簽章與公證**，第一次開啟會被攔下。在
+   **系統設定 → 隱私權與安全性**裡點「仍要打開」即可；
+   或者在終端機執行 `xattr -dr com.apple.quarantine /Applications/Asale.app`。
+
+裝好之後應用會在背景常駐（選單列圖示），支援開機自動啟動，新版本自動更新。
+
+### 第一次使用
+
+1. 開啟用戶端，用 Asale 帳號**登入**（沒有就在
+   [asale.ai](https://asale.ai) 註冊，支援 OAuth）。
+2. **想賣**：去「賣出」頁 →「連接訂閱」，選平台完成 OAuth 登入；用戶端也會自動辨識本機
+   已登入的 CLI 憑證。打開帳號開關、設好每日限額，狀態變成「上線」就開始接單。
+3. **想買**：先在「錢包」儲值 USDT，再去「買入」頁打開對應工具的開關、選好模型，
+   **重新啟動該 CLI** 讓新的接入位址生效。
+
+> ⚠️ 別在一個正在執行的 Claude Code 工作階段裡切換 Claude Code 的買入開關 —— 設定被改寫
+> 會讓目前的工作階段失聯。切換後重新啟動工具即可。
+
+---
+
+## 安全與隱私
+
+與[官網「安全與隱私」](https://asale.ai/zh-TW)一致，這裡是對應到程式碼的版本：
+
+- **不保存、不快取對話內容。** 平台只做媒合、轉發與計費：資料庫沒有正文欄位，
+  記憶體逐塊轉發，不進 Redis，日誌不列印正文。
+- **全鏈路加密與簽章。** 每一跳都在 TLS 1.2/1.3 通道內；裝置用 Ed25519 身分簽握手，
+  每次派單都驗簽；用戶端**拒絕任何明文遠端位址**（非 loopback 必須 https/wss）。
+- **不擅自蒐集。** 回報欄位只有隨機 UUID 裝置 ID、版本、系統名稱與心跳；
+  不採硬體指紋、不做 IP 定位，用量統計不出本機。
+- **憑證不出本機。** 訂閱憑證存在 OS keychain 與 `~/.asale/auths`，伺服器端只拿到參照。
+
+> **透明聲明：** 請求最終由另一位使用者的用戶端代發給上游，正文在那一刻對該用戶端可見。
+> 我們不做、也無法做端對端加密，**請勿傳輸機密資訊**。
+
+用戶端原始碼就在本儲存庫，上面每一條都可以自己核對。
+
+---
+
+## 開發者
+
+架構說明、本機開發、打包與發佈流程見 **[docs/DEVELOPMENT.zh-TW.md](docs/DEVELOPMENT.zh-TW.md)**。
+
+---
+
+## 授權與風險
+
+[Apache License 2.0](LICENSE)
+
+Asale 僅提供技術中轉。**共享訂閱算力可能違反上游服務條款，風險自負。**
