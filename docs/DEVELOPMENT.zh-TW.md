@@ -85,8 +85,10 @@ Tauri 不能跨系統打包：`.dmg` 只能在 macOS 出，`.msi`/`.exe` 只能�
 自動更新走 `https://dl.asale.ai/updater/{{target}}/{{current_version}}`，
 需回傳標準 Tauri updater JSON，已是最新則 204。
 
-安裝包隨站台一起發佈（站台儲存庫的 `public/download/` 下各存一份）。macOS 包目前
-未做 Apple 簽章與公證，使用者第一次開啟需要手動放行。
+安裝包隨站台一起發佈（站台儲存庫的 `public/download/` 下各存一份）。macOS 包用 Developer ID
+憑證簽章並通過 Apple 公證，Gatekeeper 直接放行 —— 這一步在 `tauri build` 內部完成，依賴
+`.github/workflows/release.yml` 裡列的那組 `APPLE_*` secret。不設定就只能打出 ad-hoc 簽章的包，
+只能在自己機器上跑。
 
 ---
 

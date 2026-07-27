@@ -100,9 +100,11 @@ Claude Pro / Max · ChatGPT / Codex · Google Gemini · Kimi · xAI Grok
 ### macOS 安裝
 
 1. 下載 `.dmg`，開啟後把 **Asale** 拖進「應用程式」。
-2. 目前版本**未做 Apple 簽章與公證**，第一次開啟會被攔下。在
-   **系統設定 → 隱私權與安全性**裡點「仍要打開」即可；
-   或者在終端機執行 `xattr -dr com.apple.quarantine /Applications/Asale.app`。
+2. 沒有第二步。發布包都用 Developer ID 憑證簽章並通過了 Apple 公證，macOS 不會攔。
+
+<sup>`v0.1.0-6` 及更早的包是在設定好簽章之前打的，macOS 會以「Apple 無法檢查是否包含惡意軟體」
+攔下，升級到新版即可。如果一定要開啟這些舊包：**系統設定 → 隱私權與安全性**，拉到底部點
+「仍要打開」—— macOS 15 起 Apple 移除了右鍵開啟的舊方法，這是唯一的路徑。</sup>
 
 裝好之後應用會在背景常駐（選單列圖示），支援開機自動啟動，新版本自動更新。
 

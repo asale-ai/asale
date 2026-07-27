@@ -114,9 +114,13 @@ download section — Windows and Linux bundles have to be produced on the matchi
 ### Installing on macOS
 
 1. Download the `.dmg`, open it and drag **Asale** into Applications.
-2. This build is **not Apple-signed or notarized yet**, so the first launch is blocked.
-   Go to **System Settings → Privacy & Security** and click "Open Anyway", or run
-   `xattr -dr com.apple.quarantine /Applications/Asale.app` in a terminal.
+2. There is no step two. Bundles are signed with a Developer ID certificate and notarized
+   by Apple, so macOS opens them without a warning.
+
+<sup>`v0.1.0-6` and earlier were built before signing was set up: macOS blocks them with "Apple
+could not verify …". Update to a newer release. To open one of those old builds anyway, go to
+**System Settings → Privacy & Security**, scroll to the bottom and click "Open Anyway" — macOS 15
+removed the old Control-click → Open shortcut, this is the only route left.</sup>
 
 Once installed the app stays resident in the background (menu bar icon), supports launch
 at login, and updates itself.

@@ -96,8 +96,10 @@ Auto-update points at `https://dl.asale.ai/updater/{{target}}/{{current_version}
 must return the standard Tauri updater JSON, or 204 when already up to date.
 
 Installers are published together with the website (a copy of each lives under the site
-repo's `public/download/`). macOS bundles are currently neither Apple-signed nor notarized,
-so users have to allow them manually on first launch.
+repo's `public/download/`). macOS bundles are signed with a Developer ID certificate and
+notarized by Apple, so Gatekeeper lets them through silently — this happens inside
+`tauri build` and needs the `APPLE_*` secrets listed in `.github/workflows/release.yml`.
+Build without those and you get an ad-hoc-signed bundle that only runs on your own machine.
 
 ---
 
