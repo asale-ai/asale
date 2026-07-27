@@ -93,18 +93,23 @@ other**, so the platform's fee ratio is verifiable. The same data is available i
 
 ## Download & install
 
-Latest version **v0.1.0**, free. You can also download from the
-[website homepage](https://asale.ai), which detects your OS automatically.
+[![latest release](https://img.shields.io/github/v/release/asale-ai/asale?label=latest&color=2f7d4f)](https://github.com/asale-ai/asale/releases/latest)
 
-| Platform | Installer | Status |
-|---|---|---|
-| macOS (universal, Apple silicon / Intel) | [Asale_0.1.0_universal.dmg](https://asale.ai/download/Asale_0.1.0_universal.dmg) | ✅ available |
-| Windows | `Asale_0.1.0_x64-setup.exe` | coming soon |
-| Linux AppImage | `Asale_0.1.0_amd64.AppImage` | coming soon |
-| Linux .deb | `Asale_0.1.0_amd64.deb` | coming soon |
+Free. The quickest route is [**asale.ai**](https://asale.ai) — it detects your OS and hands
+you the right installer. Or go straight at one:
 
-<sup>Windows / Linux builds have to be produced on the matching OS (Tauri cannot
-cross-compile bundles) — see [Development · Packaging](docs/DEVELOPMENT.md#packaging).</sup>
+| Platform | Direct link |
+|---|---|
+| macOS (universal, Apple silicon / Intel) | [asale.ai/dl/mac](https://asale.ai/dl/mac) |
+| Windows | [asale.ai/dl/windows](https://asale.ai/dl/windows) |
+| Linux AppImage | [asale.ai/dl/linux-appimage](https://asale.ai/dl/linux-appimage) |
+| Linux .deb | [asale.ai/dl/linux-deb](https://asale.ai/dl/linux-deb) |
+
+<sup>No version numbers above on purpose: each link is resolved against the newest
+[GitHub release](https://github.com/asale-ai/asale/releases) at the moment you click it, so
+nothing here can go stale. A platform that release did not build lands you back on the
+download section — Windows and Linux bundles have to be produced on the matching OS
+(Tauri cannot cross-compile), see [Development · Packaging](docs/DEVELOPMENT.md#packaging).</sup>
 
 ### Installing on macOS
 

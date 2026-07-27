@@ -80,17 +80,22 @@ Claude Pro / Max · ChatGPT / Codex · Google Gemini · Kimi · xAI Grok
 
 ## 下載與安裝
 
-最新版 **v0.1.0**，免費。也可以直接從[官網首頁](https://asale.ai)下載，會自動辨識你的系統。
+[![最新版本](https://img.shields.io/github/v/release/asale-ai/asale?label=%E6%9C%80%E6%96%B0%E7%89%88&color=2f7d4f)](https://github.com/asale-ai/asale/releases/latest)
 
-| 平台 | 安裝包 | 狀態 |
-|---|---|---|
-| macOS（Apple 晶片 / Intel 通用） | [Asale_0.1.0_universal.dmg](https://asale.ai/download/Asale_0.1.0_universal.dmg) | ✅ 可下載 |
-| Windows | `Asale_0.1.0_x64-setup.exe` | 即將推出 |
-| Linux AppImage | `Asale_0.1.0_amd64.AppImage` | 即將推出 |
-| Linux .deb | `Asale_0.1.0_amd64.deb` | 即將推出 |
+免費。最省事的方式是打開[**官網首頁**](https://asale.ai)，它會自動辨識你的系統並給出對應安裝包。
+也可以直接點下面的直達連結：
 
-<sup>Windows / Linux 版需要在對應系統上建置（Tauri 不能跨系統打包），見
-[開發文件 · 打包](docs/DEVELOPMENT.zh-TW.md#打包)。</sup>
+| 平台 | 直達連結 |
+|---|---|
+| macOS（Apple 晶片 / Intel 通用） | [asale.ai/dl/mac](https://asale.ai/dl/mac) |
+| Windows | [asale.ai/dl/windows](https://asale.ai/dl/windows) |
+| Linux AppImage | [asale.ai/dl/linux-appimage](https://asale.ai/dl/linux-appimage) |
+| Linux .deb | [asale.ai/dl/linux-deb](https://asale.ai/dl/linux-deb) |
+
+<sup>上面刻意沒有版本號：每個連結都在你點擊的那一刻去解析最新的
+[GitHub release](https://github.com/asale-ai/asale/releases)，所以這裡永遠不會過期。
+該版本沒建置的平台會跳回下載區 —— Windows / Linux 版需要在對應系統上建置
+（Tauri 不能跨系統打包），見[開發文件 · 打包](docs/DEVELOPMENT.zh-TW.md#打包)。</sup>
 
 ### macOS 安裝
 
