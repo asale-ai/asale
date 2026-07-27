@@ -409,12 +409,36 @@
     "continueWithGithub": "GitHub で続行",
     "waitingAuth": "ブラウザを開きました。認証をお待ちください…",
     "logout": "ログアウト",
+    "center": {
+      "title": "アカウントセンター",
+      "subtitle": "プロフィール・ログイン方法・表示設定を管理します。",
+      "tab": {
+        "profile": "プロフィール",
+        "security": "セキュリティ",
+        "preferences": "環境設定"
+      }
+    },
     "profile": {
       "title": "プロフィール",
       "name": "表示名",
       "memberSince": "登録日",
       "save": "保存",
-      "saved": "保存しました。"
+      "saved": "保存しました",
+      "basics": "基本情報",
+      "basicsDesc": "Asale 上での表示内容です。",
+      "nameDesc": "Asale 上で表示される名前です。",
+      "avatarUrl": "アバター URL",
+      "avatarUrlDesc": "アバターに使う画像のリンクです。",
+      "regionDesc": "市場分布と精算に使う国・地域コードです。",
+      "accountInfo": "アカウント情報",
+      "userId": "ユーザー ID",
+      "kycLevel": "KYC レベル",
+      "status": "ステータス",
+      "statusActive": "正常",
+      "statusOther": "ステータス {{code}}",
+      "notSet": "未設定",
+      "edit": "編集",
+      "cancel": "キャンセル"
     },
     "security": {
       "title": "セキュリティ",
@@ -429,7 +453,10 @@
       "link": "連携",
       "unlink": "連携を解除",
       "notLinked": "未連携",
-      "linked": "{{provider}}（{{email}}）を連携しました。"
+      "linked": "{{provider}}（{{email}}）を連携しました。",
+      "changePasswordDesc": "8 文字以上の強いパスワードを使用してください。",
+      "passwordHint": "8 文字以上。",
+      "connectedAccountsDesc": "Google または GitHub を連携すると、ワンクリックでログインできます。"
     },
     "preferences": {
       "title": "環境設定",
@@ -437,13 +464,20 @@
       "theme": "テーマ",
       "light": "ライト",
       "dark": "ダーク",
-      "system": "システムに従う"
+      "system": "システムに従う",
+      "desc": "言語と外観の設定です。この端末にのみ適用されます。",
+      "languageDesc": "表示言語を選択します。",
+      "themeDesc": "Asale の外観を選択します。"
     },
     "apiKey": {
       "title": "購入者 API キー",
       "desc": "サインイン後に自動生成され、ローカルにキャッシュされます。プロキシが自動的に使用します。必要に応じて再生成できます。",
       "provisioning": "API キーを生成中…",
-      "regenerate": "再生成"
+      "regenerate": "再生成",
+      "confirmWarning": "再生成すると現在のキーは直ちに無効になります。購入中の AI ツールには新しいキーが自動で書き込まれますが、反映するにはツールの再起動が必要です。",
+      "confirmRegenerate": "再生成する",
+      "regenerated": "新しい API キーを生成しました。",
+      "refreshed": "新しい API キーを生成し、{{tools}} の設定に書き込みました。反映するにはこれらのツールを再起動してください。"
     },
     "verifySentTitle": "メールをご確認ください",
     "verifySentSubtitle": "{{email}} に確認メールを送信しました。",

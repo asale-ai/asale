@@ -36,6 +36,12 @@ pub struct ProxyState {
     pub http: reqwest::Client,
     pub store: Arc<LocalStore>,
     pub pool: Arc<StdMutex<AccountPool>>,
+    /// The daemon state, for the paths that need more than the proxy's own
+    /// slice of it — currently only re-minting a rejected API key, which needs
+    /// the session tokens. `None` in tests, where nothing is minted.
+    pub app: Option<Arc<crate::state::AppState>>,
+    /// Serializes those re-mints; see `remint_key`.
+    pub remint_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Build the proxy router.
@@ -132,10 +138,23 @@ async fn buy_gate(st: &ProxyState, path: &str, model: &str) -> BuyDecision {
     // model *family* (`claude-fable-5`), while callers ask for a full release id
     // (`claude-fable-5-e2e-1784891711622250000`), so compare on the family.
     let allowed = crate::commands::buy_models(&st.store, tool).await;
-    if !allowed.is_empty()
-        && !model.is_empty()
-        && !allowed.iter().any(|m| strip_release_stamp(m) == strip_release_stamp(model))
-    {
+    let in_buy_list =
+        |id: &str| allowed.iter().any(|m| strip_release_stamp(m) == strip_release_stamp(id));
+
+    // Codex's picker can only offer slugs OpenAI already ships, so the models
+    // the user bought are published under native ones and named here instead.
+    // Resolve the slug the picker sent back to the model it stands for — but
+    // only while the buy list still agrees, so a stale alias table left behind
+    // by an earlier selection cannot smuggle a model past the gate.
+    if tool == "codex" {
+        if let Some(bought) = crate::codex_catalog::alias_for(model) {
+            if allowed.is_empty() || in_buy_list(&bought) {
+                return BuyDecision::Substitute(bought);
+            }
+        }
+    }
+
+    if !allowed.is_empty() && !model.is_empty() && !in_buy_list(model) {
         // Codex is not only what the user typed into: the ChatGPT app runs
         // thread titling, auto-review and compaction against model ids baked
         // into its own catalog (`gpt-5.6-luna` and friends) that no picker or
@@ -388,6 +407,40 @@ async fn forward_direct(
     })
 }
 
+/// One market forward. Split out so the 401 self-heal below can replay the
+/// exact same request under a fresh key.
+async fn send_market(
+    st: &ProxyState,
+    target: &str,
+    method: &reqwest::Method,
+    bytes: &axum::body::Bytes,
+    key: &str,
+) -> Result<reqwest::Response, reqwest::Error> {
+    st.http
+        .request(method.clone(), target)
+        .header("authorization", format!("Bearer {key}"))
+        .header("content-type", "application/json")
+        .body(bytes.to_vec())
+        .send()
+        .await
+}
+
+/// Replace the key the gateway just rejected.
+///
+/// Serialized on `remint_lock`, and re-checked inside it: a tool in flight
+/// fires several requests at once, and all of them would otherwise mint a key
+/// of their own, leaving the account littered with keys nothing uses.
+async fn remint_key(st: &ProxyState, used: &str) -> Result<String, String> {
+    let app = st.app.as_ref().ok_or("no daemon state to mint a key with")?;
+    let _guard = st.remint_lock.lock().await;
+    if let Some(current) = app.asale_key.read().await.clone() {
+        if current != used {
+            return Ok(current); // another request already replaced it
+        }
+    }
+    crate::commands::mint_consumer_key(app).await
+}
+
 /// Market route: forward to the asale server gateway with the asale API key,
 /// recording a consume row from the streamed usage (spec §6.2/§8).
 async fn forward_market(
@@ -397,7 +450,7 @@ async fn forward_market(
     bytes: axum::body::Bytes,
     meter: bool,
 ) -> Response {
-    let key = match st.asale_key.read().await.clone() {
+    let mut key = match st.asale_key.read().await.clone() {
         Some(k) => k,
         None => {
             return (StatusCode::UNAUTHORIZED, "Asale api key not configured").into_response();
@@ -407,17 +460,28 @@ async fn forward_market(
     let reqwest_method = reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::POST);
     let model = extract_model_from_bytes(&bytes);
 
-    let req = st
-        .http
-        .request(reqwest_method, &target)
-        .header("authorization", format!("Bearer {key}"))
-        .header("content-type", "application/json")
-        .body(bytes.to_vec());
-
-    let resp = match req.send().await {
+    let mut resp = match send_market(&st, &target, &reqwest_method, &bytes, &key).await {
         Ok(r) => r,
         Err(e) => return (StatusCode::BAD_GATEWAY, format!("upstream error: {e}")).into_response(),
     };
+
+    // The gateway does not know this key. Retrying it never helps — the key row
+    // is gone from the server (deployment switched, database rebuilt, keys
+    // revoked) — so mint a replacement and send the request once more. Without
+    // this the tool just reports `401 unknown api key` forever, and the only
+    // cure is a "regenerate key" click nothing on screen asks for.
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        match remint_key(&st, &key).await {
+            Ok(fresh) => {
+                key = fresh;
+                resp = match send_market(&st, &target, &reqwest_method, &bytes, &key).await {
+                    Ok(r) => r,
+                    Err(e) => return (StatusCode::BAD_GATEWAY, format!("upstream error: {e}")).into_response(),
+                };
+            }
+            Err(e) => tracing::warn!("gateway rejected the asale api key and re-minting failed: {e}"),
+        }
+    }
 
     let status = resp.status();
     if !status.is_success() {
@@ -553,6 +617,8 @@ mod tests {
             http: asale_client_core::http::plain(),
             store: Arc::new(store),
             pool: Arc::new(StdMutex::new(AccountPool::new(Strategy::RoundRobin))),
+            app: None,
+            remint_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -676,11 +742,9 @@ mod tests {
         assert_eq!(resp.status(), 502, "the selected model reaches routing (market unreachable in tests)");
     }
 
-    #[tokio::test]
-    async fn codex_internal_models_are_relabelled_not_refused() {
-        // The ChatGPT app titles threads and runs auto-review against ids from
-        // its built-in catalog, which the user never picked and cannot change.
-        // Those requests must reach the market as the model that *was* bought.
+    /// A one-shot stand-in for the asale gateway that hands back the request
+    /// body it was sent, so a test can assert on what actually left the proxy.
+    async fn capturing_gateway() -> (std::net::SocketAddr, tokio::sync::oneshot::Receiver<Vec<u8>>) {
         let (tx, rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -714,6 +778,21 @@ mod tests {
                     .await;
             }
         });
+        (addr, rx)
+    }
+
+    /// The JSON body `capturing_gateway` received.
+    fn captured_body(raw: Vec<u8>) -> serde_json::Value {
+        let raw = String::from_utf8_lossy(&raw).into_owned();
+        serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap_or_default()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn codex_internal_models_are_relabelled_not_refused() {
+        // The ChatGPT app titles threads and runs auto-review against ids from
+        // its built-in catalog, which the user never picked and cannot change.
+        // Those requests must reach the market as the model that *was* bought.
+        let (addr, rx) = capturing_gateway().await;
         let mut st = state(Some("sk-asale-test")).await;
         st.server_api_base = format!("http://{addr}");
         st.store.set_buy_tool("codex", None, Some(&["claude-fable-5".into(), "claude-haiku-4-5".into()]), None, None).await.unwrap();
@@ -727,11 +806,88 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 200, "an internal codex model is served, not 403'd");
 
-        let raw = String::from_utf8_lossy(&rx.await.unwrap()).into_owned();
-        let body = raw.split("\r\n\r\n").nth(1).unwrap_or_default().to_string();
-        let sent: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let sent = captured_body(rx.await.unwrap());
         assert_eq!(sent["model"], "claude-fable-5", "relabelled to the first bought model");
         assert_eq!(sent["input"], "title this", "the rest of the request survives");
+    }
+
+    #[tokio::test]
+    async fn codex_picker_slugs_are_translated_to_the_model_they_stand_for() {
+        // The picker offers market models under Codex's own slugs, because the
+        // desktop app drops anything else (see `codex_catalog`). Picking the
+        // second entry must buy the second model — not the first, which is what
+        // the plain "internal model" relabel would have done.
+        let _g = crate::codex_catalog::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_home = std::env::var("HOME").ok();
+        let home = std::env::temp_dir().join(format!("asale-proxy-alias-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join(".asale")).unwrap();
+        std::env::set_var("HOME", &home);
+        std::fs::write(
+            crate::codex_catalog::aliases_path(),
+            r#"{"gpt-5.5":"claude-fable-5","gpt-5.2":"claude-haiku-4-5"}"#,
+        )
+        .unwrap();
+
+        let (addr, rx) = capturing_gateway().await;
+        let mut st = state(Some("sk-asale-test")).await;
+        st.server_api_base = format!("http://{addr}");
+        st.store.set_buy_tool("codex", None, Some(&["claude-fable-5".into(), "claude-haiku-4-5".into()]), None, None).await.unwrap();
+        let port = serve(st).await;
+
+        let resp = asale_client_core::http::plain()
+            .post(format!("http://127.0.0.1:{port}/v1/responses"))
+            .json(&serde_json::json!({"model": "gpt-5.2", "input": "hi"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(captured_body(rx.await.unwrap())["model"], "claude-haiku-4-5", "the carrier's own model");
+
+        match prev_home {
+            Some(p) => std::env::set_var("HOME", p),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    async fn a_stale_alias_cannot_smuggle_a_dropped_model_past_the_gate() {
+        // The alias table on disk outlives a selection change by however long
+        // it takes to rewrite it. A slug still pointing at a model the user has
+        // since deselected must fall through to the ordinary gate.
+        let _g = crate::codex_catalog::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_home = std::env::var("HOME").ok();
+        let home = std::env::temp_dir().join(format!("asale-proxy-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join(".asale")).unwrap();
+        std::env::set_var("HOME", &home);
+        std::fs::write(crate::codex_catalog::aliases_path(), r#"{"gpt-5.5":"claude-opus-5"}"#).unwrap();
+
+        let (addr, rx) = capturing_gateway().await;
+        let mut st = state(Some("sk-asale-test")).await;
+        st.server_api_base = format!("http://{addr}");
+        st.store.set_buy_tool("codex", None, Some(&["claude-fable-5".into()]), None, None).await.unwrap();
+        let port = serve(st).await;
+
+        let resp = asale_client_core::http::plain()
+            .post(format!("http://127.0.0.1:{port}/v1/responses"))
+            .json(&serde_json::json!({"model": "gpt-5.5", "input": "hi"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "codex traffic is still served rather than 403'd");
+        assert_eq!(
+            captured_body(rx.await.unwrap())["model"],
+            "claude-fable-5",
+            "served as a model the user actually bought, not the stale alias"
+        );
+
+        match prev_home {
+            Some(p) => std::env::set_var("HOME", p),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[tokio::test]

@@ -39,7 +39,9 @@ impl Sandbox {
         let stub = dir.join("home").join("codex-stub");
         std::fs::write(
             &stub,
-            "#!/bin/sh\ncat <<'JSON'\n{\"models\":[{\"slug\":\"gpt-5.2\",\"visibility\":\"list\",\"priority\":9,\"base_instructions\":\"native\"}]}\nJSON\n",
+            "#!/bin/sh\ncat <<'JSON'\n{\"models\":[\
+{\"slug\":\"gpt-5.5\",\"visibility\":\"list\",\"priority\":7,\"base_instructions\":\"native\"},\
+{\"slug\":\"gpt-5.2\",\"visibility\":\"list\",\"priority\":29,\"base_instructions\":\"native\"}]}\nJSON\n",
         )
         .unwrap();
         #[cfg(unix)]
@@ -119,6 +121,10 @@ async fn buy_switch_rewrites_and_restores_every_tool() {
 /// Codex takes its model from its own config, not from the caller's request,
 /// so changing the buy page's selection has to rewrite that config — and doing
 /// so must not lose the pristine backup taken when the switch went on.
+///
+/// The models are published under Codex's own slugs (the desktop app drops
+/// anything else, see `codex_catalog`), so what moves with the selection is the
+/// display name and the alias table, not the slug.
 #[tokio::test(flavor = "current_thread")]
 async fn changing_the_codex_model_rewrites_its_config_without_losing_the_backup() {
     let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
@@ -130,33 +136,44 @@ async fn changing_the_codex_model_rewrites_its_config_without_losing_the_backup(
     let original = "model = \"gpt-5-codex\"\nmodel_provider = \"openai\"\n";
     std::fs::write(&path, original).unwrap();
 
+    let aliases = || -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(asale_daemon::codex_catalog::aliases_path()).unwrap()).unwrap()
+    };
     let on = |models: Vec<String>| commands::set_buy_tool(&state, "codex".into(), true, Some(models));
     on(vec!["claude-fable-5".into()]).await.expect("buy on");
     assert!(
-        std::fs::read_to_string(&path).unwrap().contains("model = \"claude-fable-5\""),
-        "the bought model is what codex starts on"
+        std::fs::read_to_string(&path).unwrap().contains("model = \"gpt-5.5\""),
+        "codex starts on the slug carrying the bought model"
     );
+    assert_eq!(aliases()["gpt-5.5"], "claude-fable-5", "which the proxy can translate back");
 
     // Same switch, different model: the picker and the active model follow.
     on(vec!["claude-opus-5".into(), "claude-fable-5".into()]).await.expect("model change");
     let cfg = std::fs::read_to_string(&path).unwrap();
-    assert!(cfg.contains("model = \"claude-opus-5\""), "config follows the new selection");
+    assert!(cfg.contains("model = \"gpt-5.5\""), "still the best carrier");
+    assert_eq!(aliases()["gpt-5.5"], "claude-opus-5", "now standing for the new first pick");
+    assert_eq!(aliases()["gpt-5.2"], "claude-fable-5");
     let catalog: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(asale_daemon::codex_catalog::path()).unwrap()).unwrap();
-    let listed: Vec<&str> = catalog["models"]
+    let listed: Vec<(&str, &str)> = catalog["models"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|m| m["visibility"] == "list")
-        .map(|m| m["slug"].as_str().unwrap())
+        .map(|m| (m["slug"].as_str().unwrap(), m["display_name"].as_str().unwrap()))
         .collect();
-    assert_eq!(listed, ["claude-opus-5", "claude-fable-5"], "picker follows too");
+    assert_eq!(
+        listed,
+        [("gpt-5.5", "claude-opus-5"), ("gpt-5.2", "claude-fable-5")],
+        "picker follows too"
+    );
 
     // Off: back to exactly what the user had before asale touched anything —
     // not to the config a re-apply had already rewritten.
     commands::set_buy_tool(&state, "codex".into(), false, None).await.expect("buy off");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), original, "restored byte-for-byte");
     assert!(!asale_daemon::codex_catalog::path().exists(), "generated catalog removed");
+    assert!(!asale_daemon::codex_catalog::aliases_path().exists(), "and its alias table with it");
 }
 
 /// Whether this device should be on the market is *derived* from the account
@@ -619,4 +636,73 @@ async fn a_broken_model_stops_selling_and_waits_for_the_operator() {
     let items = asale_daemon::publisher::build_supply_items(&state.store, &state.pool).await;
     assert_eq!(of(&items, opus)["available"], true, "resume must put the lane back on the market");
     assert!(state.store.list_lane_pauses().await.unwrap().is_empty(), "and forget the persisted pause");
+}
+
+/// The consumer API key is scoped to the deployment that issued it, but
+/// `~/.asale/asale.db` is not: a dev build pointed at localhost and the
+/// packaged one pointed at api.asale.ai share the same store on one machine.
+/// A key carried across that line is an `unknown api key` 401 on every market
+/// request, so it must be discarded rather than loaded.
+#[tokio::test(flavor = "current_thread")]
+async fn a_key_from_another_deployment_is_not_reused() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let _sb = Sandbox::new("keyorigin");
+    let state = signed_in_state().await;
+    let here = state.cfg.server_api_base.clone();
+
+    // Minted here → loaded.
+    state.store.set_setting("asale_api_key_origin", &here).await.unwrap();
+    assert!(commands::load_api_key(&state).await.unwrap());
+    assert_eq!(state.asale_key.read().await.as_deref(), Some("sk-asale-test"));
+
+    // Minted somewhere else → dropped, and not left behind for the next start.
+    state.store.set_setting("asale_api_key_origin", "https://somewhere.else").await.unwrap();
+    assert!(!commands::load_api_key(&state).await.unwrap(), "a foreign key must not be loaded");
+    assert_eq!(state.store.get_setting("asale_api_key").await.unwrap().unwrap_or_default(), "");
+    assert!(state.asale_key.read().await.is_none());
+
+    // A key cached before this stamp existed is kept and stamped, so upgrading
+    // does not force everyone through a needless re-mint.
+    state.store.set_setting("asale_api_key", "sk-asale-old").await.unwrap();
+    state.store.set_setting("asale_api_key_origin", "").await.unwrap();
+    assert!(commands::load_api_key(&state).await.unwrap());
+    assert_eq!(state.store.get_setting("asale_api_key_origin").await.unwrap().unwrap(), here);
+
+    // Signing out takes the key with it: it belongs to that account.
+    commands::logout(&state).await.unwrap();
+    assert_eq!(state.store.get_setting("asale_api_key").await.unwrap().unwrap_or_default(), "");
+    assert!(state.asale_key.read().await.is_none());
+}
+
+/// Regenerating the consumer key revokes the one the buying tools are holding,
+/// so the new one has to land in their configs — otherwise every tool pointed
+/// at the proxy starts answering `401 unknown api key` and nothing on screen
+/// explains why.
+#[tokio::test(flavor = "current_thread")]
+async fn regenerating_the_key_rewrites_every_buying_tool() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let _sb = Sandbox::new("rekey");
+    let state = signed_in_state().await;
+
+    let original = "{\n  \"model\": \"opusplan\"\n}";
+    let claude_cfg = tool_config::primary_config_path("claude");
+    std::fs::create_dir_all(claude_cfg.parent().unwrap()).unwrap();
+    std::fs::write(&claude_cfg, original).unwrap();
+    commands::set_buy_tool(&state, "claude".into(), true, None).await.unwrap();
+    assert!(std::fs::read_to_string(&claude_cfg).unwrap().contains("sk-asale-test"));
+
+    // Gemini stays off, and must not be rewritten on its behalf.
+    let gemini_cfg = tool_config::primary_config_path("gemini");
+
+    let touched = commands::refresh_buy_tool_keys(&state, "sk-asale-fresh").await.unwrap();
+    assert_eq!(touched, vec!["claude".to_string()], "only the tools that are buying");
+    let now = std::fs::read_to_string(&claude_cfg).unwrap();
+    assert!(now.contains("sk-asale-fresh"), "the new key is in the config");
+    assert!(!now.contains("sk-asale-test"), "the revoked one is gone");
+    assert!(!gemini_cfg.exists(), "a tool that is not buying is left alone");
+
+    // And the restore still puts back what the user had, not asale's own
+    // writing — the re-key must not have overwritten the switch-on backup.
+    commands::set_buy_tool(&state, "claude".into(), false, None).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&claude_cfg).unwrap(), original);
 }

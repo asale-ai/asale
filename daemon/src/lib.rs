@@ -137,6 +137,8 @@ pub async fn start(bind: SocketAddr) -> anyhow::Result<StartedDaemon> {
             http: asale_client_core::http::plain(),
             store: app_state.store.clone(),
             pool: app_state.pool.clone(),
+            app: Some(app_state.clone()),
+            remint_lock: Default::default(),
         };
         let proxy_port = app_state.cfg.proxy_port;
         tokio::spawn(async move {
@@ -164,9 +166,10 @@ pub async fn start(bind: SocketAddr) -> anyhow::Result<StartedDaemon> {
         });
     }
 
-    // Preload the cached asale key into the proxy.
-    if let Ok(Some(k)) = app_state.store.get_setting("asale_api_key").await {
-        *app_state.asale_key.write().await = Some(k);
+    // Preload the cached asale key into the proxy (dropping one that was minted
+    // against a different deployment — see `commands::wallet::cached_key`).
+    if let Err(e) = commands::load_api_key(&app_state).await {
+        tracing::warn!("could not load the cached asale api key: {e}");
     }
 
     // Carry an older build's Claude-only subscription over to the per-tool buy

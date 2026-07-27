@@ -409,12 +409,36 @@
     "continueWithGithub": "Continue with GitHub",
     "waitingAuth": "Browser opened — waiting for authorization…",
     "logout": "Sign out",
+    "center": {
+      "title": "Account center",
+      "subtitle": "Manage your profile, sign-in methods and interface preferences.",
+      "tab": {
+        "profile": "Profile",
+        "security": "Security",
+        "preferences": "Preferences"
+      }
+    },
     "profile": {
       "title": "Profile",
       "name": "Display name",
       "memberSince": "Member since",
       "save": "Save",
-      "saved": "Saved."
+      "saved": "Saved",
+      "basics": "Basics",
+      "basicsDesc": "How you appear across Asale.",
+      "nameDesc": "The name shown for you across Asale.",
+      "avatarUrl": "Avatar URL",
+      "avatarUrlDesc": "Link to the image used as your avatar.",
+      "regionDesc": "Country code used for market distribution and settlement.",
+      "accountInfo": "Account info",
+      "userId": "User ID",
+      "kycLevel": "KYC level",
+      "status": "Status",
+      "statusActive": "Active",
+      "statusOther": "Status {{code}}",
+      "notSet": "Not set",
+      "edit": "Edit",
+      "cancel": "Cancel"
     },
     "security": {
       "title": "Security",
@@ -429,7 +453,10 @@
       "link": "Link",
       "unlink": "Unlink",
       "notLinked": "Not linked",
-      "linked": "Linked {{provider}} ({{email}})."
+      "linked": "Linked {{provider}} ({{email}}).",
+      "changePasswordDesc": "Use a strong password of at least 8 characters.",
+      "passwordHint": "At least 8 characters.",
+      "connectedAccountsDesc": "Link Google or GitHub to sign in with one click."
     },
     "preferences": {
       "title": "Preferences",
@@ -437,13 +464,20 @@
       "theme": "Theme",
       "light": "Light",
       "dark": "Dark",
-      "system": "System"
+      "system": "System",
+      "desc": "Language and appearance — this machine only.",
+      "languageDesc": "Choose the interface language.",
+      "themeDesc": "Choose how Asale looks."
     },
     "apiKey": {
       "title": "Buyer API key",
       "desc": "Generated automatically after sign-in and cached locally; the proxy uses it automatically. Regenerate if you need to.",
       "provisioning": "Generating API key…",
-      "regenerate": "Regenerate"
+      "regenerate": "Regenerate",
+      "confirmWarning": "Regenerating revokes the current key immediately. Tools that are buying get the new one written into their config automatically, but must be restarted to pick it up.",
+      "confirmRegenerate": "Yes, regenerate",
+      "regenerated": "A new API key has been generated.",
+      "refreshed": "A new API key has been generated and written into {{tools}}. Restart those tools so they pick it up."
     },
     "verifySentTitle": "Check your inbox",
     "verifySentSubtitle": "We sent a verification link to {{email}}.",

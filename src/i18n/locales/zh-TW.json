@@ -409,12 +409,36 @@
     "continueWithGithub": "使用 GitHub 繼續",
     "waitingAuth": "已開啟瀏覽器，等待授權…",
     "logout": "登出",
+    "center": {
+      "title": "個人中心",
+      "subtitle": "管理你的資料、登入方式與介面偏好。",
+      "tab": {
+        "profile": "資料",
+        "security": "安全",
+        "preferences": "偏好"
+      }
+    },
     "profile": {
       "title": "個人資料",
       "name": "暱稱",
       "memberSince": "註冊時間",
       "save": "儲存",
-      "saved": "已儲存。"
+      "saved": "已儲存",
+      "basics": "基本資料",
+      "basicsDesc": "你在 Asale 中顯示的資訊。",
+      "nameDesc": "在 Asale 中顯示的名稱。",
+      "avatarUrl": "頭像連結",
+      "avatarUrlDesc": "用作頭像的圖片連結。",
+      "regionDesc": "用於市場分佈與結算的國家/地區代碼。",
+      "accountInfo": "帳號資訊",
+      "userId": "使用者 ID",
+      "kycLevel": "KYC 等級",
+      "status": "狀態",
+      "statusActive": "正常",
+      "statusOther": "狀態 {{code}}",
+      "notSet": "未設定",
+      "edit": "編輯",
+      "cancel": "取消"
     },
     "security": {
       "title": "安全性",
@@ -429,7 +453,10 @@
       "link": "連結",
       "unlink": "解除連結",
       "notLinked": "未連結",
-      "linked": "已連結 {{provider}}（{{email}}）。"
+      "linked": "已連結 {{provider}}（{{email}}）。",
+      "changePasswordDesc": "請使用至少 8 位的強密碼。",
+      "passwordHint": "至少 8 個字元。",
+      "connectedAccountsDesc": "連結 Google 或 GitHub，一鍵登入。"
     },
     "preferences": {
       "title": "偏好設定",
@@ -437,13 +464,20 @@
       "theme": "主題",
       "light": "淺色",
       "dark": "深色",
-      "system": "跟隨系統"
+      "system": "跟隨系統",
+      "desc": "語言與外觀設定，僅作用於本機。",
+      "languageDesc": "選擇介面語言。",
+      "themeDesc": "選擇 Asale 的外觀。"
     },
     "apiKey": {
       "title": "買家 API 金鑰",
       "desc": "登入後自動產生並快取在本機；本機代理會自動使用。如有需要可重新產生。",
       "provisioning": "正在產生 API 金鑰…",
-      "regenerate": "重新產生"
+      "regenerate": "重新產生",
+      "confirmWarning": "重新產生會立即作廢目前的密鑰。已開啟買入的 AI 工具會自動寫入新密鑰，但需要重新啟動這些工具才會生效。",
+      "confirmRegenerate": "確認重新產生",
+      "regenerated": "新的 API 密鑰已產生。",
+      "refreshed": "新的 API 密鑰已產生，並已寫入 {{tools}} 的設定；請重新啟動這些工具使其生效。"
     },
     "verifySentTitle": "請查收郵件",
     "verifySentSubtitle": "我們已向 {{email}} 寄送了一封驗證郵件。",

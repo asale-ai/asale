@@ -566,6 +566,29 @@ select.input {
 :root[data-theme="dark"] .segmented button.active { background: var(--surface-3); }
 .segmented.sm button { padding: 5px 10px; }
 
+/* Underline tabs — one page, one subject, three views of it. The rule under
+   the strip is the card edge the tab hands over to, so the active mark sits on
+   it rather than boxing the label. */
+.tabs {
+  display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none;
+  border-bottom: 1px solid var(--line); margin-bottom: var(--s5);
+}
+.tabs::-webkit-scrollbar { display: none; }
+.tabs button {
+  position: relative; flex-shrink: 0; white-space: nowrap;
+  border: none; background: none; cursor: pointer;
+  padding: 9px var(--s3); font-size: var(--fs-sub); font-weight: 500; color: var(--fg-2);
+  display: inline-flex; align-items: center; gap: 7px;
+  transition: color var(--t-fast) var(--ease);
+}
+.tabs button svg { width: 15px; height: 15px; }
+.tabs button:hover { color: var(--fg); }
+.tabs button.active { color: var(--fg); }
+.tabs button.active::after {
+  content: ""; position: absolute; left: var(--s2); right: var(--s2); bottom: -1px;
+  height: 1.5px; background: var(--fg);
+}
+
 /* Tab strip — text tabs, no chrome until active. */
 .tabstrip { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
 .tabstrip::-webkit-scrollbar { display: none; }
@@ -1063,13 +1086,62 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 }
 .profile-hero {
   display: flex; align-items: center; gap: var(--s5); flex-wrap: wrap;
-  padding: var(--s5) var(--s6); margin: var(--s3) 0 var(--s4);
+  padding: var(--s5) var(--s6); margin: 0 0 var(--s5);
   border: 1px solid var(--line); border-radius: var(--r3); background: var(--surface);
 }
+.profile-hero .avatar { width: 64px; height: 64px; font-size: 25px; }
 .profile-hero .ph-id { flex: 1; min-width: 200px; }
 .profile-hero h1 { font-size: 20px; margin: 0; overflow: hidden; text-overflow: ellipsis; }
-.profile-hero .ph-mail { margin: 2px 0 0; font-size: var(--fs-sub); color: var(--fg-2); }
+.profile-hero .ph-mail { margin: 3px 0 0; font-size: var(--fs-sub); color: var(--fg-2); }
 .profile-hero .ph-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--s3); }
+
+/* ── Definition rows (label ⋯ value) ────────────────────────────────────────
+   Read-only facts that belong to one another, one per line. A hairline between
+   two rows, none above the first or below the last. */
+.drows { margin: 0; }
+.drow { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s4); padding: 10px 0; }
+.drow + .drow { border-top: 1px solid var(--line); }
+.drow:first-child { padding-top: 0; }
+.drow:last-child { padding-bottom: 0; }
+.drow dt { color: var(--fg-2); font-size: var(--fs-sub); flex-shrink: 0; }
+.drow dd { margin: 0; min-width: 0; text-align: right; word-break: break-word; font-size: var(--fs-sub); font-weight: 500; color: var(--fg); }
+
+/* ── Inline field ───────────────────────────────────────────────────────────
+   A settable value shown as a value, with the pencil that turns the row into an
+   input. Beats a page of always-open forms: the card reads as a summary until
+   something is actually being changed. */
+.ifields { display: flex; flex-direction: column; }
+.ifield { padding: var(--s4) 0; }
+.ifield + .ifield { border-top: 1px solid var(--line); }
+.ifield:first-child { padding-top: 0; }
+.ifield:last-child { padding-bottom: 0; }
+.ifield .if-head { display: flex; align-items: center; gap: var(--s4); }
+.ifield .if-main { flex: 1; min-width: 0; }
+.ifield .if-label { display: flex; align-items: center; gap: var(--s2); font-size: var(--fs-sub); font-weight: 500; }
+.ifield .if-value {
+  margin-top: 3px; font-size: var(--fs-sub); color: var(--fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ifield .if-value.unset { color: var(--fg-3); }
+.ifield .if-hint { margin: 3px 0 0; font-size: var(--fs-meta); color: var(--fg-3); line-height: 1.5; }
+.ifield .if-edit { display: flex; flex-wrap: wrap; gap: var(--s2); margin-top: var(--s3); }
+.ifield .if-edit .input { flex: 1; min-width: 200px; width: auto; }
+.ifield .feedback { margin-top: var(--s2); }
+
+/* ── Preference rows ────────────────────────────────────────────────────────
+   Setting on the left, the control that changes it on the right. */
+.pref-rows { display: flex; flex-direction: column; }
+.pref-row {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: var(--s4); padding: var(--s4) 0;
+}
+.pref-row + .pref-row { border-top: 1px solid var(--line); }
+.pref-row:first-child { padding-top: 0; }
+.pref-row:last-child { padding-bottom: 0; }
+.pref-row .pr-main { min-width: 0; }
+.pref-row .pr-title { font-size: var(--fs-sub); font-weight: 500; }
+.pref-row .pr-desc { margin: 3px 0 0; font-size: var(--fs-meta); color: var(--fg-3); }
+.pref-row select.input { width: auto; min-width: 160px; }
 
 .auth-wrap { min-height: calc(100vh - 60px); display: grid; place-items: center; padding: var(--s5); }
 .auth-card { width: 100%; max-width: 380px; }

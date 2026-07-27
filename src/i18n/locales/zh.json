@@ -409,12 +409,36 @@
     "continueWithGithub": "使用 GitHub 继续",
     "waitingAuth": "已打开浏览器，等待授权…",
     "logout": "退出登录",
+    "center": {
+      "title": "个人中心",
+      "subtitle": "管理你的资料、登录方式与界面偏好。",
+      "tab": {
+        "profile": "资料",
+        "security": "安全",
+        "preferences": "偏好"
+      }
+    },
     "profile": {
       "title": "个人资料",
       "name": "昵称",
       "memberSince": "注册时间",
       "save": "保存",
-      "saved": "已保存。"
+      "saved": "已保存",
+      "basics": "基本资料",
+      "basicsDesc": "你在 Asale 中展示的信息。",
+      "nameDesc": "在 Asale 中展示的名称。",
+      "avatarUrl": "头像链接",
+      "avatarUrlDesc": "用作头像的图片链接。",
+      "regionDesc": "用于市场分布与结算的国家/地区代码。",
+      "accountInfo": "账号信息",
+      "userId": "用户 ID",
+      "kycLevel": "KYC 等级",
+      "status": "状态",
+      "statusActive": "正常",
+      "statusOther": "状态 {{code}}",
+      "notSet": "未设置",
+      "edit": "编辑",
+      "cancel": "取消"
     },
     "security": {
       "title": "安全",
@@ -429,7 +453,10 @@
       "link": "关联",
       "unlink": "解除关联",
       "notLinked": "未关联",
-      "linked": "已关联 {{provider}}（{{email}}）。"
+      "linked": "已关联 {{provider}}（{{email}}）。",
+      "changePasswordDesc": "请使用至少 8 位的强密码。",
+      "passwordHint": "至少 8 位字符。",
+      "connectedAccountsDesc": "关联 Google 或 GitHub，一键登录。"
     },
     "preferences": {
       "title": "偏好设置",
@@ -437,13 +464,20 @@
       "theme": "主题",
       "light": "浅色",
       "dark": "深色",
-      "system": "跟随系统"
+      "system": "跟随系统",
+      "desc": "语言与外观设置，仅作用于本机。",
+      "languageDesc": "选择界面语言。",
+      "themeDesc": "选择 Asale 的外观。"
     },
     "apiKey": {
       "title": "买家 API 密钥",
       "desc": "登录后自动生成并缓存在本地；本地代理会自动使用。如需可重新生成。",
       "provisioning": "正在生成 API 密钥…",
-      "regenerate": "重新生成"
+      "regenerate": "重新生成",
+      "confirmWarning": "重新生成会立即作废当前密钥。已开启买入的 AI 工具会自动写入新密钥，但需要重启这些工具才会生效。",
+      "confirmRegenerate": "确认重新生成",
+      "regenerated": "新的 API 密钥已生成。",
+      "refreshed": "新的 API 密钥已生成，并已写入 {{tools}} 的配置；请重启这些工具使其生效。"
     },
     "verifySentTitle": "请查收邮件",
     "verifySentSubtitle": "我们已向 {{email}} 发送了一封验证邮件。",

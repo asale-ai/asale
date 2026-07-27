@@ -87,13 +87,21 @@ pub async fn me_profile(state: &AppState) -> R<Value> {
 }
 
 /// Update profile fields; only provided fields are sent.
-pub async fn update_profile(state: &AppState, name: Option<String>, region: Option<String>) -> R<Value> {
+pub async fn update_profile(
+    state: &AppState,
+    name: Option<String>,
+    region: Option<String>,
+    avatar_url: Option<String>,
+) -> R<Value> {
     let mut body = serde_json::Map::new();
     if let Some(n) = name {
         body.insert("name".into(), Value::String(n));
     }
     if let Some(r) = region {
         body.insert("region".into(), Value::String(r));
+    }
+    if let Some(a) = avatar_url {
+        body.insert("avatar_url".into(), Value::String(a));
     }
     authed(state, reqwest::Method::PATCH, "/api/v1/me/profile", Some(Value::Object(body))).await
 }
@@ -117,8 +125,14 @@ pub async fn unlink_oauth(state: &AppState, provider: String) -> R<Value> {
 }
 
 /// Drop the stored session tokens (local sign-out).
-pub async fn logout() -> R<bool> {
+///
+/// The consumer API key goes with them: it belongs to the account that just
+/// signed out, so leaving it cached would have the next account's market
+/// traffic billed to the previous one — or, once the key is revoked, 401 with
+/// no way back short of hitting "regenerate" by hand.
+pub async fn logout(state: &AppState) -> R<bool> {
     keychain::delete("access_token").map_err(err)?;
     keychain::delete("refresh_token").map_err(err)?;
+    super::wallet::forget_key(state).await?;
     Ok(true)
 }

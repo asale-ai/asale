@@ -235,17 +235,58 @@ pub async fn set_buy_tool(
 /// Resolve (or mint) the consumer API key a bought-through tool presents to the
 /// local proxy, making sure the running proxy has it loaded.
 pub(crate) async fn ensure_consumer_key(state: &AppState) -> R<String> {
-    let key = match state.store.get_setting("asale_api_key").await.map_err(err)? {
-        Some(k) if !k.is_empty() => k,
-        _ => {
-            let v = authed(state, reqwest::Method::POST, "/api/v1/apikeys", Some(json!({"label": "asale-buy"}))).await?;
-            let k = v["key"].as_str().ok_or("failed to create api key")?.to_string();
-            state.store.set_setting("asale_api_key", &k).await.map_err(err)?;
-            k
+    if let Some(k) = super::wallet::cached_key(state).await? {
+        *state.asale_key.write().await = Some(k.clone());
+        return Ok(k);
+    }
+    mint_consumer_key(state).await
+}
+
+/// Mint a consumer API key unconditionally, discarding whatever was cached.
+///
+/// The proxy's self-heal path calls this when the gateway answers a market
+/// request with `unknown api key`: the cached key names a key row the server no
+/// longer has (the account's keys were revoked, or the deployment's database
+/// was rebuilt), and no amount of retrying the same key recovers from that.
+pub(crate) async fn mint_consumer_key(state: &AppState) -> R<String> {
+    let v = authed(state, reqwest::Method::POST, "/api/v1/apikeys", Some(json!({"label": "asale-buy"}))).await?;
+    let k = v["key"].as_str().ok_or("failed to create api key")?.to_string();
+    super::wallet::remember_key(state, &k).await?;
+    refresh_buy_tool_keys(state, &k).await?;
+    Ok(k)
+}
+
+/// Write a new consumer key into every tool whose buy switch is on, and report
+/// which ones were touched.
+///
+/// Minting a key does not only produce a new one — it invalidates the old one,
+/// and that old one is what is sitting in `~/.claude/settings.json`,
+/// `~/.codex/auth.json` and `~/.gemini/.env` right now. Left alone, every tool
+/// pointed at the proxy would start answering `401 unknown api key` the moment
+/// the key is regenerated, which reads as "asale broke" rather than "the key
+/// you replaced is the key they were holding".
+pub async fn refresh_buy_tool_keys(state: &AppState, key: &str) -> R<Vec<String>> {
+    let base = format!("http://127.0.0.1:{}", state.cfg.proxy_port);
+    let mut refreshed = Vec::new();
+    for tool in tool_config::TOOLS {
+        let buy = state.store.buy_tool(tool).await.map_err(err)?;
+        if !buy.enabled {
+            continue;
         }
-    };
-    *state.asale_key.write().await = Some(key.clone());
-    Ok(key)
+        let (t, b, k, models) = (tool.to_string(), base.clone(), key.to_string(), buy.models.clone());
+        // `apply` returns a snapshot of what it overwrote, which here is
+        // asale's own writing — dropped on purpose. The backup a restore must
+        // use is the one taken when the switch went on.
+        tokio::task::spawn_blocking(move || tool_config::apply(&t, &b, &k, &models))
+            .await
+            .map_err(err)?
+            .map_err(err)?;
+        refreshed.push(tool.to_string());
+    }
+    if !refreshed.is_empty() {
+        tracing::info!("re-keyed buying tools after an api key change: {}", refreshed.join(", "));
+    }
+    Ok(refreshed)
 }
 
 /// Market models available to subscribe to (public endpoint on the web API).

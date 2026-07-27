@@ -7,21 +7,36 @@
 //! set to. The one supported override is the `model_catalog_json` config key:
 //! a path to a JSON document that *replaces* the built-in catalog wholesale.
 //!
-//! So while the codex buy switch is on we generate that document:
-//!   - every native entry is kept but forced to `visibility: "hide"`, so the
-//!     app's internal lookups (auto-review and friends) still resolve while the
-//!     picker stops offering models the market cannot serve;
-//!   - one visible entry per selected market model, cloned from a native entry
-//!     so it inherits a schema this exact Codex build accepts.
+//! ## Why the entries wear OpenAI's slugs
 //!
-//! Cloning rather than hand-authoring matters: the entry schema is large
-//! (~30 fields, including the harness prompt) and unversioned. If no codex
-//! binary can be found to dump a template, we write no catalog at all and leave
-//! the picker alone — `model` in config.toml still points at the bought model,
-//! so the switch works, it just is not browsable.
+//! Overriding the catalog is only half the battle. The ChatGPT desktop app's
+//! renderer takes the list its own app-server just returned and filters it
+//! *again*, against an allowlist of slugs delivered from OpenAI's servers
+//! (a Statsig dynamic config carrying `available_models` / `use_hidden_models`).
+//! A slug the market invented is not on that list, so it is dropped before the
+//! picker ever sees it: the app falls back to labelling the composer "Custom"
+//! and offers nothing to switch to. This is upstream bug openai/codex#19694,
+//! still open — restarting the app cannot help, the allowlist is refetched
+//! every launch.
+//!
+//! So the catalog we generate does not introduce slugs. It takes native entries
+//! that are already on that allowlist and *rewrites them in place* — the slug
+//! stays `gpt-5.5`, the display name becomes the model the user bought — and
+//! records the slug → market model mapping in [`aliases_path`] so the local
+//! proxy can translate requests back on the way out (see `proxy::buy_gate`).
+//! Everything else is forced to `visibility: "hide"`, so the app's internal
+//! lookups (auto-review and friends) still resolve while the picker stops
+//! offering models the market cannot serve.
+//!
+//! Rewriting rather than hand-authoring matters for a second reason: the entry
+//! schema is large (~30 fields, including the harness prompt) and unversioned.
+//! If no codex binary can be found to dump the native catalog, we write no
+//! catalog at all and leave the picker alone — `model` in config.toml still
+//! points at the bought model, so the switch works, it just is not browsable.
 
 use anyhow::{Context, Result};
 use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -29,9 +44,21 @@ use std::time::{Duration, Instant};
 /// How long `codex debug models` may take before we give up on it.
 const DUMP_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Native slugs the desktop app hard-codes into its "power" slider, labelled
+/// there from a table compiled into the app rather than from the catalog.
+/// Renaming one would leave the slider saying "5.6 Sol" over a Claude model, so
+/// they never carry a market model even when they are otherwise eligible.
+const POWER_SLIDER_SLUGS: &[&str] = &["gpt-5.6-sol", "gpt-5.6-terra"];
+
 fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
 }
+
+/// Every path here derives from `$HOME`, which is process-global: tests that
+/// repoint it — or that read what lives under it, like [`alias_for`] — hold
+/// this so they cannot see each other's sandbox.
+#[cfg(test)]
+pub(crate) static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Where the generated catalog lives. Kept in asale's own directory, not in
 /// `~/.codex`, so a restore never has to guess whether a file there was ours.
@@ -39,12 +66,27 @@ pub fn path() -> PathBuf {
     home().join(".asale").join("codex-models.json")
 }
 
+/// Where the slug → market model mapping lives, beside the catalog it belongs
+/// to. Written and removed with it, never separately.
+pub fn aliases_path() -> PathBuf {
+    home().join(".asale").join("codex-aliases.json")
+}
+
+/// A catalog that was generated, and what config.toml has to say about it.
+pub struct Generated {
+    /// The document to point `model_catalog_json` at.
+    pub path: PathBuf,
+    /// The slug to put in `model` — the carrier of the first selected model,
+    /// *not* the market model id, since that is what Codex will send us.
+    pub start_slug: String,
+}
+
 /// Generate the catalog for `models` (market model ids, in picker order).
 ///
 /// `Ok(None)` means no catalog could be built — the caller must then leave
 /// `model_catalog_json` unset rather than pointing Codex at a file we could not
 /// validate.
-pub fn write(models: &[String]) -> Result<Option<PathBuf>> {
+pub fn write(models: &[String]) -> Result<Option<Generated>> {
     if models.is_empty() {
         return Ok(None);
     }
@@ -52,33 +94,70 @@ pub fn write(models: &[String]) -> Result<Option<PathBuf>> {
         tracing::warn!("no codex binary found to dump a model catalog; the picker will not list asale models");
         return Ok(None);
     };
-    let Some(template) = pick_template(&native) else {
-        tracing::warn!("codex model catalog has no usable template entry");
+    let carriers = pick_carriers(&native);
+    if carriers.is_empty() {
+        tracing::warn!("codex model catalog has no entry that can carry a market model");
         return Ok(None);
-    };
+    }
+    // One carrier per selected model. A selection longer than the native
+    // catalog cannot be shown in full, and saying so beats a picker that
+    // silently lists a prefix.
+    if carriers.len() < models.len() {
+        tracing::warn!(
+            "codex can only offer {} of the {} selected models in its picker ({} not shown: {})",
+            carriers.len(),
+            models.len(),
+            models.len() - carriers.len(),
+            models[carriers.len()..].join(", ")
+        );
+    }
+    let assigned: BTreeMap<&str, &str> = carriers
+        .iter()
+        .zip(models.iter())
+        .map(|(slug, model)| (slug.as_str(), model.as_str()))
+        .collect();
 
     let mut entries: Vec<Value> = Vec::new();
     for m in native {
-        // A native slug the market also sells would collide with our own entry.
-        if models.iter().any(|s| s == slug_of(&m)) {
-            continue;
+        match assigned.get(slug_of(&m)) {
+            Some(model) => {
+                let order = carriers.iter().position(|s| s == slug_of(&m)).unwrap_or(0);
+                entries.push(carrier(m, model, order));
+            }
+            None => entries.push(hidden(m)),
         }
-        entries.push(hidden(m));
-    }
-    for (i, m) in models.iter().enumerate() {
-        entries.push(entry(&template, m, i));
     }
 
     let target = path();
-    let body = serde_json::to_string_pretty(&json!({ "models": entries }))?;
-    write_atomic(&target, &body)?;
-    Ok(Some(target))
+    write_atomic(&target, &serde_json::to_string_pretty(&json!({ "models": entries }))?)?;
+    write_atomic(
+        &aliases_path(),
+        &serde_json::to_string_pretty(&Value::Object(
+            assigned.iter().map(|(s, m)| ((*s).to_string(), json!(m))).collect::<Map<_, _>>(),
+        ))?,
+    )?;
+    Ok(Some(Generated { path: target, start_slug: carriers[0].clone() }))
 }
 
-/// Drop the generated catalog. Called when the switch goes off, so nothing we
-/// wrote outlives the switch.
+/// The market model a slug Codex asked for stands for, if it is one of ours.
+///
+/// Read straight off disk on every call rather than cached: the file is a few
+/// hundred bytes, it is read once per proxied request (which is about to spend
+/// seconds upstream anyway), and going back to the file is what guarantees the
+/// mapping can never drift from the catalog sitting next to it.
+pub fn alias_for(slug: &str) -> Option<String> {
+    if slug.is_empty() {
+        return None;
+    }
+    let raw = std::fs::read_to_string(aliases_path()).ok()?;
+    serde_json::from_str::<Value>(&raw).ok()?.get(slug)?.as_str().map(String::from)
+}
+
+/// Drop the generated catalog and its alias table. Called when the switch goes
+/// off, so nothing we wrote outlives the switch.
 pub fn remove() {
     let _ = std::fs::remove_file(path());
+    let _ = std::fs::remove_file(aliases_path());
 }
 
 /// Does this config value point at the catalog we generate? Used by the
@@ -121,6 +200,8 @@ fn codex_binaries() -> Vec<PathBuf> {
 /// Run against a scratch `CODEX_HOME`: the user's own config is mid-rewrite
 /// when this is called, and a config Codex refuses to parse (which is exactly
 /// the state an older asale build leaves behind) would take the dump with it.
+/// It also keeps the dump native — our own `model_catalog_json` is not in
+/// scope there, so re-applying never feeds a previous generation back in.
 fn native_catalog() -> Option<Vec<Value>> {
     let scratch = std::env::temp_dir().join(format!("asale-codex-catalog-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&scratch);
@@ -199,21 +280,25 @@ fn slug_of(entry: &Value) -> &str {
     entry.get("slug").and_then(Value::as_str).unwrap_or_default()
 }
 
-/// The native entry asale models are cloned from: the highest-priority one the
-/// picker lists, skipping `use_responses_lite` models whose slimmed-down
-/// request shape is tied to a specific OpenAI model generation.
-fn pick_template(models: &[Value]) -> Option<Value> {
-    let usable = |m: &&Value| {
-        m.get("visibility").and_then(Value::as_str) == Some("list")
-            && m.get("use_responses_lite").and_then(Value::as_bool) != Some(true)
-    };
-    let by_priority = |m: &&Value| m.get("priority").and_then(Value::as_i64).unwrap_or(i64::MAX);
-    models
+/// The native entries a market model may be published under, best first.
+///
+/// Only entries the picker already lists qualify — a slug OpenAI hides is a
+/// slug their allowlist need not carry either. `use_responses_lite` models are
+/// skipped because their slimmed-down request shape is tied to a specific
+/// OpenAI model generation, as are the two the desktop app labels from its own
+/// hard-coded power-slider table.
+fn pick_carriers(models: &[Value]) -> Vec<String> {
+    let mut usable: Vec<&Value> = models
         .iter()
-        .filter(usable)
-        .min_by_key(by_priority)
-        .or_else(|| models.iter().min_by_key(by_priority))
-        .cloned()
+        .filter(|m| {
+            m.get("visibility").and_then(Value::as_str) == Some("list")
+                && m.get("use_responses_lite").and_then(Value::as_bool) != Some(true)
+                && !POWER_SLIDER_SLUGS.contains(&slug_of(m))
+                && !slug_of(m).is_empty()
+        })
+        .collect();
+    usable.sort_by_key(|m| m.get("priority").and_then(Value::as_i64).unwrap_or(i64::MAX));
+    usable.into_iter().map(|m| slug_of(m).to_string()).collect()
 }
 
 /// A native entry, kept for internal lookups but out of the picker.
@@ -224,21 +309,20 @@ fn hidden(mut entry: Value) -> Value {
     entry
 }
 
-/// One market model, wearing a native entry's schema.
-fn entry(template: &Value, model: &str, order: usize) -> Value {
-    let mut e = template.clone();
-    let Some(o) = e.as_object_mut() else { return e };
-    set(o, "slug", json!(model));
+/// A native entry wearing a market model's identity. Its `slug` is deliberately
+/// left alone — that is the whole point (see the module docs).
+fn carrier(mut entry: Value, model: &str, order: usize) -> Value {
+    let Some(o) = entry.as_object_mut() else { return entry };
     set(o, "display_name", json!(model));
     set(o, "description", json!("Bought through the Asale market."));
     set(o, "visibility", json!("list"));
     set(o, "supported_in_api", json!(true));
     // Ahead of every hidden native entry, in the order the buy page lists them.
     set(o, "priority", json!(order as i64 + 1));
-    // Upgrade banners and first-run nudges belong to the model we copied.
+    // Upgrade banners and first-run nudges belong to the model we replaced.
     set(o, "upgrade", Value::Null);
     set(o, "availability_nux", Value::Null);
-    e
+    entry
 }
 
 fn set(o: &mut Map<String, Value>, key: &str, value: Value) {
@@ -248,7 +332,8 @@ fn set(o: &mut Map<String, Value>, key: &str, value: Value) {
 fn write_atomic(path: &Path, body: &str) -> Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    let tmp = dir.join(format!("codex-models.json.asale-tmp-{}", std::process::id()));
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("catalog");
+    let tmp = dir.join(format!("{name}.asale-tmp-{}", std::process::id()));
     std::fs::write(&tmp, body).with_context(|| format!("write {}", tmp.display()))?;
     std::fs::rename(&tmp, path).with_context(|| format!("rename into {}", path.display()))?;
     Ok(())
@@ -265,35 +350,29 @@ mod tests {
             json!({"slug": "gpt-5.2", "visibility": "list", "priority": 29,
                    "use_responses_lite": false, "base_instructions": "5.2 prompt",
                    "upgrade": {"copy": "try sol"}}),
+            json!({"slug": "gpt-5.5", "visibility": "list", "priority": 7,
+                   "use_responses_lite": false, "base_instructions": "5.5 prompt"}),
             json!({"slug": "codex-auto-review", "visibility": "hide", "priority": 43}),
         ]
     }
 
     #[test]
-    fn template_skips_responses_lite_models() {
+    fn carriers_are_listed_non_lite_natives_in_priority_order() {
         // sol has the better priority but a request shape tied to its own
-        // generation; 5.2 is the highest-priority entry we can safely clone.
-        let t = pick_template(&native()).unwrap();
-        assert_eq!(slug_of(&t), "gpt-5.2");
+        // generation; the hidden entry is not something the allowlist carries.
+        assert_eq!(pick_carriers(&native()), ["gpt-5.5", "gpt-5.2"]);
+        assert!(pick_carriers(&[]).is_empty());
     }
 
     #[test]
-    fn template_falls_back_when_nothing_is_listed() {
-        let hidden_only = vec![json!({"slug": "only", "visibility": "hide", "priority": 5})];
-        assert_eq!(slug_of(&pick_template(&hidden_only).unwrap()), "only");
-        assert!(pick_template(&[]).is_none());
-    }
-
-    #[test]
-    fn cloned_entry_keeps_the_schema_but_takes_our_identity() {
-        let t = pick_template(&native()).unwrap();
-        let e = entry(&t, "claude-fable-5", 0);
-        assert_eq!(e["slug"], "claude-fable-5");
+    fn a_carrier_keeps_its_slug_but_takes_our_identity() {
+        let e = carrier(native()[1].clone(), "claude-fable-5", 0);
+        assert_eq!(e["slug"], "gpt-5.2", "the slug is what gets past the app's allowlist");
         assert_eq!(e["display_name"], "claude-fable-5");
         assert_eq!(e["visibility"], "list");
         assert_eq!(e["priority"], 1, "listed ahead of the hidden natives");
         assert_eq!(e["base_instructions"], "5.2 prompt", "harness prompt is inherited");
-        assert_eq!(e["upgrade"], Value::Null, "the template's upgrade banner is not inherited");
+        assert_eq!(e["upgrade"], Value::Null, "the replaced model's upgrade banner is not");
     }
 
     #[test]

@@ -17,15 +17,76 @@ pub async fn wallet_history(state: &AppState) -> R<Value> {
     authed(state, reqwest::Method::GET, "/api/v1/me/wallet/history", None).await
 }
 
+/// Settings key holding the cached consumer API key.
+pub(crate) const KEY_SETTING: &str = "asale_api_key";
+/// Settings key holding the server that key was minted against.
+const KEY_ORIGIN_SETTING: &str = "asale_api_key_origin";
+
+/// Cache a freshly minted key, stamped with the server that issued it.
+pub(crate) async fn remember_key(state: &AppState, key: &str) -> R<()> {
+    state.store.set_setting(KEY_SETTING, key).await.map_err(err)?;
+    state.store.set_setting(KEY_ORIGIN_SETTING, &state.cfg.server_api_base).await.map_err(err)?;
+    *state.asale_key.write().await = Some(key.to_string());
+    Ok(())
+}
+
+/// Drop the cached key everywhere, so the next `ensure_*` mints a new one.
+/// Called on sign-out and whenever the gateway tells us the key is unknown.
+pub(crate) async fn forget_key(state: &AppState) -> R<()> {
+    state.store.set_setting(KEY_SETTING, "").await.map_err(err)?;
+    state.store.set_setting(KEY_ORIGIN_SETTING, "").await.map_err(err)?;
+    *state.asale_key.write().await = None;
+    Ok(())
+}
+
+/// The cached key, but only if it belongs to the server this build talks to.
+///
+/// A key is scoped to the account *and the deployment* that issued it, while
+/// `~/.asale/asale.db` is not: a dev build (`ASALE_SERVER_API=127.0.0.1:9090`)
+/// and the packaged one (`api.asale.ai`) share the same store on one machine.
+/// Without this check the first build's key survives the switch and every
+/// market request 401s with `unknown api key` — from the tool's point of view
+/// the proxy is simply broken, with nothing on screen saying why.
+///
+/// An unstamped key predates this check; re-stamp it rather than forcing a
+/// pointless re-mint on upgrade.
+pub(crate) async fn cached_key(state: &AppState) -> R<Option<String>> {
+    let key = state.store.get_setting(KEY_SETTING).await.map_err(err)?.unwrap_or_default();
+    if key.is_empty() {
+        return Ok(None);
+    }
+    match state.store.get_setting(KEY_ORIGIN_SETTING).await.map_err(err)?.unwrap_or_default() {
+        o if o.is_empty() => {
+            state.store.set_setting(KEY_ORIGIN_SETTING, &state.cfg.server_api_base).await.map_err(err)?;
+        }
+        o if o != state.cfg.server_api_base => {
+            tracing::warn!(
+                "cached asale api key was minted against {o}, this build talks to {} — discarding it",
+                state.cfg.server_api_base
+            );
+            forget_key(state).await?;
+            return Ok(None);
+        }
+        _ => {}
+    }
+    Ok(Some(key))
+}
+
 /// Mint a fresh consumer API key on the server and wire it into the local
-/// proxy, replacing any previous one. Used by the "regenerate" action. The key
-/// is cached in the local store (on disk), not the secret store, so persisting
-/// it never triggers an OS credential prompt.
+/// proxy, replacing any previous one. Used by the "regenerate" action, and by
+/// the self-heal path when the gateway rejects the cached key. The key is
+/// cached in the local store (on disk), not the secret store, so persisting it
+/// never triggers an OS credential prompt.
 pub async fn create_api_key(state: &AppState, label: String) -> R<Value> {
-    let v = authed(state, reqwest::Method::POST, "/api/v1/apikeys", Some(json!({"label": label}))).await?;
-    if let Some(key) = v["key"].as_str() {
-        state.store.set_setting("asale_api_key", key).await.map_err(err)?;
-        *state.asale_key.write().await = Some(key.to_string());
+    let mut v = authed(state, reqwest::Method::POST, "/api/v1/apikeys", Some(json!({"label": label}))).await?;
+    if let Some(key) = v["key"].as_str().map(String::from) {
+        remember_key(state, &key).await?;
+        // The tools already buying hold the key this one just replaced; rewrite
+        // their configs before they get a 401 out of it.
+        let refreshed = super::buy::refresh_buy_tool_keys(state, &key).await?;
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("refreshed_tools".into(), json!(refreshed));
+        }
     }
     Ok(v)
 }
@@ -35,30 +96,24 @@ pub async fn create_api_key(state: &AppState, label: String) -> R<Value> {
 /// user never has to generate a key by hand. Returns `{ "key": null }` when not
 /// yet signed in (a key can only be minted for a logged-in account).
 pub async fn ensure_api_key(state: &AppState) -> R<Value> {
-    if let Some(k) = state.store.get_setting("asale_api_key").await.map_err(err)? {
-        if !k.is_empty() {
-            *state.asale_key.write().await = Some(k.clone());
-            return Ok(json!({ "key": k }));
-        }
+    if let Some(k) = cached_key(state).await? {
+        *state.asale_key.write().await = Some(k.clone());
+        return Ok(json!({ "key": k }));
     }
     if keychain::get("access_token").map_err(err)?.is_none() {
         return Ok(json!({ "key": Value::Null }));
     }
-    let v = authed(state, reqwest::Method::POST, "/api/v1/apikeys", Some(json!({ "label": "asale" }))).await?;
-    if let Some(key) = v["key"].as_str() {
-        state.store.set_setting("asale_api_key", key).await.map_err(err)?;
-        *state.asale_key.write().await = Some(key.to_string());
-    }
-    Ok(v)
+    create_api_key(state, "asale".into()).await
 }
 
 /// Load the cached asale key into the running proxy (on startup).
 pub async fn load_api_key(state: &AppState) -> R<bool> {
-    if let Some(key) = state.store.get_setting("asale_api_key").await.map_err(err)? {
-        *state.asale_key.write().await = Some(key);
-        Ok(true)
-    } else {
-        Ok(false)
+    match cached_key(state).await? {
+        Some(key) => {
+            *state.asale_key.write().await = Some(key);
+            Ok(true)
+        }
+        None => Ok(false),
     }
 }
 

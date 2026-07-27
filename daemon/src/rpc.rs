@@ -179,7 +179,11 @@ rpc_args! {
         /// Only honoured when the exchange creates a new account.
         #[serde(default)] region: Option<String>,
     }
-    ProfileArgs    { #[serde(default)] name: Option<String>, #[serde(default)] region: Option<String> }
+    ProfileArgs    {
+        #[serde(default)] name: Option<String>,
+        #[serde(default)] region: Option<String>,
+        #[serde(default, alias = "avatar_url")] avatar_url: Option<String>,
+    }
     PasswordArgs   {
         #[serde(alias = "new_password")] new_password: String,
         #[serde(default, alias = "old_password")] old_password: Option<String>,
@@ -240,7 +244,7 @@ async fn rpc(
         "ensure_api_key" => commands::ensure_api_key(st).await?,
         "load_api_key" => commands::load_api_key(st).await.map(Value::Bool)?,
         "me_profile" => commands::me_profile(st).await?,
-        "logout" => commands::logout().await.map(Value::Bool)?,
+        "logout" => commands::logout(st).await.map(Value::Bool)?,
         "proxy_status" => commands::proxy_status(st).await?,
         "client_status" => commands::client_status(st).await?,
         "devices_list" => commands::devices_list(st).await?,
@@ -291,7 +295,7 @@ async fn rpc(
         },
         "update_profile" => {
             let p: ProfileArgs = args(&a)?;
-            commands::update_profile(st, p.name, p.region).await?
+            commands::update_profile(st, p.name, p.region, p.avatar_url).await?
         },
         "change_password" => {
             let p: PasswordArgs = args(&a)?;

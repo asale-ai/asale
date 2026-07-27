@@ -343,15 +343,22 @@ fn apply_codex(base_url: &str, token: &str, models: &[String]) -> Result<()> {
     // selection in the picker. With no selection ("any model"), Codex keeps its
     // own model and catalog — there is nothing specific to point it at.
     match models.first() {
-        Some(model) => {
-            doc[CODEX_MODEL] = toml_edit::value(model.as_str());
-            match crate::codex_catalog::write(models)? {
-                Some(catalog) => doc[CODEX_CATALOG] = toml_edit::value(catalog.to_string_lossy().as_ref()),
-                // No catalog could be generated: the picker keeps Codex's own
-                // list, but `model` still points at what the user bought.
-                None => drop_our_catalog(&mut doc, false),
+        Some(model) => match crate::codex_catalog::write(models)? {
+            // Our catalog publishes market models under native slugs, so what
+            // goes here is the carrier — the id Codex will actually send, which
+            // the proxy translates back (see `codex_catalog`).
+            Some(catalog) => {
+                doc[CODEX_MODEL] = toml_edit::value(catalog.start_slug.as_str());
+                doc[CODEX_CATALOG] = toml_edit::value(catalog.path.to_string_lossy().as_ref());
             }
-        }
+            // No catalog could be generated: the picker keeps Codex's own
+            // list, but `model` still points at what the user bought — with no
+            // alias table to go through, the market id has to travel as itself.
+            None => {
+                drop_our_catalog(&mut doc, true);
+                doc[CODEX_MODEL] = toml_edit::value(model.as_str());
+            }
+        },
         None => drop_our_catalog(&mut doc, true),
     }
     write_atomic(config_path, &doc.to_string())?;
@@ -529,10 +536,7 @@ fn dotenv_set(raw: &str, pairs: &[(&str, &str)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // Every path here derives from $HOME; serialize the tests that repoint it.
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
+    use crate::codex_catalog::HOME_LOCK;
 
     fn with_temp_home<T>(f: impl FnOnce() -> T) -> T {
         let _g = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -554,11 +558,15 @@ mod tests {
         out
     }
 
-    /// Install a fake `codex debug models` that prints `slugs` as its catalog.
+    /// Install a fake `codex debug models` that prints `slugs` as its catalog,
+    /// most-preferred carrier first.
     fn codex_stub(slugs: &[&str]) {
         let entries: Vec<String> = slugs
             .iter()
-            .map(|s| format!(r#"{{"slug":"{s}","visibility":"list","priority":9,"base_instructions":"native"}}"#))
+            .enumerate()
+            .map(|(i, s)| {
+                format!(r#"{{"slug":"{s}","visibility":"list","priority":{i},"base_instructions":"native"}}"#)
+            })
             .collect();
         let path = home().join("codex-stub");
         std::fs::write(
@@ -617,7 +625,7 @@ mod tests {
     #[test]
     fn codex_switches_active_provider_and_restores() {
         with_temp_home(|| {
-            codex_stub(&["gpt-5.2"]);
+            codex_stub(&["gpt-5.5", "gpt-5.2", "gpt-5.4"]);
             let paths = config_paths("codex");
             std::fs::create_dir_all(paths[0].parent().unwrap()).unwrap();
             let original = "model = \"gpt-5-codex\"\nmodel_provider = \"openai\"\n\n[model_providers.openai]\nname = \"OpenAI\"\nbase_url = \"https://api.openai.com/v1\"\n";
@@ -641,29 +649,47 @@ mod tests {
                 Some("responses"),
                 "`chat` is rejected outright by Codex >= 0.146"
             );
-            assert_eq!(doc[CODEX_MODEL].as_str(), Some("claude-fable-5"), "starts on the first bought model");
+            assert_eq!(
+                doc[CODEX_MODEL].as_str(),
+                Some("gpt-5.5"),
+                "starts on the slug carrying the first bought model, not the market id"
+            );
             let catalog = doc[CODEX_CATALOG].as_str().unwrap();
             assert!(crate::codex_catalog::is_ours(catalog), "points at the catalog we generated");
 
-            // Both bought models are offered; the native one is kept for the
-            // app's internal lookups but taken out of the picker.
+            // Both bought models are offered, each wearing a native slug so the
+            // desktop app's allowlist lets it through; the spare native is kept
+            // for the app's internal lookups but taken out of the picker.
             let listed = std::fs::read_to_string(catalog).unwrap();
             let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
-            let slugs: Vec<(&str, &str)> = listed["models"]
+            let slugs: Vec<(&str, &str, &str)> = listed["models"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|m| (m["slug"].as_str().unwrap(), m["visibility"].as_str().unwrap()))
+                .map(|m| {
+                    (
+                        m["slug"].as_str().unwrap(),
+                        m["visibility"].as_str().unwrap(),
+                        m["display_name"].as_str().unwrap_or_default(),
+                    )
+                })
                 .collect();
             assert_eq!(
                 slugs,
-                [("gpt-5.2", "hide"), ("claude-fable-5", "list"), ("claude-opus-5", "list")]
+                [
+                    ("gpt-5.5", "list", "claude-fable-5"),
+                    ("gpt-5.2", "list", "claude-opus-5"),
+                    ("gpt-5.4", "hide", ""),
+                ]
             );
+            assert_eq!(crate::codex_catalog::alias_for("gpt-5.5").as_deref(), Some("claude-fable-5"));
+            assert_eq!(crate::codex_catalog::alias_for("gpt-5.4"), None, "an unused carrier stands for nothing");
 
             restore("codex", &backup).unwrap();
             assert_eq!(read_raw(&paths[0]).unwrap(), original, "restore is byte-exact");
             assert!(read_raw(&paths[1]).is_none(), "auth.json we created is removed");
             assert!(!crate::codex_catalog::path().exists(), "the generated catalog goes with it");
+            assert!(!crate::codex_catalog::aliases_path().exists(), "and the alias table");
         });
     }
 
