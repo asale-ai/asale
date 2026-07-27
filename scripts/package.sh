@@ -131,12 +131,49 @@ echo "    ASALE_GATEWAY_WS=$ASALE_GATEWAY_WS"
 echo "    ASALE_QUOTA_PUBKEY=${ASALE_QUOTA_PUBKEY:0:16}…"
 pnpm "${args[@]}"
 
-# ---------------------------------------------------------------- 产物
-step "产物"
 # 三个 crate 是一个 workspace（./Cargo.toml），target 在这里，不在 src-tauri/ 下面。
 out="target"
 if [[ -n "$TARGET" ]]; then out="$out/$TARGET"; fi
 if [[ "$PROFILE" == "--debug" ]]; then out="$out/debug/bundle"; else out="$out/release/bundle"; fi
+
+# ---------------------------------------------------------------- 公证 dmg
+# tauri 只公证 .app：构建日志里 "Notarizing …/Asale.app" 之后就直接 "Signing …dmg"，
+# 没有第二次公证。而 .app 内部的票据管不到外层容器 —— 用户下载的是 dmg，双击挂载时
+# Gatekeeper 评估的是 dmg 本身，未公证就仍旧弹 "Apple 无法检查 App 是否包含恶意软件"。
+# 装订到 dmg 上还顺带让首次打开能离线通过（否则要现场联网查 Apple 的公证库）。
+#
+# 这里不重新签名，dmg 已经被 tauri 签过；只是补提交公证 + stapler。
+if [[ "$os" == "Darwin" && -d "$out" ]]; then
+  # 用普通变量记有没有凭据，不靠 ${#arr[@]}：macOS 自带的还是 bash 3.2，
+  # set -u 下对空数组取值会直接 unbound variable 退出。
+  have_notary=0
+  notary_args=()
+  if [[ -n "${APPLE_API_KEY_PATH:-}" && -n "${APPLE_API_KEY:-}" && -n "${APPLE_API_ISSUER:-}" ]]; then
+    notary_args=(--key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER")
+    have_notary=1
+  elif [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then
+    notary_args=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
+    have_notary=1
+  fi
+
+  # 用 while read 而不是 for $(find)：产物名里有空格（"Asale 0.1.0.dmg" 这类）会被拆开。
+  while IFS= read -r dmg; do
+    if [[ $have_notary -eq 0 ]]; then
+      echo "   注意：没有公证凭据，$(basename "$dmg") 未公证 —— 用户下载后双击仍会被 Gatekeeper 拦"
+      continue
+    fi
+    step "公证 $(basename "$dmg")"
+    # --wait：不等的话后面 stapler 必然失败（票据还没生成）。公证一般 1–5 分钟。
+    xcrun notarytool submit "$dmg" "${notary_args[@]}" --wait
+    xcrun stapler staple "$dmg"
+    # 装订完立刻自检：notarytool 返回 Accepted 但 staple 没落盘的情况（磁盘只读、
+    # 路径被替换）不会让上面两条命令失败，只有这里能抓到。
+    spctl -a -vvv -t open --context context:primary-signature "$dmg"
+  done < <(find "$out" -maxdepth 2 -type f -name '*.dmg')
+fi
+
+# ---------------------------------------------------------------- 产物
+step "产物"
 if [[ -d "$out" ]]; then
   find "$out" -maxdepth 2 -type f \
     \( -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' -o -name '*.sig' \) \
