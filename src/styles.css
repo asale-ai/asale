@@ -1196,7 +1196,63 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .wallet-hero .wh-k { font-size: var(--fs-meta); color: var(--fg-2); }
 .wallet-hero .wh-v { font-size: var(--fs-sub); font-weight: 500; color: var(--fg); }
 
+/* ── Deposit network note ───────────────────────────────────────────────────
+   Which chain to send over is the one thing that has to be read before the QR
+   is scanned, so it sits above the address rather than under it. It is stated,
+   not shouted: an alarm here reads as "this is risky" and stops people from
+   funding at all, when all they need is the network name. */
+.depwarn {
+  margin-bottom: var(--s5); padding: var(--s3) var(--s4);
+  border-radius: var(--r3); background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.depwarn-head { display: flex; align-items: center; gap: var(--s2); color: var(--fg); }
+.depwarn-head svg { width: 15px; height: 15px; flex-shrink: 0; color: var(--fg-3); }
+.depwarn-title { font-size: var(--fs-sub); font-weight: 600; line-height: 1.3; letter-spacing: -0.005em; }
+.depwarn-body {
+  margin: 4px 0 0; font-size: var(--fs-sub); color: var(--fg-2); line-height: 1.6;
+}
+
+.wallet-hero .wh-actions { display: flex; gap: var(--s2); flex-wrap: wrap; margin-top: var(--s5); }
+.wallet-hero .wh-actions + .wh-trust { margin-top: var(--s3); }
+
 .wallet-cta { text-align: center; padding: var(--s2) 0 var(--s1); }
+.wallet-cta .hint { margin-top: var(--s2); font-size: var(--fs-meta); color: var(--fg-3); }
+
+/* ── Wallet dialog ──────────────────────────────────────────────────────────
+   The funding sheet, on top of the shared `.modal` shell. Its body is the part
+   that scrolls: the deposit step roughly doubles in height once the address
+   and QR arrive, and a sheet that grows past the viewport instead of scrolling
+   inside itself puts the address out of reach. */
+/* Wider and taller than the shared cap: the deposit tab carries a warning
+   block, a QR, an address and a fact grid all at once. */
+.modal.wdlg { width: min(544px, 100%); max-height: calc(100vh - 48px); }
+.wdlg .modal-head h3 { display: flex; align-items: baseline; gap: var(--s2); min-width: 0; }
+.wdlg-sub {
+  font-size: var(--fs-meta); font-weight: 400; color: var(--fg-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Context, not a heading — quiet on every step. */
+.wdlg-bal {
+  display: flex; align-items: baseline; justify-content: space-between; gap: var(--s4);
+  padding: 10px var(--s5); background: var(--surface-2);
+  font-size: var(--fs-meta); color: var(--fg-2);
+}
+.wdlg-bal .mono { font-size: var(--fs-sub); font-weight: 500; color: var(--fg); }
+/* One tab per funding rail. */
+.wdlg-tabs { padding: var(--s3) var(--s5) 0; }
+.wdlg-tabs .segmented { max-width: 100%; overflow-x: auto; }
+
+/* Fixed height, deliberately: the tallest rail sets it once and every other tab
+   scrolls inside it. A body that sized itself to its content made the sheet
+   jump — and the tab strip move out from under the cursor — on every switch. */
+.wdlg-body { height: clamp(300px, 58vh, 480px); overflow-y: auto; padding: var(--s5); }
+.wdlg-body > :first-child { margin-top: 0; }
+
+/* Address + QR, stacked: the sheet is too narrow for the side-by-side the
+   full-page layout used. */
+.dep-result { display: flex; flex-direction: column; gap: var(--s4); align-items: stretch; }
+.dep-result .qr-box { align-self: center; }
 
 .deposit-panel { display: flex; gap: var(--s6); flex-wrap: wrap; align-items: flex-start; }
 .qr-box {

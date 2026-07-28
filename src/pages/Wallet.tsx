@@ -1,19 +1,21 @@
+// The page answers one question — what do you have — and the two verbs hang off
+// that figure. Funding used to live in a second card below it with a segmented
+// switch; both rails now open in `WalletDialog`, which keeps the page to a
+// balance and a history, and gives new funding methods somewhere to land that
+// is not "another tab on the wallet screen".
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import QRCode from "qrcode";
 import {
   invoke, inTauri, fmtUsdt,
-  type Wallet, type WalletHistory, type WithdrawLimits,
+  type Wallet, type WalletHistory,
 } from "../lib";
-import { Card, CopyChip, Err, Ok, Skeleton, useCopy, PageHead, IconAction, Empty, FactGrid } from "../ui";
+import { Card, Skeleton, useCopy, PageHead, IconAction, Empty } from "../ui";
+import { WalletDialog, type WalletMode } from "../components/WalletDialog";
 import {
   IconWallet, IconRefresh, IconDownload, IconArrowRight,
-  IconShield, IconCheck, IconCopy, IconRecords, IconAlert,
+  IconShield, IconCheck, IconCopy, IconRecords,
 } from "../icons";
 
-const TRON_RE = /^T[1-9A-HJ-NP-Za-km-z]{33}$/;
-
-type Pane = "deposit" | "withdraw";
 type HistTab = "all" | "deposit" | "withdraw";
 
 /** One row of the unified money-in/money-out history. */
@@ -50,19 +52,9 @@ export function WalletPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [err, setErr] = useState("");
 
-  const [pane, setPane] = useState<Pane>("deposit");
+  /* Which funding sheet is open; null = none. */
+  const [pane, setPane] = useState<WalletMode | null>(null);
   const [histTab, setHistTab] = useState<HistTab>("all");
-
-  const [addr, setAddr] = useState("");
-  const [qr, setQr] = useState("");
-  const [addrBusy, setAddrBusy] = useState(false);
-  const [addrErr, setAddrErr] = useState("");
-
-  const [to, setTo] = useState("");
-  const [amount, setAmount] = useState("");
-  const [wdBusy, setWdBusy] = useState(false);
-  const [wdErr, setWdErr] = useState("");
-  const [wdOk, setWdOk] = useState("");
 
   const [copiedHash, copyHash] = useCopy();
 
@@ -79,49 +71,13 @@ export function WalletPage() {
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
 
-  async function getAddress() {
-    setAddrBusy(true); setAddrErr("");
-    try {
-      const r = await invoke<{ chain: string; address: string }>("wallet_deposit_address", { chain: "tron" });
-      setAddr(r.address);
-      setQr(await QRCode.toDataURL(r.address, { margin: 1, width: 220 }));
-    } catch (e) { setAddrErr(String((e as Error).message)); } finally { setAddrBusy(false); }
-  }
-
-  const limits: WithdrawLimits | null = hist?.limits ?? null;
   const availableMicros = w?.balance ?? 0;
-  const amountMicros = Math.round(parseFloat(amount || "0") * 1_000_000);
-  const addrValid = TRON_RE.test(to.trim());
-  const minMicros = limits?.withdraw_min ?? 0;
-  const feeMicros = limits?.withdraw_fee ?? 0;
-  const maxSingle = limits?.withdraw_max_single ?? 0;
-  const belowMin = amountMicros > 0 && minMicros > 0 && amountMicros < minMicros;
-  const overSingle = maxSingle > 0 && amountMicros > maxSingle;
-  const amountValid =
-    Number.isFinite(amountMicros) && amountMicros > 0 &&
-    amountMicros <= availableMicros && !belowMin && !overSingle;
-
-  async function withdraw() {
-    setWdErr(""); setWdOk("");
-    if (!addrValid) return setWdErr(t("wallet.invalidAddress"));
-    if (belowMin) return setWdErr(t("wallet.belowMin", { amount: fmtUsdt(minMicros) }));
-    if (overSingle) return setWdErr(t("wallet.overSingle", { amount: fmtUsdt(maxSingle) }));
-    if (!amountValid) return setWdErr(t("wallet.invalidAmount"));
-    setWdBusy(true);
-    try {
-      const r = await invoke<{ withdrawal_id: number; status: string }>("wallet_withdraw", {
-        chain: "tron", toAddress: to.trim(), amount: amountMicros,
-      });
-      setWdOk(t("wallet.withdrawOk", { id: r.withdrawal_id }));
-      setTo(""); setAmount(""); refresh();
-    } catch (e) { setWdErr(String((e as Error).message)); } finally { setWdBusy(false); }
-  }
 
   // Deposits and withdrawals merged into one time-ordered feed.
   const flows = useMemo<Flow[]>(() => {
     const d: Flow[] = (hist?.deposits ?? []).map((r) => ({
       key: `d${r.id}`, kind: "deposit", ts: r.created_ts, amount: r.amount,
-      fee: 0, status: r.status, hash: r.tx_hash, target: null,
+      fee: r.fee ?? 0, status: r.status, hash: r.tx_hash, target: null,
     }));
     const x: Flow[] = (hist?.withdrawals ?? []).map((r) => ({
       key: `w${r.id}`, kind: "withdraw", ts: r.confirmed_ts || r.requested_ts, amount: r.amount,
@@ -137,10 +93,6 @@ export function WalletPage() {
     return <span className={`pill ${cls}`}>{t(`wallet.${key}`)}</span>;
   };
 
-  const panes: { id: Pane; label: string }[] = [
-    { id: "deposit", label: t("wallet.tabDeposit") },
-    { id: "withdraw", label: t("wallet.tabWithdraw") },
-  ];
   const histTabs: { id: HistTab; label: string }[] = [
     { id: "all", label: t("wallet.histAll") },
     { id: "deposit", label: t("wallet.histDeposit") },
@@ -174,11 +126,26 @@ export function WalletPage() {
               <>{w ? fmtUsdt(availableMicros) : "—"}<span className="wh-unit">USDT</span></>
             )}
           </div>
+          <div className="wh-actions">
+            <button className="btn" onClick={() => setPane("deposit")} disabled={!inTauri}>
+              <IconDownload />{t("wallet.tabDeposit")}
+            </button>
+            <button className="btn ghost" onClick={() => setPane("withdraw")} disabled={!inTauri}>
+              <IconArrowRight />{t("wallet.tabWithdraw")}
+            </button>
+          </div>
           <div className="wh-trust">
             <span className="trust-chip"><IconShield />{t("wallet.trustCustody")}</span>
             <span className="trust-chip"><IconCheck />{t("wallet.trustNetwork")}</span>
             <span className="trust-chip"><IconRecords />{t("wallet.trustAudit")}</span>
           </div>
+          <WalletDialog
+            mode={pane}
+            limits={hist?.limits ?? null}
+            balance={availableMicros}
+            onClose={() => setPane(null)}
+            onDone={() => refresh()}
+          />
         </div>
         <div className="wh-side">
           <div className="wh-cell">
@@ -191,130 +158,6 @@ export function WalletPage() {
           </div>
         </div>
       </div>
-
-      {/* ── Deposit / withdraw ── */}
-      <Card>
-        <div className="segmented card-lead">
-          {panes.map((p) => (
-            <button key={p.id} className={pane === p.id ? "active" : ""} onClick={() => setPane(p.id)}>
-              {p.id === "deposit" ? <IconDownload /> : <IconArrowRight />}{p.label}
-            </button>
-          ))}
-        </div>
-
-        {pane === "deposit" ? (
-          <div className="fade-in">
-            <FactGrid facts={[
-              { k: t("wallet.factNetwork"), v: "TRON · TRC20" },
-              { k: t("wallet.factAsset"), v: "USDT" },
-              { k: t("wallet.factCredit"), v: t("wallet.factCreditVal") },
-            ]} />
-
-            {!addr && (
-              <div className="wallet-cta">
-                <p className="card-desc">{t("wallet.depositNote")}</p>
-                <button className="btn" onClick={getAddress} disabled={!inTauri || addrBusy}>
-                  {addrBusy ? <IconRefresh className="spin" /> : <IconDownload />}
-                  {addrBusy ? t("wallet.gettingAddress") : t("wallet.getAddress")}
-                </button>
-                {addrErr && <Err>{addrErr}</Err>}
-              </div>
-            )}
-
-            {addr && (
-              <div className="deposit-panel fade-in">
-                <div className="qr-box">
-                  {qr && <img src={qr} alt="deposit address QR" width={168} height={168} />}
-                  <span className="qr-cap">{t("wallet.scanToPay")}</span>
-                </div>
-                <div className="deposit-side">
-                  <div className="field">
-                    <label>{t("wallet.yourAddress")}</label>
-                    <CopyChip value={addr} wrap />
-                  </div>
-                  <div className="callout warn">
-                    <IconAlert /><span>{t("wallet.trc20Only")}</span>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        ) : (
-          <div className="fade-in">
-            <FactGrid facts={[
-              { k: t("wallet.factMin"), v: <span className="mono">{limits ? `${fmtUsdt(limits.withdraw_min)} USDT` : "—"}</span> },
-              { k: t("wallet.factMaxSingle"), v: <span className="mono">{limits ? `${fmtUsdt(limits.withdraw_max_single)} USDT` : "—"}</span> },
-              { k: t("wallet.factMaxDaily"), v: <span className="mono">{limits ? `${fmtUsdt(limits.withdraw_max_daily)} USDT` : "—"}</span> },
-            ]} />
-
-            <div className="field">
-              <label>{t("wallet.withdrawAddress")}</label>
-              <input className={`input mono ${to.trim() && !addrValid ? "invalid" : ""}`} value={to}
-                onChange={(e) => setTo(e.target.value)} placeholder="T…" spellCheck={false} />
-              <div className={`hint${to.trim() && !addrValid ? " bad" : ""}`}>
-                {to.trim() && !addrValid ? t("wallet.invalidAddress") : t("wallet.addressHint")}
-              </div>
-            </div>
-
-            <div className="field">
-              <label>{t("wallet.withdrawAmount")}</label>
-              <div className="input-row">
-                <input className={`input mono ${amount && !amountValid ? "invalid" : ""}`} value={amount}
-                  onChange={(e) => setAmount(e.target.value)} placeholder="0.00" inputMode="decimal" />
-                <button className="btn ghost" onClick={() => setAmount((availableMicros / 1_000_000).toString())}
-                  disabled={!w || availableMicros <= 0}>{t("wallet.max")}</button>
-              </div>
-              <div className="hint">{t("wallet.availableHint", { amount: w ? fmtUsdt(availableMicros) : "—" })}</div>
-            </div>
-
-            {/* What actually happens on submit, spelled out before the button. */}
-            <div className="wd-summary">
-              <div className="wd-line">
-                <span>{t("wallet.sumAmount")}</span>
-                <span className="mono tabular">{amountMicros > 0 ? fmtUsdt(amountMicros) : "0.00"} USDT</span>
-              </div>
-              {feeMicros > 0 && (
-                <>
-                  <div className="wd-line">
-                    <span>{t("wallet.sumFee")}</span>
-                    <span className="mono tabular">−{fmtUsdt(feeMicros)} USDT</span>
-                  </div>
-                  {/* The fee is deducted from the amount above, so state the
-                      arriving figure rather than letting the user find it on
-                      the block explorer. */}
-                  <div className="wd-line strong">
-                    <span>{t("wallet.sumNet")}</span>
-                    <span className="mono tabular">
-                      {amountValid ? fmtUsdt(amountMicros - feeMicros) : "—"} USDT
-                    </span>
-                  </div>
-                </>
-              )}
-              <div className="wd-line">
-                <span>{t("wallet.sumNetwork")}</span>
-                <span>TRON · TRC20</span>
-              </div>
-              <div className="wd-line strong">
-                <span>{t("wallet.sumFlow")}</span>
-                <span>{t("wallet.sumFlowVal")}</span>
-              </div>
-            </div>
-
-            {limits?.whitelist_only && (
-              <div className="callout warn card-lead">
-                <IconShield /><span>{t("wallet.whitelistOnly")}</span>
-              </div>
-            )}
-
-            <button className="btn block lg" onClick={withdraw} disabled={!inTauri || wdBusy || !addrValid || !amountValid}>
-              {wdBusy ? <IconRefresh className="spin" /> : <IconArrowRight />}
-              {wdBusy ? t("wallet.withdrawing") : t("wallet.withdrawSubmit")}
-            </button>
-            <Err>{wdErr}</Err>
-            <Ok>{wdOk}</Ok>
-          </div>
-        )}
-      </Card>
 
       {/* ── Deposit / withdrawal history ── */}
       <Card>

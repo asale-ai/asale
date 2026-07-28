@@ -129,7 +129,9 @@ export interface DepositRow {
   id: number;
   chain: string;
   tx_hash: string;
+  /** What landed on chain. The wallet was credited `amount - fee`. */
   amount: number;
+  fee: number;
   confirmations: number | null;
   /** 1 seen · 2 confirmed · 3 credited. */
   status: number;
@@ -150,6 +152,10 @@ export interface WithdrawalRow {
 }
 /** Server-side withdrawal rules, surfaced so the form states them up front. */
 export interface WithdrawLimits {
+  /** Flat fee carved out at credit time; the wallet gains `deposited - deposit_fee`. */
+  deposit_fee: number;
+  /** Advisory floor shown in the UI — smaller deposits are still credited. */
+  deposit_min: number;
   withdraw_min: number;
   /** Flat fee carved out of the requested amount; the destination receives
    *  `amount - withdraw_fee`. */
