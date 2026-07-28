@@ -159,8 +159,12 @@ export interface WithdrawalRow {
   requested_ts: number;
   confirmed_ts: number | null;
 }
-/** Server-side withdrawal rules, surfaced so the form states them up front. */
+/** Server-side rules for one funding rail, surfaced so the form states them up
+ *  front. Fees and floors differ per chain (an SPL transfer costs a fraction of
+ *  a TRC20 one); the AML limits are the user's and hold across all rails. */
 export interface WithdrawLimits {
+  /** "solana" | "tron" — which rail these numbers belong to. */
+  chain: string;
   /** Flat fee carved out at credit time; the wallet gains `deposited - deposit_fee`. */
   deposit_fee: number;
   /** Advisory floor shown in the UI — smaller deposits are still credited. */
@@ -177,7 +181,47 @@ export interface WithdrawLimits {
 export interface WalletHistory {
   deposits: DepositRow[];
   withdrawals: WithdrawalRow[];
+  /** Which rail the wallet dialog opens on. */
+  default_chain: string;
+  /** Every rail the platform takes money on. */
+  chains: WithdrawLimits[];
+  /** The default rail's schedule, flat, for callers that want just one. */
   limits: WithdrawLimits;
+}
+
+/** Base58 alphabet Solana (and Bitcoin) use — no 0, O, I or l. */
+const B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+/** True if `s` decodes to exactly 32 bytes, i.e. a Solana address.
+ *
+ *  A character-class regex is not enough here: a TRON address is also valid
+ *  base58 of a plausible length, so "T…" pasted into the Solana form would pass
+ *  a pattern check and send funds to an account with no key. Only the decoded
+ *  length separates them. */
+export function isSolanaAddress(s: string): boolean {
+  const str = s.trim();
+  if (!str) return false;
+  // Base-58 to base-256, little-endian, by hand: BigInt is past this build's
+  // target and a 32-byte number does not fit a double.
+  const bytes: number[] = [];
+  for (const ch of str) {
+    const v = B58_ALPHABET.indexOf(ch);
+    if (v < 0) return false;
+    let carry = v;
+    for (let i = 0; i < bytes.length; i++) {
+      carry += bytes[i] * 58;
+      bytes[i] = carry & 0xff;
+      carry >>>= 8;
+    }
+    while (carry > 0) {
+      bytes.push(carry & 0xff);
+      carry >>>= 8;
+    }
+  }
+  // Leading '1's are leading zero bytes and carry no magnitude of their own.
+  let zeros = 0;
+  while (zeros < str.length && str[zeros] === "1") zeros++;
+  return zeros + bytes.length === 32;
 }
 export type PublishState = "offline" | "connecting" | "reconnecting" | "online" | "throttled" | "kicked";
 

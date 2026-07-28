@@ -141,7 +141,7 @@ export function WalletPage() {
           </div>
           <WalletDialog
             mode={pane}
-            limits={hist?.limits ?? null}
+            limits={hist}
             balance={availableMicros}
             onClose={() => setPane(null)}
             onDone={() => refresh()}

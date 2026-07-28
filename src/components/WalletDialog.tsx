@@ -5,19 +5,20 @@
 // One view, not a wizard: the rails are tabs and the selected rail is fully
 // rendered straight away — the deposit address and its QR are fetched on open,
 // not put behind a button. `METHODS` is the extension point; adding a rail
-// means adding an entry there and a branch in the body.
+// means adding an entry there and nothing else — the deposit and withdraw
+// bodies are written against the rail, not against a chain.
 //
-// The sheet is a fixed size. Its body scrolls, so switching tabs never resizes
-// the dialog under the cursor — the tallest rail sets the height once and the
-// rest live inside it.
+// The dialog is a fixed size. Its body scrolls, so switching tabs never resizes
+// it under the cursor — the tallest rail sets the height once and the rest live
+// inside it.
 //
-// Kept in sync with asale-web's `components/WalletDialog.tsx` — same two steps,
+// Kept in sync with asale-web's `components/WalletDialog.tsx` — same rails,
 // same copy keys, same warning. If you change one, change the other.
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import QRCode from "qrcode";
-import { invoke, inTauri, fmtUsdt, type WithdrawLimits } from "../lib";
+import { invoke, inTauri, fmtUsdt, isSolanaAddress, type WalletHistory, type WithdrawLimits } from "../lib";
 import { CopyChip, Err, FactGrid, Skeleton } from "../ui";
 import {
   IconX, IconArrowRight, IconRefresh, IconInfo, IconShield, IconWallet,
@@ -27,22 +28,45 @@ const TRON_RE = /^T[1-9A-HJ-NP-Za-km-z]{33}$/;
 
 export type WalletMode = "deposit" | "withdraw";
 
-/** One funding rail. `id` drives both the copy keys and the body branch. */
+/** One funding rail. `id` drives the copy keys; `chain` drives every call. */
 interface Method {
   id: string;
+  chain: string;
   modes: WalletMode[];
+  /** Network line, and the only thing that must be read before sending. */
+  network: string;
+  placeholder: string;
+  isAddress: (s: string) => boolean;
   icon: React.ReactNode;
 }
 
 const METHODS: Method[] = [
-  { id: "tron_usdt", modes: ["deposit", "withdraw"], icon: <IconWallet /> },
+  {
+    id: "sol_usdt",
+    chain: "solana",
+    modes: ["deposit", "withdraw"],
+    network: "Solana · SPL",
+    placeholder: "4Nd1…",
+    isAddress: isSolanaAddress,
+    icon: <IconWallet />,
+  },
+  {
+    id: "tron_usdt",
+    chain: "tron",
+    modes: ["deposit", "withdraw"],
+    network: "TRON · TRC20",
+    placeholder: "T…",
+    isAddress: (s) => TRON_RE.test(s.trim()),
+    icon: <IconWallet />,
+  },
 ];
 
 export function WalletDialog({
   mode, limits, balance, onClose, onDone,
 }: {
   mode: WalletMode | null;
-  limits: WithdrawLimits | null;
+  /** The full history payload: it carries every rail's rules plus the default. */
+  limits: WalletHistory | null;
   balance: number;
   onClose: () => void;
   /** Something moved — the page should refetch. */
@@ -74,15 +98,22 @@ function Sheet({
   mode, limits, balance, onClose, onDone,
 }: {
   mode: WalletMode;
-  limits: WithdrawLimits | null;
+  limits: WalletHistory | null;
   balance: number;
   onClose: () => void;
   onDone: () => void;
 }) {
   const { t } = useTranslation();
-  const available = METHODS.filter((m) => m.modes.includes(mode));
-  const [tab, setTab] = useState(available[0]?.id ?? "");
+  // The server decides which rail to steer users toward, so it leads the tab
+  // strip. Until the history lands, the shipped order stands in.
+  const available = useMemo(() => {
+    const rails = METHODS.filter((m) => m.modes.includes(mode));
+    const first = limits?.default_chain;
+    return first ? [...rails].sort((a, b) => Number(b.chain === first) - Number(a.chain === first)) : rails;
+  }, [mode, limits?.default_chain]);
+  const [tab, setTab] = useState("");
   const picked = available.find((m) => m.id === tab) ?? available[0] ?? null;
+  const railLimits = limits?.chains?.find((c) => c.chain === picked?.chain) ?? null;
   const title = t(mode === "deposit" ? "wallet.tabDeposit" : "wallet.tabWithdraw");
 
   return (
@@ -104,27 +135,30 @@ function Sheet({
         <div className="wdlg-tabs">
           <div className="segmented">
             {available.map((m) => (
-              <button key={m.id} className={m.id === tab ? "active" : ""} onClick={() => setTab(m.id)}>
+              <button key={m.id} className={m.id === picked?.id ? "active" : ""} onClick={() => setTab(m.id)}>
                 {m.icon}{t(`wallet.method_${m.id}`)}
               </button>
             ))}
           </div>
         </div>
 
-        {/* Fixed height: the tab strip must not move when the body changes. */}
+        {/* Fixed height: the tab strip must not move when the body changes.
+            Keyed on the rail so switching tabs starts from a clean form and
+            refetches the address rather than showing the other chain's. */}
         <div className="wdlg-body">
-          {picked?.id === "tron_usdt" && (mode === "deposit"
-            ? <TronDeposit limits={limits} />
-            : <TronWithdraw limits={limits} balance={balance} onDone={onDone} onClose={onClose} />)}
+          {picked && (mode === "deposit"
+            ? <RailDeposit key={picked.id} method={picked} limits={railLimits} />
+            : <RailWithdraw key={picked.id} method={picked} limits={railLimits} balance={balance}
+                onDone={onDone} onClose={onClose} />)}
         </div>
       </div>
     </div>
   );
 }
 
-/* ── TRON · USDT deposit ─────────────────────────────────────────────────── */
+/* ── Deposit ─────────────────────────────────────────────────────────────── */
 
-function TronDeposit({ limits }: { limits: WithdrawLimits | null }) {
+function RailDeposit({ method, limits }: { method: Method; limits: WithdrawLimits | null }) {
   const { t } = useTranslation();
   const [addr, setAddr] = useState("");
   const [qr, setQr] = useState("");
@@ -137,7 +171,7 @@ function TronDeposit({ limits }: { limits: WithdrawLimits | null }) {
   useEffect(() => {
     if (!inTauri) return;
     let cancelled = false;
-    invoke<{ chain: string; address: string }>("wallet_deposit_address", { chain: "tron" })
+    invoke<{ chain: string; address: string }>("wallet_deposit_address", { chain: method.chain })
       .then(async (r) => {
         const png = await QRCode.toDataURL(r.address, { margin: 1, width: 180 });
         if (cancelled) return;
@@ -147,18 +181,20 @@ function TronDeposit({ limits }: { limits: WithdrawLimits | null }) {
       .catch((e) => { if (!cancelled) setErr(String((e as Error).message)); })
       .finally(() => { if (!cancelled) setBusy(false); });
     return () => { cancelled = true; };
-  }, []);
+  }, [method.chain]);
 
   return (
     <>
       {/* The network to send over, above the address rather than below it — it
-          has to be read before the QR is scanned. Informational, not alarming. */}
+          has to be read before the QR is scanned. Informational, not alarming.
+          Naming the network here is what keeps a second rail from turning into
+          funds sent over the wrong one. */}
       <div className="depwarn">
         <div className="depwarn-head">
           <IconInfo />
-          <span className="depwarn-title">{t("wallet.depositWarnTitle")}</span>
+          <span className="depwarn-title">{t("wallet.depositWarnTitle", { network: method.network })}</span>
         </div>
-        <p className="depwarn-body">{t("wallet.depositWarnDesc")}</p>
+        <p className="depwarn-body">{t("wallet.depositWarnDesc", { network: method.network })}</p>
       </div>
 
       {busy ? (
@@ -186,6 +222,7 @@ function TronDeposit({ limits }: { limits: WithdrawLimits | null }) {
           on a deposit there is nowhere else a fee could be taken from, so
           "how much" is the only part that carries information. */}
       <FactGrid facts={[
+        { k: t("wallet.factNetwork"), v: method.network },
         { k: t("wallet.factDepositFee"), v: <span className="mono">{limits ? `${fmtUsdt(limits.deposit_fee)} USDT` : "—"}</span> },
         { k: t("wallet.factDepositMin"), v: <span className="mono">{limits ? `${fmtUsdt(limits.deposit_min)} USDT` : "—"}</span> },
         { k: t("wallet.factCredit"), v: t("wallet.factCreditVal") },
@@ -194,11 +231,12 @@ function TronDeposit({ limits }: { limits: WithdrawLimits | null }) {
   );
 }
 
-/* ── TRON · USDT withdrawal ──────────────────────────────────────────────── */
+/* ── Withdrawal ──────────────────────────────────────────────────────────── */
 
-function TronWithdraw({
-  limits, balance, onDone, onClose,
+function RailWithdraw({
+  method, limits, balance, onDone, onClose,
 }: {
+  method: Method;
   limits: WithdrawLimits | null;
   balance: number;
   onDone: () => void;
@@ -212,7 +250,7 @@ function TronWithdraw({
   const [busy, setBusy] = useState(false);
 
   const micros = Math.round(parseFloat(amount || "0") * 1_000_000);
-  const addrValid = TRON_RE.test(to.trim());
+  const addrValid = method.isAddress(to);
   const min = limits?.withdraw_min ?? 0;
   const fee = limits?.withdraw_fee ?? 0;
   const maxSingle = limits?.withdraw_max_single ?? 0;
@@ -222,14 +260,14 @@ function TronWithdraw({
 
   async function withdraw() {
     setErr(""); setOk("");
-    if (!addrValid) return setErr(t("wallet.invalidAddress"));
+    if (!addrValid) return setErr(t("wallet.invalidAddress", { network: method.network }));
     if (belowMin) return setErr(t("wallet.belowMin", { amount: fmtUsdt(min) }));
     if (overSingle) return setErr(t("wallet.overSingle", { amount: fmtUsdt(maxSingle) }));
     if (!amountValid) return setErr(t("wallet.invalidAmount"));
     setBusy(true);
     try {
       const r = await invoke<{ withdrawal_id: number; status: string }>("wallet_withdraw", {
-        chain: "tron", toAddress: to.trim(), amount: micros,
+        chain: method.chain, toAddress: to.trim(), amount: micros,
       });
       setOk(t("wallet.withdrawOk", { id: r.withdrawal_id }));
       setTo(""); setAmount("");
@@ -255,6 +293,7 @@ function TronWithdraw({
   return (
     <>
       <FactGrid facts={[
+        { k: t("wallet.factNetwork"), v: method.network },
         { k: t("wallet.factMin"), v: <span className="mono">{limits ? `${fmtUsdt(limits.withdraw_min)} USDT` : "—"}</span> },
         { k: t("wallet.factMaxSingle"), v: <span className="mono">{limits ? `${fmtUsdt(limits.withdraw_max_single)} USDT` : "—"}</span> },
         { k: t("wallet.factMaxDaily"), v: <span className="mono">{limits ? `${fmtUsdt(limits.withdraw_max_daily)} USDT` : "—"}</span> },
@@ -263,9 +302,11 @@ function TronWithdraw({
       <div className="field">
         <label>{t("wallet.withdrawAddress")}</label>
         <input className={`input mono ${to.trim() && !addrValid ? "invalid" : ""}`} value={to}
-          onChange={(e) => setTo(e.target.value)} placeholder="T…" spellCheck={false} />
+          onChange={(e) => setTo(e.target.value)} placeholder={method.placeholder} spellCheck={false} />
         <div className={`hint${to.trim() && !addrValid ? " bad" : ""}`}>
-          {to.trim() && !addrValid ? t("wallet.invalidAddress") : t("wallet.addressHint")}
+          {to.trim() && !addrValid
+            ? t("wallet.invalidAddress", { network: method.network })
+            : t("wallet.addressHint")}
         </div>
       </div>
 
@@ -302,7 +343,7 @@ function TronWithdraw({
         )}
         <div className="wd-line">
           <span>{t("wallet.sumNetwork")}</span>
-          <span>TRON · TRC20</span>
+          <span>{method.network}</span>
         </div>
         <div className="wd-line strong">
           <span>{t("wallet.sumFlow")}</span>
