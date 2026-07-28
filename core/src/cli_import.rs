@@ -191,6 +191,35 @@ pub fn parse_gemini_oauth_creds(content: &str) -> anyhow::Result<CliCred> {
     })
 }
 
+/// Build a credential from a raw API key (Moonshot / xAI).
+///
+/// There is no file to parse and no OAuth exchange to run: the key the user
+/// pastes is the whole credential. It is stored with no refresh token and no
+/// expiry, which is what keeps the refresh loop away from it — an API key does
+/// not expire, and `needs_refresh(None, ..)` is false.
+///
+/// The paste is cleaned up before it is stored: a key copied out of a dashboard
+/// or lifted from a shell export arrives with a trailing newline or wrapping
+/// quotes, and either one fails upstream as an opaque 401 that looks like a
+/// revoked key rather than a typo.
+pub fn api_key_cred(provider: &str, key: &str) -> anyhow::Result<CliCred> {
+    let key = key.trim().trim_matches(['"', '\'']).trim();
+    if key.is_empty() {
+        anyhow::bail!("API key is empty");
+    }
+    if key.chars().any(char::is_whitespace) {
+        anyhow::bail!("API key contains whitespace — paste just the key, not the whole command");
+    }
+    Ok(CliCred {
+        provider: provider.to_string(),
+        access_token: key.to_string(),
+        refresh_token: None,
+        expires_at: None,
+        account_hint: None,
+        plan: None,
+    })
+}
+
 // ── Account identity & de-duplication (spec §3.3) ───────────────────────────
 //
 // One subscription account is usually reachable through several local stores:
@@ -447,6 +476,23 @@ mod tests {
         // No refresh token → falls back to the access token, still stable.
         let no_refresh = cred("access-1", None, None);
         assert_eq!(token_fingerprint(&no_refresh), token_fingerprint(&cred("access-1", None, None)));
+    }
+
+    #[test]
+    fn api_key_cred_trims_and_rejects_junk() {
+        let c = api_key_cred("kimi", "  sk-moon-1\n").unwrap();
+        assert_eq!(c.access_token, "sk-moon-1");
+        assert!(c.refresh_token.is_none());
+        // No expiry is the load-bearing part: it is what keeps the refresh loop
+        // from trying to renew a key that has nothing to renew.
+        assert!(c.expires_at.is_none());
+        assert_eq!(api_key_cred("xai", "\"xai-key\" ").unwrap().access_token, "xai-key");
+        assert!(api_key_cred("kimi", "   ").is_err());
+        assert!(api_key_cred("kimi", "\"\"").is_err());
+        assert!(
+            api_key_cred("xai", "export XAI_API_KEY=abc").is_err(),
+            "a whole shell line is not a key"
+        );
     }
 
     #[test]

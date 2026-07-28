@@ -278,9 +278,13 @@ pub async fn list_accounts(state: &AppState) -> R<Value> {
             // keychain and the credential file are one subscription, merged
             // into this single sellable record — not two accounts.
             obj.insert("sources".into(), json!(tool.map(|t| t.sources.clone()).unwrap_or_default()));
+            // Only a credential *copied out of* a locally installed CLI is
+            // shared with it. asale's own OAuth login is not, and neither is a
+            // pasted API key — flagging those would warn about a rotation risk
+            // that cannot happen to them.
             obj.insert(
                 "shared_with_local_cli".into(),
-                json!(s.origin.as_deref() != Some("oauth")),
+                json!(s.origin.as_deref() == Some("import")),
             );
         }
         out.push(row);
@@ -368,6 +372,116 @@ pub async fn resume_lane(
         h.resume(&model);
     }
     Ok(json!({"resumed": true, "provider": provider, "account_id": account_id, "model": model}))
+}
+
+/// Connect a metered platform account (`kimi_api`, `xai_api`) by pasting its
+/// API key.
+///
+/// This is the pay-as-you-go half of each vendor, not the coding subscription —
+/// those use `oauth_device_login`. A platform key never expires and has no
+/// refresh token: it *is* the credential. Everything after this point is the
+/// same as an OAuth account: the key lives in the encrypted secret store, the
+/// local store keeps only a reference, and the sell switch, daily cap and
+/// metering all work unchanged.
+///
+/// The key is verified against the vendor before it is saved. A key that is
+/// already dead would otherwise sit in the account list looking connected and
+/// fail every task it was matched to, which reads as "asale is broken" and
+/// costs reputation on a device that did nothing wrong. A probe that cannot
+/// reach the vendor at all is *not* treated as a bad key: offline should not
+/// stop someone from connecting an account.
+pub async fn connect_api_key(
+    state: &AppState,
+    provider: String,
+    api_key: String,
+    label: Option<String>,
+) -> R<Value> {
+    let p = Provider::from_str_opt(&provider).filter(|p| asale_protocol::ids::is_api_key_provider(*p));
+    let Some(p) = p else {
+        return Err(
+            "this provider is connected by signing in, not with an API key — \
+             pasted keys are for the metered platform APIs (kimi_api | xai_api)"
+                .into(),
+        );
+    };
+    let cred = cli_import::api_key_cred(&provider, &api_key).map_err(|e| e.to_string())?;
+
+    if let Err(e) = verify_api_key(p, &cred.access_token).await {
+        return Err(e);
+    }
+
+    // A label lets someone tell two keys on the same vendor apart ("work",
+    // "personal"); without one the token digest keeps the row stable and
+    // distinct, exactly as it does for a CLI import with no resolvable email.
+    let account_id = label
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .unwrap_or_else(|| format!("{provider}-{}", cli_import::token_fingerprint(&cred)));
+
+    keychain::set(&keychain::token_ref(&provider, &account_id), &cred.access_token).map_err(err)?;
+    // origin=api_key: not a copy of a locally installed CLI's credential, so
+    // the "shared with your CLI" warning does not apply to it.
+    state
+        .store
+        .upsert_tool(&provider, &account_id, &keychain::token_ref(&provider, &account_id), &["api-key"], "api_key")
+        .await
+        .map_err(err)?;
+    accounts_changed(state).await;
+
+    Ok(json!({"provider": provider, "account_id": account_id}))
+}
+
+/// Hosts a provider's key may belong to, in probe order.
+///
+/// Moonshot runs two independent deployments and a key works on exactly one of
+/// them, so both are tried: rejecting a perfectly good global key because this
+/// device happened to probe the mainland host would be a false alarm the user
+/// has no way to argue with. xAI has a single host.
+fn verify_hosts(p: Provider) -> &'static [&'static str] {
+    match p {
+        Provider::KimiApi => &["https://api.moonshot.cn/v1", "https://api.moonshot.ai/v1"],
+        Provider::XaiApi => &["https://api.x.ai/v1"],
+        _ => &[],
+    }
+}
+
+/// Ask the vendor whether a key is live, using the one endpoint every
+/// OpenAI-compatible API exposes for free.
+///
+/// `Ok(())` also covers "could not tell": only a host that positively refuses
+/// the credential is an error, and only when no other host accepted it.
+async fn verify_api_key(p: Provider, key: &str) -> Result<(), String> {
+    let hosts = verify_hosts(p);
+    if hosts.is_empty() {
+        return Ok(());
+    }
+    let mut rejected = false;
+    for base in hosts {
+        let resp = asale_client_core::http::upstream()
+            .get(format!("{base}/models"))
+            .header("authorization", format!("Bearer {key}"))
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await;
+        match resp {
+            // 401 from this deployment; another may still know the key.
+            Ok(r) if r.status().as_u16() == 401 => rejected = true,
+            // 403 is deliberately not a rejection: these hosts answer region
+            // blocks the same way, and sending the user hunting for a new key
+            // when what they need is a proxy wastes the one thing they have.
+            // Anything else means the host was reached and did not refuse the
+            // credential — a 404 or 429 says nothing about its validity.
+            Ok(_) => return Ok(()),
+            Err(e) => tracing::warn!(provider = %p, base, "could not verify API key: {e}"),
+        }
+    }
+    if rejected {
+        return Err(format!(
+            "{p} rejected this API key — check it was copied in full and has not been revoked"
+        ));
+    }
+    // Every host was unreachable. Being offline is not evidence of a bad key.
+    Ok(())
 }
 
 /// Remove an imported account: secret-store entries, store row, auth manifest,

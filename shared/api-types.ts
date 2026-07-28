@@ -67,6 +67,47 @@ export interface MarketModel {
   context_length: number;
   modality: string;
   prices: MarketModelPrice[];
+  /** Market price as a fraction of the vendor's list price, in [0.1, 1.0]. */
+  ratio: number;
+  /** `1 - ratio`, i.e. how far below list the model is trading. */
+  discount: number;
   supply_capacity_tokens: number;
+  /** Online sell-side subscriptions offering this model right now. */
+  online_lanes: number;
+  /** Buy-side calls in the last complete minute. */
+  calls_last_minute: number;
+  /** Alias of `calls_last_minute`, kept for older clients. */
   demand: number;
+}
+
+/** One point on a model's price chart. */
+export interface PricePoint {
+  /** Bucket start, unix seconds. */
+  ts: number;
+  /** Mean ratio over the bucket (equal to the ratio itself for minutes). */
+  ratio: number;
+  ratio_min: number;
+  ratio_max: number;
+  /** Mean online subscriptions over the bucket. */
+  lanes: number;
+  /** Total calls in the bucket. */
+  calls: number;
+  ref_input: number;
+  ref_output: number;
+}
+
+/** Chart granularities `GET /api/v1/market/price-history` accepts. */
+export type PriceGranularity = "minute" | "hour" | "day" | "month";
+
+/** Response of `GET /api/v1/market/price-history`. */
+export interface PriceHistory {
+  model: string;
+  model_id: string;
+  display_name: string;
+  granularity: string;
+  ratio: number;
+  discount: number;
+  ref_prices: { input: number; output: number; cache_read: number; cache_write: number };
+  market_prices: { input: number; output: number; cache_read: number; cache_write: number };
+  points: PricePoint[];
 }

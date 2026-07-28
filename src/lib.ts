@@ -83,6 +83,10 @@ export interface OAuthFlowStart {
   flow_id: string;
   auth_url: string;
   provider: string;
+  /** Device-code flows only: the short string the user confirms on screen. */
+  user_code?: string;
+  /** Device-code flows only: seconds until that code stops being accepted. */
+  expires_in?: number;
 }
 
 /**
@@ -92,10 +96,15 @@ export interface OAuthFlowStart {
  * a new tab. Then poll until the callback + token exchange finish.
  */
 export async function runOAuthFlow<T = unknown>(
-  cmd: "oauth_login" | "platform_oauth_login",
+  cmd: "oauth_login" | "oauth_device_login" | "platform_oauth_login",
   args: Record<string, unknown>,
+  /** Called once the flow has started, before polling begins. A device-code
+   *  flow has to show `user_code` for the whole wait — the user reads it off
+   *  this screen and confirms it in the browser. */
+  onStart?: (start: OAuthFlowStart) => void,
 ): Promise<T> {
   const start = await invoke<OAuthFlowStart>(cmd, { ...args, openLocal: realTauri });
+  onStart?.(start);
   if (!realTauri) {
     window.open(start.auth_url, "_blank", "noopener");
   }

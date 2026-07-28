@@ -191,6 +191,12 @@ rpc_args! {
     GetSettingArgs { key: String }
     SetSettingArgs { key: String, value: String }
     AccountArgs    { provider: String, #[serde(alias = "account_id")] account_id: String }
+    ApiKeyArgs     {
+        provider: String,
+        #[serde(alias = "api_key")] api_key: String,
+        /// Optional display name, so two keys on one vendor stay tellable apart.
+        #[serde(default)] label: Option<String>,
+    }
     ChainArgs      { chain: String }
     WithdrawArgs   {
         chain: String,
@@ -335,6 +341,17 @@ async fn rpc(
         "import_from_cli" => {
             let p: ProviderArgs = args(&a)?;
             commands::import_from_cli(st, p.provider).await?
+        },
+        // Kimi Code / Grok CLI authorise by device code: no loopback callback,
+        // so this one also works from a browser on another machine.
+        "oauth_device_login" => {
+            let p: OauthLoginArgs = args(&a)?;
+            commands::oauth_device_login(st, p.provider, p.open_local.unwrap_or(false)).await?
+        },
+        // The metered platform APIs have no OAuth at all — the key is pasted.
+        "connect_api_key" => {
+            let p: ApiKeyArgs = args(&a)?;
+            commands::connect_api_key(st, p.provider, p.api_key, p.label).await?
         },
         "remove_account" => {
             let p: AccountArgs = args(&a)?;

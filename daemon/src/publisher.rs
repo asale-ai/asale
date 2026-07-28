@@ -58,7 +58,42 @@ fn fallback_models(provider: &str) -> &'static [&'static str] {
         "claude" | "claude_work" => &["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
         "codex" => &["gpt-5-codex"],
         "gemini" => &["gemini-2.5-pro", "gemini-2.5-flash"],
+        "kimi" | "kimi_api" => &["kimi-k2.7-code", "kimi-k2-thinking", "kimi-k3"],
+        "xai" | "xai_api" => &["grok-4.5", "grok-4.3", "grok-build-0.1"],
         _ => &[],
+    }
+}
+
+/// Model ids a vendor's own API is known to answer to, when that set is
+/// narrower than the catalog's.
+///
+/// The catalog's right-hand slug is OpenRouter's spelling, and for xAI it is
+/// not always the vendor's: OpenRouter lists `grok-4.20`, while xAI's own API
+/// serves `grok-4.20-0309-reasoning` and `grok-4.20-0309-non-reasoning`.
+/// Relaying `grok-4.20` therefore fails *after* the request has been matched,
+/// preauthorized and routed — the publisher wears a failure that was never
+/// its fault. Rewriting the id would mean guessing which of the two variants a
+/// consumer meant, so instead the mismatched rows are simply not advertised.
+///
+/// `None` means "advertise whatever the catalog lists", which is the case for
+/// every other vendor including Moonshot, whose ids line up exactly.
+///
+/// Source: the model registry the vendor CLIs ship, read from CLIProxyAPI
+/// `internal/registry/models/models.json`.
+fn native_models(provider: &str) -> Option<&'static [&'static str]> {
+    match provider {
+        "xai" | "xai_api" => Some(&[
+            "grok-build-0.1",
+            "grok-4.5",
+            "grok-4.3",
+            "grok-4.20-0309-reasoning",
+            "grok-4.20-0309-non-reasoning",
+            "grok-4.20-multi-agent-0309",
+            "grok-3-mini",
+            "grok-3-mini-fast",
+            "grok-composer-2.5-fast",
+        ]),
+        _ => None,
     }
 }
 
@@ -97,9 +132,13 @@ fn produces_text(modality: &str) -> bool {
 /// this subscription can serve" is a real answer, and falling back to the
 /// built-in list there would re-create the very mismatch this replaces.
 fn sellable_models(catalog: &Option<SellableCatalog>, provider: &str) -> Vec<String> {
-    match catalog {
+    let listed: Vec<String> = match catalog {
         Some(c) => c.by_provider.get(provider).cloned().unwrap_or_default(),
         None => fallback_models(provider).iter().map(|s| s.to_string()).collect(),
+    };
+    match native_models(provider) {
+        Some(native) => listed.into_iter().filter(|m| native.contains(&m.as_str())).collect(),
+        None => listed,
     }
 }
 
@@ -222,7 +261,16 @@ pub fn adapter_for(provider: &str) -> Option<Box<dyn ToolAdapter>> {
             crate::oauth::gemini_client_id(),
             crate::oauth::gemini_client_secret(),
         ))),
-        _ => None,
+        // Kimi Code / Grok CLI (device flow) and the two platform APIs (pasted
+        // key, nothing to refresh). Both resolve from the provider id alone.
+        other => {
+            let p = Provider::from_str_opt(other)?;
+            discovery::DeviceFlowAdapter::for_provider(p)
+                .map(|a| Box::new(a) as Box<dyn ToolAdapter>)
+                .or_else(|| {
+                    discovery::ApiKeyAdapter::for_provider(p).map(|a| Box::new(a) as Box<dyn ToolAdapter>)
+                })
+        }
     }
 }
 
@@ -850,9 +898,28 @@ mod tests {
         );
         assert_eq!(providers_for_vendor("openai"), &[Provider::Codex]);
         assert_eq!(providers_for_vendor("google"), &[Provider::Gemini]);
+        // Both flavours of a vendor serve its catalog rows — the subscription
+        // and the metered platform key differ only in which host they reach.
+        assert_eq!(providers_for_vendor("moonshotai"), &[Provider::Kimi, Provider::KimiApi]);
+        // The catalog spells this one with a hyphen; `xai` is not the slug.
+        assert_eq!(providers_for_vendor("x-ai"), &[Provider::Xai, Provider::XaiApi]);
+        assert!(providers_for_vendor("xai").is_empty());
         // OpenRouter routing aliases are not ids any vendor API accepts.
         assert!(providers_for_vendor("~anthropic").is_empty());
         assert!(providers_for_vendor("meta-llama").is_empty());
+    }
+
+    /// Every provider the Sell page can connect must resolve to an adapter, or
+    /// its accounts sit in the list doing nothing: `refresh_due_tokens` skips
+    /// what it cannot build, and so does anything else keyed on the adapter.
+    #[test]
+    fn every_connectable_provider_has_an_adapter() {
+        for p in asale_protocol::ids::SUBSCRIBABLE_PROVIDERS {
+            let a = adapter_for(p.as_str())
+                .unwrap_or_else(|| panic!("`{p}` can be connected but has no adapter"));
+            assert_eq!(a.provider(), *p);
+        }
+        assert!(adapter_for("nope").is_none());
     }
 
     #[test]
@@ -877,5 +944,48 @@ mod tests {
         let pulled = Some(SellableCatalog { fetched_at: 1, by_provider });
         assert_eq!(sellable_models(&pulled, "claude"), vec!["claude-sonnet-5"]);
         assert!(sellable_models(&pulled, "gemini").is_empty(), "the catalog's silence is an answer");
+    }
+
+    /// OpenRouter and xAI do not spell every Grok id the same way, and an id
+    /// the vendor has never heard of fails *after* the request was matched,
+    /// preauthorized and routed — so the publisher wears a failure it did not
+    /// cause. Those rows are dropped rather than guessed at.
+    #[test]
+    fn grok_ids_the_vendor_api_would_reject_are_not_advertised() {
+        let mut by_provider = std::collections::BTreeMap::new();
+        by_provider.insert(
+            "xai".to_string(),
+            vec![
+                "grok-4.5".to_string(),
+                "grok-4.3".to_string(),
+                // OpenRouter's spelling; xAI serves `grok-4.20-0309-reasoning`
+                // and `-non-reasoning`, and picking one would be a guess.
+                "grok-4.20".to_string(),
+                "grok-4.20-multi-agent".to_string(),
+            ],
+        );
+        let pulled = Some(SellableCatalog { fetched_at: 1, by_provider });
+        assert_eq!(sellable_models(&pulled, "xai"), vec!["grok-4.5", "grok-4.3"]);
+
+        // Moonshot's ids line up with the catalog, so nothing is filtered.
+        assert!(native_models("kimi").is_none());
+        let mut by_provider = std::collections::BTreeMap::new();
+        by_provider.insert("kimi".to_string(), vec!["kimi-k2.7-code".to_string()]);
+        let pulled = Some(SellableCatalog { fetched_at: 1, by_provider });
+        assert_eq!(sellable_models(&pulled, "kimi"), vec!["kimi-k2.7-code"]);
+    }
+
+    /// The offline fallback has to satisfy the same rule as the catalog: it is
+    /// advertised before anything has been pulled, so a stale id there puts
+    /// unusable capacity on the market for as long as the device is offline.
+    #[test]
+    fn the_built_in_lists_only_name_ids_the_vendor_serves() {
+        for provider in ["xai", "xai_api"] {
+            let native = native_models(provider).unwrap();
+            for m in fallback_models(provider) {
+                assert!(native.contains(m), "`{m}` is not an id the xAI API serves");
+            }
+        }
+        assert!(!fallback_models("kimi").is_empty(), "a fresh Kimi install must have something to sell");
     }
 }

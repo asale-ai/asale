@@ -117,7 +117,13 @@ pub fn plan_window_cap(provider: Provider, plan: Option<&str>) -> u64 {
                 300_000
             }
         }
-        Provider::Kimi | Provider::Xai => 500_000,
+        // Kimi Code and the Grok CLI subscription publish no token allowance —
+        // their limits are expressed as requests over a window, not tokens —
+        // and the platform APIs are metered against a balance rather than
+        // capped at all. Neither can be asked about, so this is a deliberately
+        // conservative window; the per-account daily cap on the Sell page is
+        // the control that actually matters for these four.
+        Provider::Kimi | Provider::KimiApi | Provider::Xai | Provider::XaiApi => 500_000,
     }
 }
 
@@ -382,9 +388,220 @@ impl ToolAdapter for GeminiAdapter {
     }
 }
 
+// ── Device-flow adapters (Kimi Code / Grok CLI subscriptions) ───────────────
+
+/// Adapter for a coding subscription authorised by RFC 8628 device code.
+///
+/// Moonshot and xAI both ship their subscription through a CLI that authorises
+/// this way: no redirect URI to register, the user approves a short code in a
+/// browser, and the client polls for the token. Refresh is an ordinary
+/// form-encoded `refresh_token` grant, which is all this adapter has to do —
+/// the interactive half lives in [`crate::device_flow`].
+///
+/// Endpoints and client ids are the public values the vendor CLIs ship,
+/// confirmed against CLIProxyAPI (`internal/auth/kimi`, `internal/auth/xai`).
+pub struct DeviceFlowAdapter {
+    provider: Provider,
+    token_url: String,
+    client_id: &'static str,
+    base_url: &'static str,
+    user_agent: &'static str,
+}
+
+impl DeviceFlowAdapter {
+    pub fn kimi() -> DeviceFlowAdapter {
+        DeviceFlowAdapter {
+            provider: Provider::Kimi,
+            token_url: crate::device_flow::KIMI_TOKEN_URL.to_string(),
+            client_id: crate::device_flow::KIMI_CLIENT_ID,
+            base_url: "https://api.kimi.com/coding",
+            user_agent: "kimi-cli/1.0",
+        }
+    }
+
+    /// xAI resolves its token endpoint through OIDC discovery. The discovered
+    /// value is passed in so a refresh never has to make two calls; the
+    /// published default is used when the caller has not discovered one yet.
+    pub fn xai(token_url: Option<String>) -> DeviceFlowAdapter {
+        DeviceFlowAdapter {
+            provider: Provider::Xai,
+            token_url: token_url.unwrap_or_else(|| crate::device_flow::XAI_TOKEN_URL_FALLBACK.to_string()),
+            client_id: crate::device_flow::XAI_CLIENT_ID,
+            base_url: "https://cli-chat-proxy.grok.com/v1",
+            user_agent: "xai-grok-workspace/0.2.93",
+        }
+    }
+
+    /// The adapter for a device-flow provider, or `None` for any other.
+    pub fn for_provider(p: Provider) -> Option<DeviceFlowAdapter> {
+        match p {
+            Provider::Kimi => Some(DeviceFlowAdapter::kimi()),
+            Provider::Xai => Some(DeviceFlowAdapter::xai(None)),
+            _ => None,
+        }
+    }
+}
+
+#[async_trait]
+impl ToolAdapter for DeviceFlowAdapter {
+    fn provider(&self) -> Provider {
+        self.provider
+    }
+
+    async fn refresh(&self, refresh_token: &str) -> anyhow::Result<RefreshedToken> {
+        let params = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", self.client_id),
+        ];
+        let resp = crate::http::upstream()
+            .post(&self.token_url)
+            .header("accept", "application/json")
+            .form(&params)
+            .send()
+            .await?;
+        let mut t = parse_token_response(self.provider.as_str(), resp).await?;
+        // Neither vendor is documented to rotate the refresh token, and both
+        // omit it on refresh in practice — dropping it would log the publisher
+        // out at the next renewal.
+        if t.refresh_token.is_none() {
+            t.refresh_token = Some(refresh_token.to_string());
+        }
+        Ok(t)
+    }
+
+    fn upstream(&self) -> UpstreamSpec {
+        UpstreamSpec {
+            base_url: self.base_url.into(),
+            default_headers: vec![("user-agent".into(), self.user_agent.into())],
+        }
+    }
+}
+
+// ── API-key adapters (Moonshot platform / xAI platform) ─────────────────────
+
+/// Adapter for a provider whose credential is a long-lived API key.
+///
+/// This is the *metered platform* half of each vendor, not the subscription:
+/// there is no authorization code to exchange and no refresh token to rotate,
+/// because the key the user pastes is the whole credential and stays valid
+/// until they revoke it. That makes `refresh` unreachable in normal operation —
+/// an API-key account is stored without an expiry, and `needs_refresh(None, ..)`
+/// is false — so it fails loudly rather than pretending to have renewed
+/// something.
+///
+/// One type covers both because the difference between them is a host and a
+/// name, not behaviour.
+pub struct ApiKeyAdapter {
+    provider: Provider,
+    base_url: &'static str,
+    user_agent: &'static str,
+}
+
+impl ApiKeyAdapter {
+    /// Moonshot's platform API. The base URL is the mainland deployment; a key
+    /// issued by the global one (`api.moonshot.ai`) is rejected here and vice
+    /// versa. Informational only — the gateway builds the URL actually called.
+    pub fn kimi() -> ApiKeyAdapter {
+        ApiKeyAdapter {
+            provider: Provider::KimiApi,
+            base_url: "https://api.moonshot.cn/v1",
+            user_agent: "kimi-cli/1.0",
+        }
+    }
+
+    pub fn xai() -> ApiKeyAdapter {
+        ApiKeyAdapter {
+            provider: Provider::XaiApi,
+            base_url: "https://api.x.ai/v1",
+            user_agent: "grok-cli/1.0",
+        }
+    }
+
+    /// The adapter for an API-key provider, or `None` for one that uses OAuth.
+    pub fn for_provider(p: Provider) -> Option<ApiKeyAdapter> {
+        match p {
+            Provider::KimiApi => Some(ApiKeyAdapter::kimi()),
+            Provider::XaiApi => Some(ApiKeyAdapter::xai()),
+            _ => None,
+        }
+    }
+}
+
+#[async_trait]
+impl ToolAdapter for ApiKeyAdapter {
+    fn provider(&self) -> Provider {
+        self.provider
+    }
+
+    async fn refresh(&self, _refresh_token: &str) -> anyhow::Result<RefreshedToken> {
+        anyhow::bail!(
+            "{} accounts authenticate with an API key, which never expires and cannot be refreshed — \
+             if upstream is rejecting it the key was revoked or rotated, and the fix is to paste the new one",
+            self.provider
+        )
+    }
+
+    fn upstream(&self) -> UpstreamSpec {
+        UpstreamSpec {
+            base_url: self.base_url.into(),
+            default_headers: vec![("user-agent".into(), self.user_agent.into())],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_api_key_account_is_never_refreshed_and_says_why() {
+        for p in [Provider::KimiApi, Provider::XaiApi] {
+            let a = ApiKeyAdapter::for_provider(p).expect("api-key provider has an adapter");
+            assert_eq!(a.provider(), p);
+            // Stored with no expiry, so the refresh loop skips it outright —
+            // this is what keeps `refresh` from ever being called in practice.
+            assert!(!needs_refresh(None, a.refresh_lead(), 9_999_999_999));
+            let e = a.refresh("whatever").await.unwrap_err().to_string();
+            assert!(e.contains("API key"), "the error must name the real cause: {e}");
+        }
+        for p in [Provider::Claude, Provider::Gemini, Provider::Kimi, Provider::Xai] {
+            assert!(ApiKeyAdapter::for_provider(p).is_none(), "{p} is not an API-key provider");
+        }
+    }
+
+    #[test]
+    fn each_flavour_of_a_vendor_points_at_its_own_host() {
+        // The subscription and the platform API are different endpoints, and
+        // the whole reason they are separate providers is that the credential
+        // for one is refused by the other.
+        assert_eq!(DeviceFlowAdapter::kimi().upstream().base_url, "https://api.kimi.com/coding");
+        assert!(ApiKeyAdapter::kimi().upstream().base_url.contains("moonshot"));
+        assert_eq!(DeviceFlowAdapter::xai(None).upstream().base_url, "https://cli-chat-proxy.grok.com/v1");
+        assert_eq!(ApiKeyAdapter::xai().upstream().base_url, "https://api.x.ai/v1");
+    }
+
+    #[test]
+    fn the_kimi_device_id_is_stable_and_uuid_shaped() {
+        // Re-deriving it must give the same answer: a per-request id would make
+        // one publisher look like many machines on one subscription.
+        let a = crate::executor::kimi_device_id_for_test("me@example.com");
+        assert_eq!(a, crate::executor::kimi_device_id_for_test("me@example.com"));
+        assert_ne!(a, crate::executor::kimi_device_id_for_test("other@example.com"));
+        let parts: Vec<&str> = a.split('-').collect();
+        assert_eq!(parts.iter().map(|p| p.len()).collect::<Vec<_>>(), vec![8, 4, 4, 4, 12]);
+    }
+
+    #[test]
+    fn device_flow_adapters_cover_exactly_the_subscription_providers() {
+        for p in Provider::ALL {
+            let expected = matches!(p, Provider::Kimi | Provider::Xai);
+            assert_eq!(DeviceFlowAdapter::for_provider(p).is_some(), expected, "{p}");
+        }
+        // xAI discovers its token endpoint; the fallback stands in until it has.
+        let discovered = DeviceFlowAdapter::xai(Some("https://auth.x.ai/oauth2/token-v2".into()));
+        assert_eq!(discovered.provider(), Provider::Xai);
+    }
 
     #[test]
     fn quota_estimate_subtracts_local_usage() {

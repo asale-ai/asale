@@ -8,6 +8,7 @@
 
 pub mod cli_import;
 pub mod config;
+pub mod device_flow;
 pub mod discovery;
 pub mod executor;
 pub mod http;
@@ -19,8 +20,8 @@ pub mod store;
 pub mod ws;
 
 pub use discovery::{
-    estimate_quota_window, needs_refresh, plan_window_cap, ClaudeAdapter, CodexAdapter, GeminiAdapter, Provider,
-    QuotaWindow, RefreshedToken, ToolAdapter,
+    estimate_quota_window, needs_refresh, plan_window_cap, ApiKeyAdapter, ClaudeAdapter, CodexAdapter,
+    DeviceFlowAdapter, GeminiAdapter, Provider, QuotaWindow, RefreshedToken, ToolAdapter,
 };
 pub use executor::{LeasedToken, RecordSink, TaskOutcome, TokenProvider};
 pub use pool::{

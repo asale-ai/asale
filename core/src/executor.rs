@@ -155,6 +155,13 @@ pub async fn execute(
             body = patched;
         }
     }
+    // Kimi Code identifies the calling installation, not just the calling
+    // product, and the device id is the one part of that identity the gateway
+    // cannot know — it belongs to this publisher. Same reasoning as the Claude
+    // block above: applied where the credential is, not where the body is built.
+    if provider == "kimi" {
+        builder = builder.header("x-msh-device-id", kimi_device_id(&lease.account_id));
+    }
     builder = builder.body(body);
 
     let resp = match builder.send().await {
@@ -272,6 +279,29 @@ pub async fn execute(
 /// Whether a relayed request will be served with a Claude subscription token.
 fn is_claude(provider: &str) -> bool {
     provider == "claude" || provider == "claude_work"
+}
+
+/// A stable id for Kimi Code's `X-Msh-Device-Id` header, derived from the
+/// account the request is being served with.
+///
+/// It has to be *stable*: a value that changed per request would make one
+/// publisher look like a fleet of machines sharing a subscription, which is the
+/// pattern a vendor watches for. Deriving it from the account id rather than
+/// from machine state also keeps it deterministic on a device with no writable
+/// identity file, and keeps two accounts on one machine distinct — which is
+/// what they are as far as Moonshot is concerned.
+///
+/// Shaped like a UUID because that is what the vendor CLI sends.
+#[cfg(test)]
+pub(crate) fn kimi_device_id_for_test(account_id: &str) -> String {
+    kimi_device_id(account_id)
+}
+
+fn kimi_device_id(account_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let d = Sha256::digest(format!("asale-kimi-device:{account_id}").as_bytes());
+    let h: String = d[..16].iter().map(|b| format!("{b:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
 }
 
 /// Put Claude Code's own preamble back at the head of the system prompt.

@@ -4,14 +4,30 @@ import {
   invoke, inTauri, runOAuthFlow, fmtTokens,
   type AccountStatus, type ImportAllResult, type Lane,
 } from "../lib";
-import { Card, Ok, Err, SkeletonRows, PageHead, IconAction, Empty, Mark } from "../ui";
-import { IconTrash, IconShield, IconChip, IconRefresh, IconPlus, IconPencil } from "../icons";
+import { Card, Ok, Err, SkeletonRows, PageHead, IconAction, Empty, Mark, CopyChip } from "../ui";
+import { IconTrash, IconShield, IconChip, IconRefresh, IconPlus, IconPencil, IconInfo } from "../icons";
 
+/** Subscriptions connected by signing in through a loopback OAuth callback. */
 const PROVIDERS = [
   { id: "claude", label: "Claude Code" },
   { id: "claude_work", label: "Claude Work" },
   { id: "codex", label: "Codex / OpenAI" },
   { id: "gemini", label: "Gemini" },
+];
+
+/** Subscriptions authorised by device code. Same two-step flow, except the
+ *  user confirms a short code instead of being redirected back — which is why
+ *  these two also work when the UI runs in a browser on another machine. */
+const DEVICE_PROVIDERS = [
+  { id: "kimi", label: "Kimi Code" },
+  { id: "xai", label: "Grok CLI" },
+];
+
+/** The metered platform APIs, which issue keys rather than subscriptions.
+ *  `keyUrl` is where the key is issued. */
+const KEY_PROVIDERS = [
+  { id: "kimi_api", label: "Moonshot API", keyUrl: "https://platform.moonshot.cn/console/api-keys" },
+  { id: "xai_api", label: "xAI API", keyUrl: "https://console.x.ai" },
 ];
 
 const fmtTime = (secs: number | null) => (secs ? new Date(secs * 1000).toLocaleString() : "—");
@@ -65,6 +81,14 @@ export function Publish() {
   const [limitDraft, setLimitDraft] = useState<Record<string, string>>({});
   const [limitSaved, setLimitSaved] = useState("");
   const [limitEditing, setLimitEditing] = useState("");
+
+  // The code a device-code login is waiting on, shown until it completes.
+  const [deviceCode, setDeviceCode] = useState<{ provider: string; code: string; url: string } | null>(null);
+
+  // API-key connect: which vendor's form is open, and its draft.
+  const [keyProvider, setKeyProvider] = useState("");
+  const [keyDraft, setKeyDraft] = useState("");
+  const [keyLabel, setKeyLabel] = useState("");
 
   // Local-CLI import: the daemon runs it at startup, this only re-runs it.
   const [rescanning, setRescanning] = useState(false);
@@ -174,6 +198,39 @@ export function Publish() {
     } catch (e) { setErr(String((e as Error).message)); } finally { setBusy(false); }
   }
 
+  /** Device-code login. Identical two-step flow, except the user confirms a
+   *  short code rather than being redirected back — so the code has to stay on
+   *  screen for the whole wait, not just be opened and forgotten. */
+  async function connectDevice(provider: string) {
+    setErr(""); setMsg(""); setBusy(true); setDeviceCode(null);
+    try {
+      const r = await runOAuthFlow<{ account_id: string }>(
+        "oauth_device_login",
+        { provider },
+        (start) => setDeviceCode({ provider, code: start.user_code ?? "", url: start.auth_url }),
+      );
+      setMsg(t("publish.connected", { provider, account: r.account_id }));
+      loadAccounts();
+    } catch (e) { setErr(String((e as Error).message)); } finally { setBusy(false); setDeviceCode(null); }
+  }
+
+  /** Save a pasted API key as an account. The daemon checks it against the
+   *  vendor first, so a dead key is refused here rather than failing every task
+   *  it later gets matched to. */
+  async function connectKey() {
+    setErr(""); setMsg(""); setBusy(true);
+    try {
+      const r = await invoke<{ account_id: string }>("connect_api_key", {
+        provider: keyProvider,
+        apiKey: keyDraft,
+        ...(keyLabel.trim() ? { label: keyLabel.trim() } : {}),
+      });
+      setMsg(t("publish.connected", { provider: keyProvider, account: r.account_id }));
+      setKeyProvider(""); setKeyDraft(""); setKeyLabel("");
+      loadAccounts();
+    } catch (e) { setErr(String((e as Error).message)); } finally { setBusy(false); }
+  }
+
   // Re-run the local-CLI import (same routine the daemon runs on startup) —
   // used when the user has just logged into a CLI and wants it picked up now.
   async function rescanCli() {
@@ -202,18 +259,111 @@ export function Publish() {
     return <span className={`pill ${cls}`}>{t(`publish.status${s.charAt(0).toUpperCase()}${s.slice(1)}`)}</span>;
   };
 
+  const open = KEY_PROVIDERS.find((p) => p.id === keyProvider);
+
   const connectGrid = (
-    <div className="pick-grid">
-      {PROVIDERS.map((p) => (
-        <button key={p.id} className="pick" onClick={() => connect(p.id)} disabled={busy || !inTauri}>
-          <span className="pick-ico"><Mark id={p.id} /></span>
-          <span>
-            <span className="pick-title">{p.label}</span>
-            <span className="pick-sub">{t("publish.connectVia")}</span>
-          </span>
-        </button>
-      ))}
-    </div>
+    <>
+      <div className="pick-grid">
+        {PROVIDERS.map((p) => (
+          <button key={p.id} className="pick" onClick={() => connect(p.id)} disabled={busy || !inTauri}>
+            <span className="pick-ico"><Mark id={p.id} /></span>
+            <span>
+              <span className="pick-title">{p.label}</span>
+              <span className="pick-sub">{t("publish.connectVia")}</span>
+            </span>
+          </button>
+        ))}
+        {DEVICE_PROVIDERS.map((p) => (
+          <button
+            key={p.id}
+            className={`pick ${deviceCode?.provider === p.id ? "active" : ""}`}
+            onClick={() => connectDevice(p.id)}
+            disabled={busy || !inTauri}
+          >
+            <span className="pick-ico"><Mark id={p.id} /></span>
+            <span>
+              <span className="pick-title">{p.label}</span>
+              <span className="pick-sub">{t("publish.connectViaCode")}</span>
+            </span>
+          </button>
+        ))}
+        {KEY_PROVIDERS.map((p) => (
+          <button
+            key={p.id}
+            className={`pick ${keyProvider === p.id ? "active" : ""}`}
+            onClick={() => { setKeyProvider(keyProvider === p.id ? "" : p.id); setKeyDraft(""); setKeyLabel(""); }}
+            disabled={busy || !inTauri}
+          >
+            <span className="pick-ico"><Mark id={p.id} /></span>
+            <span>
+              <span className="pick-title">{p.label}</span>
+              <span className="pick-sub">{t("publish.connectViaKey")}</span>
+            </span>
+          </button>
+        ))}
+      </div>
+
+      {deviceCode && (
+        <div className="keyform fade-in">
+          <div className="callout info">
+            <IconInfo />
+            <span>
+              {t("publish.deviceHint")}{" "}
+              <a href={deviceCode.url} target="_blank" rel="noreferrer">{deviceCode.url}</a>
+            </span>
+          </div>
+          {deviceCode.code && (
+            <div className="devicecode">
+              <span className="devicecode-label">{t("publish.deviceCode")}</span>
+              <CopyChip value={deviceCode.code} />
+            </div>
+          )}
+          <p className="muted">{t("publish.deviceWaiting")}</p>
+        </div>
+      )}
+
+      {open && (
+        <div className="keyform fade-in">
+          <div className="callout info">
+            <IconInfo />
+            <span>
+              {t("publish.keyHint")}{" "}
+              <a href={open.keyUrl} target="_blank" rel="noreferrer">{open.keyUrl}</a>
+            </span>
+          </div>
+          <div className="field">
+            <label htmlFor="apikey">{t("publish.keyLabel", { provider: open.label })}</label>
+            <input
+              id="apikey"
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              value={keyDraft}
+              placeholder={t("publish.keyPlaceholder")}
+              onChange={(e) => setKeyDraft(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && keyDraft.trim()) connectKey(); }}
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="apikeylabel">{t("publish.keyName")}</label>
+            <input
+              id="apikeylabel"
+              value={keyLabel}
+              placeholder={t("publish.keyNamePlaceholder")}
+              onChange={(e) => setKeyLabel(e.target.value)}
+            />
+          </div>
+          <div className="keyform-actions">
+            <button className="btn sm" onClick={connectKey} disabled={busy || !keyDraft.trim()}>
+              {t("publish.keyConnect")}
+            </button>
+            <button className="btn sm ghost" onClick={() => setKeyProvider("")} disabled={busy}>
+              {t("publish.keyCancel")}
+            </button>
+          </div>
+        </div>
+      )}
+    </>
   );
 
   return (

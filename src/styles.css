@@ -638,6 +638,25 @@ select.input {
 .pick > span:last-child { min-width: 0; }
 .pick .pick-title { display: block; font-weight: 500; font-size: var(--fs-sub); line-height: 1.3; }
 .pick .pick-sub { display: block; color: var(--fg-3); font-size: var(--fs-meta); margin-top: 1px; }
+/* The API-key tiles toggle a form open instead of navigating away, so the
+   pressed one has to stay visibly selected while that form is on screen. */
+.pick.active { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.pick.active .pick-title { color: var(--accent); }
+
+/* ── API-key connect form (Kimi / Grok) ─────────────────────────────────── */
+.keyform {
+  margin-top: var(--s3); padding: var(--s4);
+  border-radius: var(--r3); background: var(--surface-2);
+  display: flex; flex-direction: column; gap: var(--s3);
+}
+.keyform .callout { margin: 0; }
+.keyform .callout a { color: var(--accent); word-break: break-all; }
+.keyform-actions { display: flex; gap: var(--s2); }
+/* The device code is the one thing on this panel the user has to read and
+   retype, so it is set apart from the prose rather than inlined into it. */
+.devicecode { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }
+.devicecode-label { font-size: var(--fs-meta); color: var(--fg-2); }
+.devicecode .copychip .cc-val { font-size: var(--fs-head); letter-spacing: 0.12em; color: var(--fg); }
 
 /* ── Provider mark — the app's one identity chip, deliberately monochrome ── */
 .mark {

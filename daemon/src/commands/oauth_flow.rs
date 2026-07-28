@@ -6,6 +6,7 @@ use crate::keychain;
 use crate::oauth;
 use crate::publisher;
 use crate::state::{AppState, FlowStatus};
+use asale_client_core::{cli_import, device_flow, Provider};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use super::sell::{accounts_changed};
@@ -127,6 +128,114 @@ pub(crate) async fn finish_provider_oauth(
     accounts_changed(state).await;
 
     Ok(json!({"provider": provider, "account_id": account_id, "keychain_ref": keychain::token_ref(provider, &account_id)}))
+}
+
+/// Begin a device-code login (Kimi Code, Grok CLI).
+///
+/// Same two-step contract as `oauth_login` — returns a `flow_id` the frontend
+/// polls — but there is no loopback listener and therefore no requirement that
+/// the browser run on this machine. That is what makes these two connectable
+/// from a remote B/S session, where the authorization-code providers are not.
+///
+/// The extra fields are what the user needs on screen: `user_code` is the short
+/// string they confirm, `auth_url` is where they confirm it (pre-filled with
+/// the code when the provider offers that form).
+pub async fn oauth_device_login(state: &Arc<AppState>, provider: String, open_local: bool) -> R<Value> {
+    let p = Provider::from_str_opt(&provider)
+        .filter(|p| asale_protocol::ids::is_device_flow_provider(*p))
+        .ok_or("this provider does not use a device-code login (kimi | xai)")?;
+
+    let code = device_flow::begin(p).await.map_err(err)?;
+    let flow_id = uuid::Uuid::new_v4().simple().to_string();
+    flow_set(state, &flow_id, FlowStatus::Pending).await;
+
+    // Read out what the user has to see before the polling task takes the code.
+    let auth_url = code.verification_uri.clone();
+    let user_code = code.user_code.clone();
+    let expires_in = code.expires_in;
+
+    if open_local {
+        open_local_browser(&auth_url);
+    }
+
+    let st = state.clone();
+    let fid = flow_id.clone();
+    let prov = provider.clone();
+    tokio::spawn(async move {
+        let outcome = finish_device_login(&st, p, &prov, code).await;
+        match outcome {
+            Ok(v) => flow_set(&st, &fid, FlowStatus::Done(v)).await,
+            Err(e) => flow_set(&st, &fid, FlowStatus::Failed(e)).await,
+        }
+    });
+
+    Ok(json!({
+        "flow_id": flow_id,
+        "provider": provider,
+        // `auth_url` keeps the same name the authorization-code flow uses, so
+        // the frontend's existing open-and-poll helper drives both unchanged.
+        "auth_url": auth_url,
+        "user_code": user_code,
+        "expires_in": expires_in,
+    }))
+}
+
+/// Poll the token endpoint until the user approves, then persist exactly like
+/// an authorization-code login: the credential is asale's own, so `origin` is
+/// `oauth` and no shared-rotation warning applies.
+async fn finish_device_login(
+    state: &AppState,
+    p: Provider,
+    provider: &str,
+    code: device_flow::DeviceCode,
+) -> R<Value> {
+    let tokens = device_flow::poll(p, &code).await.map_err(err)?;
+
+    // An OIDC id_token names the account; Kimi issues none, so those accounts
+    // fall back to a digest of the refresh token — stable across refreshes and
+    // distinct per login, the same rule the CLI import uses.
+    let account_id = tokens
+        .id_token
+        .as_deref()
+        .and_then(cli_import::jwt_claims)
+        .and_then(|c| {
+            c.get("email")
+                .or_else(|| c.get("sub"))
+                .and_then(|e| e.as_str())
+                .map(String::from)
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let cred = cli_import::CliCred {
+                provider: provider.to_string(),
+                access_token: tokens.access_token.clone(),
+                refresh_token: tokens.refresh_token.clone(),
+                expires_at: tokens.expires_at,
+                account_hint: None,
+                plan: None,
+            };
+            format!("{provider}-{}", cli_import::token_fingerprint(&cred))
+        });
+
+    keychain::set(&keychain::token_ref(provider, &account_id), &tokens.access_token).map_err(err)?;
+    if let Some(refresh) = &tokens.refresh_token {
+        keychain::set(&keychain::refresh_ref(provider, &account_id), refresh).map_err(err)?;
+    }
+    if let Some(exp) = tokens.expires_at {
+        state
+            .store
+            .set_setting(&publisher::exp_key(provider, &account_id), &exp.to_string())
+            .await
+            .map_err(err)?;
+    }
+    state
+        .store
+        .upsert_tool(provider, &account_id, &keychain::token_ref(provider, &account_id), &["oauth"], "oauth")
+        .await
+        .map_err(err)?;
+    accounts_changed(state).await;
+
+    Ok(json!({"provider": provider, "account_id": account_id}))
 }
 
 /// Sign in (or link) via a platform OAuth provider (google | github). PKCE +

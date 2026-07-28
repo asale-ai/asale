@@ -9,7 +9,7 @@
 //!   `codex`, `gemini`, `kimi`, `xai`. This is what travels on the wire.
 //! * [`Vendor`] — a **catalog vendor slug**, the left half of an OpenRouter
 //!   model id (`anthropic/claude-opus-4`) and the `prices.provider` column:
-//!   `anthropic`, `openai`, `google`.
+//!   `anthropic`, `openai`, `google`, `moonshotai`, `x-ai`.
 //! * a *tool* — a locally installed AI CLI whose config the buy switch rewrites
 //!   (Claude Code, Codex, Gemini CLI). Purely client-side and never on the
 //!   wire, so it lives in the daemon (`tool_config::Tool`), not here.
@@ -20,6 +20,19 @@ use serde::{Deserialize, Serialize};
 ///
 /// `claude_work` shares the claude upstream URL and translator; only the
 /// user-agent differs.
+///
+/// Moonshot and xAI each appear twice, because with them a vendor is not one
+/// endpoint. The coding **subscription** and the metered **platform API key**
+/// are separate products on separate hosts speaking different wire formats, and
+/// a credential for one is rejected by the other — so they cannot share a
+/// provider id the way `claude`/`claude_work` do:
+///
+/// | id         | credential           | upstream                              |
+/// |------------|----------------------|---------------------------------------|
+/// | `kimi`     | Kimi Code OAuth      | `api.kimi.com/coding` (chat)          |
+/// | `kimi_api` | Moonshot API key     | `api.moonshot.cn` (chat)              |
+/// | `xai`      | Grok CLI OAuth       | `cli-chat-proxy.grok.com` (responses) |
+/// | `xai_api`  | xAI API key          | `api.x.ai` (chat)                     |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
@@ -28,7 +41,9 @@ pub enum Provider {
     Codex,
     Gemini,
     Kimi,
+    KimiApi,
     Xai,
+    XaiApi,
 }
 
 impl Provider {
@@ -39,7 +54,9 @@ impl Provider {
             Provider::Codex => "codex",
             Provider::Gemini => "gemini",
             Provider::Kimi => "kimi",
+            Provider::KimiApi => "kimi_api",
             Provider::Xai => "xai",
+            Provider::XaiApi => "xai_api",
         }
     }
 
@@ -52,13 +69,18 @@ impl Provider {
             "codex" => Provider::Codex,
             "gemini" => Provider::Gemini,
             "kimi" => Provider::Kimi,
+            "kimi_api" => Provider::KimiApi,
             "xai" => Provider::Xai,
+            "xai_api" => Provider::XaiApi,
             _ => return None,
         })
     }
 
     /// The upstream family, which drives translator + URL choice. `claude_work`
     /// maps to the claude family (same upstream, different UA).
+    ///
+    /// The Kimi and xAI pairs deliberately do *not* collapse: their two ids
+    /// exist precisely because the upstream differs.
     pub fn upstream_family(&self) -> Provider {
         match self {
             Provider::ClaudeWork => Provider::Claude,
@@ -66,13 +88,29 @@ impl Provider {
         }
     }
 
-    pub const ALL: [Provider; 6] = [
+    /// The label a person recognises, for UI and error messages.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Provider::Claude => "Claude Code",
+            Provider::ClaudeWork => "Claude Work",
+            Provider::Codex => "Codex / OpenAI",
+            Provider::Gemini => "Gemini",
+            Provider::Kimi => "Kimi Code",
+            Provider::KimiApi => "Moonshot API",
+            Provider::Xai => "Grok CLI",
+            Provider::XaiApi => "xAI API",
+        }
+    }
+
+    pub const ALL: [Provider; 8] = [
         Provider::Claude,
         Provider::ClaudeWork,
         Provider::Codex,
         Provider::Gemini,
         Provider::Kimi,
+        Provider::KimiApi,
         Provider::Xai,
+        Provider::XaiApi,
     ];
 }
 
@@ -90,6 +128,13 @@ pub enum Vendor {
     Anthropic,
     Openai,
     Google,
+    Moonshotai,
+    /// OpenRouter spells this one with a hyphen (`x-ai/grok-4.5`), which no
+    /// `rename_all` rule produces — hence the explicit rename. The slug is the
+    /// contract with `prices.provider`, so getting it wrong silently maps every
+    /// Grok row to no provider at all.
+    #[serde(rename = "x-ai")]
+    Xai,
 }
 
 impl Vendor {
@@ -98,6 +143,8 @@ impl Vendor {
             Vendor::Anthropic => "anthropic",
             Vendor::Openai => "openai",
             Vendor::Google => "google",
+            Vendor::Moonshotai => "moonshotai",
+            Vendor::Xai => "x-ai",
         }
     }
 
@@ -106,26 +153,26 @@ impl Vendor {
             "anthropic" => Vendor::Anthropic,
             "openai" => Vendor::Openai,
             "google" => Vendor::Google,
+            "moonshotai" => Vendor::Moonshotai,
+            "x-ai" => Vendor::Xai,
             _ => return None,
         })
     }
 
     /// The credential families whose subscriptions can serve this vendor's
     /// models.
-    ///
-    /// `Kimi` and `Xai` are intentionally unreachable here: no vendor slug maps
-    /// to them, so no catalog row can currently be sold from one. They exist as
-    /// `Provider` variants because the wire format and the translator already
-    /// handle them — add the slug here when subscriptions for them ship.
     pub fn providers(&self) -> &'static [Provider] {
         match self {
             Vendor::Anthropic => &[Provider::Claude, Provider::ClaudeWork],
             Vendor::Openai => &[Provider::Codex],
             Vendor::Google => &[Provider::Gemini],
+            Vendor::Moonshotai => &[Provider::Kimi, Provider::KimiApi],
+            Vendor::Xai => &[Provider::Xai, Provider::XaiApi],
         }
     }
 
-    pub const ALL: [Vendor; 3] = [Vendor::Anthropic, Vendor::Openai, Vendor::Google];
+    pub const ALL: [Vendor; 5] =
+        [Vendor::Anthropic, Vendor::Openai, Vendor::Google, Vendor::Moonshotai, Vendor::Xai];
 }
 
 /// Every provider some catalog vendor maps to — i.e. the credential families a
@@ -139,7 +186,31 @@ pub const SUBSCRIBABLE_PROVIDERS: &[Provider] = &[
     Provider::ClaudeWork,
     Provider::Codex,
     Provider::Gemini,
+    Provider::Kimi,
+    Provider::KimiApi,
+    Provider::Xai,
+    Provider::XaiApi,
 ];
+
+/// Whether a provider authenticates with a long-lived API key rather than an
+/// OAuth token that expires and is refreshed.
+///
+/// These accounts are connected by pasting the key, carry no expiry, and are
+/// skipped by the refresh loop. Everything downstream (injection, metering, the
+/// sell switch) is identical to an OAuth account.
+pub fn is_api_key_provider(p: Provider) -> bool {
+    matches!(p, Provider::KimiApi | Provider::XaiApi)
+}
+
+/// Whether connecting this provider runs an RFC 8628 device-code flow rather
+/// than the authorization-code + loopback flow the others use.
+///
+/// Moonshot and xAI both ship their coding subscription through a CLI that
+/// authorises by device code: there is no redirect URI to register, the user
+/// approves a short code in a browser, and the daemon polls for the token.
+pub fn is_device_flow_provider(p: Provider) -> bool {
+    matches!(p, Provider::Kimi | Provider::Xai)
+}
 
 impl std::fmt::Display for Vendor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -199,7 +270,53 @@ mod tests {
         );
         assert_eq!(Vendor::Openai.providers(), &[Provider::Codex]);
         assert_eq!(Vendor::Google.providers(), &[Provider::Gemini]);
-        assert_eq!(Vendor::from_str_opt("moonshotai"), None);
+        // Both credential kinds serve the same catalog rows; they differ in
+        // which host the gateway sends the request to, not in what they can do.
+        assert_eq!(Vendor::Moonshotai.providers(), &[Provider::Kimi, Provider::KimiApi]);
+        assert_eq!(Vendor::Xai.providers(), &[Provider::Xai, Provider::XaiApi]);
+        assert_eq!(Vendor::from_str_opt("nope"), None);
+    }
+
+    #[test]
+    fn a_subscription_and_a_platform_key_are_never_the_same_provider() {
+        // They reach different hosts, so collapsing them would send a Kimi Code
+        // OAuth token to the Moonshot platform API (or the reverse) and 401.
+        assert_ne!(Provider::Kimi.upstream_family(), Provider::KimiApi.upstream_family());
+        assert_ne!(Provider::Xai.upstream_family(), Provider::XaiApi.upstream_family());
+        for p in [Provider::Kimi, Provider::KimiApi, Provider::Xai, Provider::XaiApi] {
+            assert_eq!(p.upstream_family(), p, "{p} must keep its own upstream");
+        }
+        // Exactly one of the two flavours per vendor is a pasted key.
+        assert!(is_api_key_provider(Provider::KimiApi) && !is_api_key_provider(Provider::Kimi));
+        assert!(is_api_key_provider(Provider::XaiApi) && !is_api_key_provider(Provider::Xai));
+        assert!(is_device_flow_provider(Provider::Kimi) && is_device_flow_provider(Provider::Xai));
+        for p in [Provider::Claude, Provider::Codex, Provider::Gemini] {
+            assert!(!is_device_flow_provider(p) && !is_api_key_provider(p));
+        }
+    }
+
+    #[test]
+    fn vendor_round_trips_through_its_catalog_slug() {
+        // `prices.provider` holds these strings verbatim, and the hyphen in
+        // `x-ai` is exactly the kind of thing a derive would quietly get wrong.
+        for v in Vendor::ALL {
+            assert_eq!(Vendor::from_str_opt(v.as_str()), Some(v));
+            assert_eq!(serde_json::to_value(v).unwrap(), serde_json::json!(v.as_str()));
+        }
+        assert_eq!(Vendor::Xai.as_str(), "x-ai");
+    }
+
+    #[test]
+    fn every_provider_has_exactly_one_connect_method() {
+        // A provider that is neither a device flow nor a pasted key connects
+        // through the authorization-code flow; being classified as two at once
+        // would make the Sell page offer two buttons for one account type.
+        for p in Provider::ALL {
+            assert!(
+                !(is_api_key_provider(p) && is_device_flow_provider(p)),
+                "{p} claims two connect methods"
+            );
+        }
     }
 
     #[test]

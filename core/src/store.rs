@@ -501,10 +501,12 @@ impl LocalStore {
     }
 
     /// Record a tool credential reference (keychain_ref only; no plaintext).
-    /// `origin` is `oauth` (asale owns this token exclusively) or `import`
-    /// (copied from a locally installed CLI, so its refresh token is shared).
-    /// Re-importing never downgrades an `oauth` account back to `import`, and
-    /// the per-account sell switch/limit survive a re-import.
+    /// `origin` is `oauth` or `api_key` (asale holds this credential
+    /// exclusively) or `import` (copied from a locally installed CLI, so its
+    /// refresh token is shared with it). Re-importing never downgrades an
+    /// exclusively-held account to `import` — that flag drives a shared-rotation
+    /// warning which would then be shown about a credential no CLI can rotate —
+    /// and the per-account sell switch/limit survive a re-import.
     ///
     /// `sources` is every local store found holding *this same subscription
     /// account*, best first — the row stays one-per-account, and the extra
@@ -527,7 +529,7 @@ impl LocalStore {
                keychain_ref=excluded.keychain_ref,
                source=excluded.source,
                sources=excluded.sources,
-               origin=CASE WHEN tools.origin='oauth' THEN 'oauth' ELSE excluded.origin END",
+               origin=CASE WHEN tools.origin IN ('oauth','api_key') THEN tools.origin ELSE excluded.origin END",
         )
         .bind(provider)
         .bind(account_id)

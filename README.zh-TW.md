@@ -38,8 +38,10 @@
 
 Claude Pro / Max · ChatGPT / Codex · Google Gemini · Kimi · xAI Grok
 
-其中用戶端已實作登入與設定切換的是 **Claude Code**、**Codex**、**Gemini CLI**，
-其餘在協定裡已有位置，隨轉接器補齊。
+賣出側全部可用，五家訂閱都能登入接入：**Claude Code**、**Codex**、**Gemini CLI**
+走瀏覽器回呼登入，**Kimi Code** 與 **Grok CLI** 走裝置碼授權（在瀏覽器裡確認一串驗證碼，
+不需要回呼連接埠，因此遠端網頁版也能用）。兩家的按量付費 API Key 也可單獨接入。
+買入側的設定切換目前涵蓋 Claude Code、Codex、Gemini CLI。
 
 ---
 

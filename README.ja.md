@@ -43,9 +43,11 @@ USDT（TRC20）です。
 
 Claude Pro / Max · ChatGPT / Codex · Google Gemini · Kimi · xAI Grok
 
-このうちクライアントでログインと設定切り替えを実装済みなのは **Claude Code**、
-**Codex**、**Gemini CLI** です。他はプロトコル上の位置は確保済みで、アダプタの実装
-に合わせて追加されます。
+5 つのサブスクリプションすべてを売却でき、すべてログインで接続できます。**Claude Code**、
+**Codex**、**Gemini CLI** はブラウザのコールバック、**Kimi Code** と **Grok CLI** は
+デバイスコード認証（ブラウザで短いコードを承認するだけで、コールバックポートが不要なため
+リモートのブラウザからも利用可能）を使います。各社の従量課金 API キーも個別に接続できます。
+購入側の設定切り替えは Claude Code / Codex / Gemini CLI が対象です。
 
 ---
 

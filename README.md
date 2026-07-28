@@ -42,9 +42,12 @@ This repository is the **desktop client** — selling and buying both live in th
 
 Claude Pro / Max · ChatGPT / Codex · Google Gemini · Kimi · xAI Grok
 
-Of these, the client currently implements login and config switching for **Claude Code**,
-**Codex** and **Gemini CLI**; the rest already have a slot in the protocol and land as
-adapters are filled in.
+All five subscriptions can be sold, and all five sign in. **Claude Code**, **Codex** and
+**Gemini CLI** use a browser callback; **Kimi Code** and **Grok CLI** use device-code
+authorization — you confirm a short code in the browser, with no callback port involved,
+which is why those two also work from a remote browser session. Each vendor's metered
+platform API key can be connected separately. On the buying side, config switching covers
+Claude Code, Codex and Gemini CLI.
 
 ---
 

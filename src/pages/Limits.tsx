@@ -13,8 +13,16 @@ const PROVIDERS = [
   { id: "claude_work", label: "Claude Work" },
   { id: "codex", label: "Codex" },
   { id: "gemini", label: "Gemini" },
+  { id: "kimi", label: "Kimi Code" },
+  { id: "kimi_api", label: "Moonshot API" },
+  { id: "xai", label: "Grok CLI" },
+  { id: "xai_api", label: "xAI API" },
 ];
-const meta = (id: string) => PROVIDERS.find((p) => id.startsWith(p.id)) ?? { label: id };
+/** Exact id first: several ids are prefixes of others (`kimi`/`kimi_api`,
+ *  `claude`/`claude_work`), and a prefix match alone labels the platform-API
+ *  rows with the subscription's name. */
+const meta = (id: string) =>
+  PROVIDERS.find((p) => p.id === id) ?? PROVIDERS.find((p) => id.startsWith(p.id)) ?? { label: id };
 
 /** Threshold color; in "remaining" mode a low value is bad (mirrored). */
 function barTone(displayPct: number, mode: DisplayMode): "ok" | "warn" | "danger" {

@@ -80,9 +80,11 @@ export function SkeletonRows({ rows = 2 }: { rows?: number }) {
    to it does not already say. The tile it sits in carries the state instead. */
 const MARK_LETTER: Record<string, string> = {
   claude: "C", claude_work: "C", codex: "O", gemini: "G",
+  kimi: "K", kimi_api: "K", xai: "X", xai_api: "X",
 };
 export function Mark({ id, size = "md" }: { id: string; size?: "md" | "sm" }) {
-  const key = Object.keys(MARK_LETTER).find((k) => id.startsWith(k));
+  // Exact id first — some ids are prefixes of others (`kimi`/`kimi_api`).
+  const key = id in MARK_LETTER ? id : Object.keys(MARK_LETTER).find((k) => id.startsWith(k));
   return (
     <span className={`mark ${size}`} aria-hidden>
       {key ? MARK_LETTER[key] : id.charAt(0).toUpperCase()}
