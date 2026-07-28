@@ -14,14 +14,18 @@
 //
 // Kept in sync with asale-web's `components/WalletDialog.tsx` — same rails,
 // same copy keys, same warning. If you change one, change the other.
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
-import QRCode from "qrcode";
-import { invoke, inTauri, fmtUsdt, isSolanaAddress, type WalletHistory, type WithdrawLimits } from "../lib";
+import {
+  invoke, inTauri, fmtUsdt, isSolanaAddress,
+  type DepositSession, type WalletHistory, type WithdrawLimits,
+} from "../lib";
+import { qrPayload, walletsFor, type WalletBrand } from "../lib/wallets";
+import { PayQr } from "./PayQr";
 import { CopyChip, Err, FactGrid, Skeleton } from "../ui";
 import {
-  IconX, IconArrowRight, IconRefresh, IconInfo, IconShield, IconWallet,
+  IconX, IconArrowRight, IconRefresh, IconInfo, IconShield, IconWallet, IconCheck,
 } from "../icons";
 
 const TRON_RE = /^T[1-9A-HJ-NP-Za-km-z]{33}$/;
@@ -118,7 +122,9 @@ function Sheet({
 
   return (
     <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="modal wdlg" role="dialog" aria-modal="true" aria-label={title}>
+      {/* Deposit runs a wallet picker beside the QR, which needs a second
+          column; withdrawal is a form and stays narrow. */}
+      <div className={`modal wdlg${mode === "deposit" ? " wide" : ""}`} role="dialog" aria-modal="true" aria-label={title}>
         <div className="modal-head">
           <h3>{title}</h3>
           <button type="button" className="modal-x" onClick={onClose} title={t("wallet.dlgClose")}>
@@ -147,7 +153,7 @@ function Sheet({
             refetches the address rather than showing the other chain's. */}
         <div className="wdlg-body">
           {picked && (mode === "deposit"
-            ? <RailDeposit key={picked.id} method={picked} limits={railLimits} />
+            ? <RailDeposit key={picked.id} method={picked} limits={railLimits} onDone={onDone} />
             : <RailWithdraw key={picked.id} method={picked} limits={railLimits} balance={balance}
                 onDone={onDone} onClose={onClose} />)}
         </div>
@@ -158,37 +164,120 @@ function Sheet({
 
 /* ── Deposit ─────────────────────────────────────────────────────────────── */
 
-function RailDeposit({ method, limits }: { method: Method; limits: WithdrawLimits | null }) {
+/** How often to ask the server whether the money landed. Each poll is one
+ *  indexed read plus at most three tiny UPDATEs, so this is cheap; 4s is short
+ *  enough that the arrival feels immediate. */
+const POLL_MS = 4000;
+
+/** Debounce on the amount field, so typing "10.50" opens one session, not five. */
+const AMOUNT_DEBOUNCE_MS = 600;
+
+function RailDeposit({
+  method, limits, onDone,
+}: {
+  method: Method;
+  limits: WithdrawLimits | null;
+  /** The balance moved — the page behind should refetch. */
+  onDone: () => void;
+}) {
   const { t } = useTranslation();
-  const [addr, setAddr] = useState("");
-  const [qr, setQr] = useState("");
+  const wallets = useMemo(() => walletsFor(method.chain), [method.chain]);
+  const [walletId, setWalletId] = useState("");
+  const wallet = wallets.find((w) => w.id === walletId) ?? wallets[0] ?? null;
+
+  const [amountInput, setAmountInput] = useState("");
+  /* The amount the session was actually opened for, settled on the debounce —
+     a half-typed "1" must not tear down the session meant for "10.50". */
+  const [amount, setAmount] = useState<number | null>(null);
+
+  const [session, setSession] = useState<DepositSession | null>(null);
   const [err, setErr] = useState("");
-  /* The address is what this tab is for, so it is requested on open rather than
-     hidden behind a button. Starts busy: there is never a state where the tab
-     is idle without one. */
-  const [busy, setBusy] = useState(inTauri);
+  const [reopen, setReopen] = useState(0);
+  /* An escape hatch for a wallet whose scanner does not take the payment URI
+     after all. Nobody should be stuck staring at a QR that will not scan. */
+  const [forceAddress, setForceAddress] = useState(false);
+
+  const micros = useMemo(() => {
+    const n = parseFloat(amountInput);
+    return amountInput.trim() && Number.isFinite(n) && n > 0 ? Math.round(n * 1_000_000) : null;
+  }, [amountInput]);
 
   useEffect(() => {
+    const id = setTimeout(() => setAmount(micros), AMOUNT_DEBOUNCE_MS);
+    return () => clearTimeout(id);
+  }, [micros]);
+
+  const restart = useCallback(() => {
+    setSession(null);
+    setReopen((v) => v + 1);
+  }, []);
+
+  /* One session per (rail, amount): a stale session would still be asking for
+     the previous figure while the sheet shows the new one. Only the newest
+     request may land, which `seq` enforces — a slow first call must not
+     overwrite the session a later one already delivered. */
+  const seqRef = useRef(0);
+  useEffect(() => {
     if (!inTauri) return;
-    let cancelled = false;
-    invoke<{ chain: string; address: string }>("wallet_deposit_address", { chain: method.chain })
-      .then(async (r) => {
-        const png = await QRCode.toDataURL(r.address, { margin: 1, width: 180 });
-        if (cancelled) return;
-        setAddr(r.address);
-        setQr(png);
+    const seq = ++seqRef.current;
+    invoke<DepositSession>("wallet_deposit_session", { chain: method.chain, amount })
+      .then((s) => {
+        if (seq !== seqRef.current) return;
+        setSession(s);
+        setErr("");
       })
-      .catch((e) => { if (!cancelled) setErr(String((e as Error).message)); })
-      .finally(() => { if (!cancelled) setBusy(false); });
-    return () => { cancelled = true; };
-  }, [method.chain]);
+      .catch((e) => {
+        if (seq === seqRef.current) setErr(String((e as Error).message));
+      });
+  }, [method.chain, amount, reopen]);
+
+  /* Poll until the money is in. `credited` is terminal; `expired` stops the
+     watch but not the payment, so the copy says so rather than implying the
+     address went dead. */
+  const watching = session != null && (session.status === "pending" || session.status === "matched");
+  // Ref rather than a dependency: `onDone` refetches the page, which would
+  // otherwise re-arm this effect on every tick.
+  const onDoneRef = useRef(onDone);
+  useEffect(() => { onDoneRef.current = onDone; }, [onDone]);
+
+  const sessionRef = session?.ref;
+  useEffect(() => {
+    if (!watching || !sessionRef) return;
+    let stop = false;
+    const id = setInterval(async () => {
+      // A hidden window cannot show the result anyway, and the next poll after
+      // it is foregrounded catches up in one call.
+      if (document.visibilityState === "hidden") return;
+      try {
+        const next = await invoke<DepositSession>("wallet_deposit_session_get", { sessionRef });
+        if (stop) return;
+        setSession((prev) => {
+          if (next.status === "credited" && prev?.status !== "credited") onDoneRef.current();
+          return next;
+        });
+      } catch {
+        // A failed poll is not worth surfacing: the next one is 4s away, and an
+        // error banner over a valid QR would read as "do not pay".
+      }
+    }, POLL_MS);
+    return () => { stop = true; clearInterval(id); };
+  }, [watching, sessionRef]);
+
+  // The QR follows whichever wallet is selected — that is the whole point of
+  // the picker (see lib/wallets.ts).
+  const payload = session ? qrPayload(forceAddress ? null : wallet, session.pay_uri, session.address) : "";
+  const isPayUri = payload !== "" && payload === session?.pay_uri;
+
+  const groups = useMemo(() => ([
+    { kind: "wallet" as const, items: wallets.filter((w) => w.kind === "wallet") },
+    { kind: "exchange" as const, items: wallets.filter((w) => w.kind === "exchange") },
+  ]), [wallets]);
 
   return (
     <>
-      {/* The network to send over, above the address rather than below it — it
-          has to be read before the QR is scanned. Informational, not alarming.
-          Naming the network here is what keeps a second rail from turning into
-          funds sent over the wrong one. */}
+      {/* The network to send over, above everything else — it has to be read
+          before the QR is scanned. Informational, not alarming: an alarm here
+          reads as "this is risky" and stops people funding at all. */}
       <div className="depwarn">
         <div className="depwarn-head">
           <IconInfo />
@@ -197,30 +286,108 @@ function RailDeposit({ method, limits }: { method: Method; limits: WithdrawLimit
         <p className="depwarn-body">{t("wallet.depositWarnDesc", { network: method.network })}</p>
       </div>
 
-      {busy ? (
-        <div className="dep-result">
-          <Skeleton w={180} h={180} r={12} />
-          <Skeleton h={34} r={8} />
+      {/* Optional: an amount turns the QR into a filled-in payment request on
+          wallets that support one. Empty means "send whatever", which is what
+          an exchange withdrawal does anyway once its own fee is taken. */}
+      <div className="field">
+        <label>{t("wallet.payAmountLabel")}</label>
+        <div className="pay-amount">
+          <input className="input mono" value={amountInput} inputMode="decimal"
+            placeholder={t("wallet.payAmountAny")} onChange={(e) => setAmountInput(e.target.value)} />
+          <span className="pay-amount-unit">USDT</span>
         </div>
-      ) : err ? (
+        <div className="hint">
+          {micros == null
+            ? t("wallet.payAmountHintAny")
+            : limits && micros < limits.deposit_min
+              ? t("wallet.payAmountHintBelowMin", { amount: fmtUsdt(limits.deposit_min) })
+              : t("wallet.payAmountHintSet")}
+        </div>
+      </div>
+
+      {err ? (
         <Err>{err}</Err>
       ) : (
-        <div className="dep-result fade-in">
-          <div className="qr-box">
-            {qr && <img src={qr} alt="deposit address QR" width={180} height={180} />}
-            <span className="qr-cap">{t("wallet.scanToPay")}</span>
+        <div className="paygrid">
+          <div className="paygrid-wallets">
+            <span className="paygrid-label">{t("wallet.payPickWallet")}</span>
+            {groups.map((g) => g.items.length > 0 && (
+              <div key={g.kind} className="wallet-group">
+                <span className="wallet-group-head">
+                  {t(g.kind === "wallet" ? "wallet.payGroupWallets" : "wallet.payGroupExchanges")}
+                </span>
+                {g.items.map((w) => (
+                  <button key={w.id} className={`wallet-row${w.id === wallet?.id ? " active" : ""}`}
+                    onClick={() => { setWalletId(w.id); setForceAddress(false); }}>
+                    <WalletMark wallet={w} />
+                    <span className="wallet-name">{w.name || t("wallet.payOtherWallet")}</span>
+                  </button>
+                ))}
+              </div>
+            ))}
           </div>
-          <div className="field">
-            <label>{t("wallet.yourAddress")}</label>
-            <CopyChip value={addr} wrap />
+
+          <div className="paygrid-pay">
+            {!session ? (
+              <div className="dep-result">
+                <Skeleton w={200} h={200} r={12} />
+                <Skeleton h={34} r={8} />
+              </div>
+            ) : session.status === "credited" || session.status === "matched" ? (
+              <PayReceipt session={session} onRestart={() => { setAmountInput(""); restart(); }} />
+            ) : (
+              <>
+                <p className="pay-hint">
+                  {isPayUri
+                    ? t("wallet.payScanWith", { wallet: wallet?.name ?? "" })
+                    : wallet?.kind === "exchange"
+                      ? t("wallet.payScanExchange", { wallet: wallet.name })
+                      : t("wallet.payScanAddress")}
+                </p>
+                <PayQr payload={payload} alt={t("wallet.qrAlt")} size={200} />
+
+                {/* Exchanges do not read payment requests, so the useful thing
+                    to show is the steps their app actually needs. */}
+                {wallet?.kind === "exchange" && (
+                  <ol className="pay-steps">
+                    <li>{t("wallet.payStepExchange1", { wallet: wallet.name })}</li>
+                    <li>{t("wallet.payStepExchange2", { network: method.network })}</li>
+                    <li>{t("wallet.payStepExchange3")}</li>
+                  </ol>
+                )}
+
+                <div className="pay-addr">
+                  <span className="pay-addr-label">{t("wallet.payAddressLabel")}</span>
+                  <CopyChip value={session.address} wrap />
+                </div>
+
+                {/* A payment URI that a scanner rejects is a dead end unless
+                    there is a way back to the universal code. */}
+                {session.pay_uri && wallet?.qr === "pay" && (
+                  <button className="pay-fallback" onClick={() => setForceAddress((v) => !v)}>
+                    {forceAddress ? t("wallet.payUsePayUri") : t("wallet.payUseAddressQr")}
+                  </button>
+                )}
+
+                {session.status === "expired" ? (
+                  <div className="pay-status">
+                    <span>{t("wallet.payExpired")}</span>
+                    <button className="btn ghost sm" onClick={restart}>
+                      <IconRefresh />{t("wallet.payRestart")}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="pay-status watching">
+                    <span className="pay-pulse" aria-hidden="true" />
+                    <span>{t("wallet.payWaiting")}</span>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         </div>
       )}
 
-      {/* Network and asset are the heading above; a callout restating the fee
-          sits directly under the row that already gives it. Both were dropped —
-          on a deposit there is nowhere else a fee could be taken from, so
-          "how much" is the only part that carries information. */}
       <FactGrid facts={[
         { k: t("wallet.factNetwork"), v: method.network },
         { k: t("wallet.factDepositFee"), v: <span className="mono">{limits ? `${fmtUsdt(limits.deposit_fee)} USDT` : "—"}</span> },
@@ -228,6 +395,41 @@ function RailDeposit({ method, limits }: { method: Method; limits: WithdrawLimit
         { k: t("wallet.factCredit"), v: t("wallet.factCreditVal") },
       ]} />
     </>
+  );
+}
+
+/** The coloured initial standing in for a wallet's logo (see lib/wallets.ts). */
+function WalletMark({ wallet }: { wallet: WalletBrand }) {
+  return (
+    <span className="wallet-mark" style={{ background: wallet.color }} aria-hidden="true">
+      {wallet.mark}
+    </span>
+  );
+}
+
+/** What the payer sees once a transfer is caught.
+ *
+ *  `matched` and `credited` are deliberately different screens: the money has
+ *  arrived in both, but only the second is spendable, and someone watching
+ *  this sheet wants to know which they are looking at. */
+function PayReceipt({ session, onRestart }: { session: DepositSession; onRestart: () => void }) {
+  const { t } = useTranslation();
+  const credited = session.status === "credited";
+  const received = session.deposit?.amount ?? null;
+  return (
+    <div className="pay-done fade-in">
+      <span className={`pay-done-mark${credited ? " ok" : ""}`}>
+        {credited ? <IconCheck /> : <IconRefresh className="spin" />}
+      </span>
+      <p className="pay-done-title">{t(credited ? "wallet.payCredited" : "wallet.payReceived")}</p>
+      {received != null && <p className="pay-done-amount mono">{fmtUsdt(received)} USDT</p>}
+      <p className="pay-done-desc">
+        {credited
+          ? t("wallet.payCreditedDesc")
+          : t("wallet.payReceivedDesc", { n: session.deposit?.confirmations ?? 0 })}
+      </p>
+      {credited && <button className="btn ghost sm" onClick={onRestart}>{t("wallet.payAgain")}</button>}
+    </div>
   );
 }
 

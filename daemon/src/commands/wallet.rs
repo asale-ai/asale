@@ -124,6 +124,29 @@ pub async fn wallet_deposit_address(state: &AppState, chain: String) -> R<Value>
     authed(state, reqwest::Method::POST, &path, None).await
 }
 
+/// Open a scan-to-pay session (server §10). `amount` is micro-USDT to prefill
+/// in the payment QR, or `None` for "any amount".
+///
+/// The session only tracks a top-up so the wallet screen can announce the
+/// arrival itself; it holds no funds and the deposit is credited identically
+/// without one.
+pub async fn wallet_deposit_session(state: &AppState, chain: String, amount: Option<i64>) -> R<Value> {
+    authed(
+        state,
+        reqwest::Method::POST,
+        "/api/v1/wallet/deposit-session",
+        Some(json!({"chain": chain, "amount": amount})),
+    )
+    .await
+}
+
+/// Poll one session. Each read advances it against what is on chain, so this
+/// call is the whole detection mechanism — there is no background job.
+pub async fn wallet_deposit_session_get(state: &AppState, session_ref: String) -> R<Value> {
+    let path = format!("/api/v1/wallet/deposit-session/{}", urlencoding_simple(&session_ref));
+    authed(state, reqwest::Method::GET, &path, None).await
+}
+
 /// Submit a withdrawal request (amount in micro-USDT). Risk checks, signing
 /// and broadcast happen server-side; errors (402 insufficient balance, limits)
 /// pass through as messages.

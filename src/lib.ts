@@ -18,6 +18,9 @@ const inTauri = true;
 // describes the same JSON with the same types. Re-exported so pages keep
 // importing them from "./lib".
 export type {
+  DepositSession,
+  DepositSessionStatus,
+  DepositSessionTx,
   MarketModel,
   MarketModelPrice,
   OAuthAccount,

@@ -198,6 +198,9 @@ rpc_args! {
         #[serde(default)] label: Option<String>,
     }
     ChainArgs      { chain: String }
+    // `amount` absent or null → an open-ended session ("send any amount").
+    PaySessionArgs { chain: String, #[serde(default)] amount: Option<i64> }
+    PaySessionRefArgs { #[serde(alias = "session_ref")] session_ref: String }
     WithdrawArgs   {
         chain: String,
         #[serde(alias = "to_address")] to_address: String,
@@ -385,6 +388,14 @@ async fn rpc(
         "wallet_deposit_address" => {
             let p: ChainArgs = args(&a)?;
             commands::wallet_deposit_address(st, p.chain).await?
+        },
+        "wallet_deposit_session" => {
+            let p: PaySessionArgs = args(&a)?;
+            commands::wallet_deposit_session(st, p.chain, p.amount).await?
+        },
+        "wallet_deposit_session_get" => {
+            let p: PaySessionRefArgs = args(&a)?;
+            commands::wallet_deposit_session_get(st, p.session_ref).await?
         },
         "wallet_withdraw" => {
             let p: WithdrawArgs = args(&a)?;

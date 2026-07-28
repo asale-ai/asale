@@ -99,6 +99,45 @@ export interface PricePoint {
 /** Chart granularities `GET /api/v1/market/price-history` accepts. */
 export type PriceGranularity = "minute" | "hour" | "day" | "month";
 
+/** How far a scan-to-pay session has got (server: `session_status_name`).
+ *
+ *  `matched` means a transfer was seen on chain; `credited` means it also
+ *  cleared confirmations and reached the balance. They are distinct because a
+ *  user watching the sheet wants to know the money arrived several minutes
+ *  before it is spendable. */
+export type DepositSessionStatus = "pending" | "matched" | "credited" | "expired";
+
+/** The transfer a session caught, once one lands. */
+export interface DepositSessionTx {
+  tx_hash: string;
+  /** What actually arrived — an exchange takes its own fee out of the figure
+   *  the user typed, so this rarely equals the session's `amount`. */
+  amount: number | null;
+  confirmations: number | null;
+  credited: boolean;
+}
+
+/** `POST /api/v1/wallet/deposit-session` and
+ *  `GET /api/v1/wallet/deposit-session/:ref`.
+ *
+ *  A session is a view object: it tracks one top-up so the page can announce
+ *  the arrival itself. It holds no funds — the same deposit is credited
+ *  identically with no session at all. */
+export interface DepositSession {
+  ref: string;
+  chain: string;
+  address: string;
+  /** Requested micro-USDT, or null for "any amount". */
+  amount: number | null;
+  /** Wallet-ready payment request (Solana Pay). Null on rails with no scheme
+   *  worth scanning — TRON — where the bare address is the better QR. */
+  pay_uri: string | null;
+  status: DepositSessionStatus;
+  created_ts: number;
+  expires_ts: number;
+  deposit: DepositSessionTx | null;
+}
+
 /** Response of `GET /api/v1/market/price-history`. */
 export interface PriceHistory {
   model: string;
