@@ -178,28 +178,18 @@ function TronDeposit({ limits }: { limits: WithdrawLimits | null }) {
             <label>{t("wallet.yourAddress")}</label>
             <CopyChip value={addr} wrap />
           </div>
-          <div className="callout info">
-            <IconInfo /><span>{t("wallet.trc20Only")}</span>
-          </div>
         </div>
       )}
 
+      {/* Network and asset are the heading above; a callout restating the fee
+          sits directly under the row that already gives it. Both were dropped —
+          on a deposit there is nowhere else a fee could be taken from, so
+          "how much" is the only part that carries information. */}
       <FactGrid facts={[
-        { k: t("wallet.factNetwork"), v: "TRON · TRC20" },
-        { k: t("wallet.factAsset"), v: "USDT" },
         { k: t("wallet.factDepositFee"), v: <span className="mono">{limits ? `${fmtUsdt(limits.deposit_fee)} USDT` : "—"}</span> },
         { k: t("wallet.factDepositMin"), v: <span className="mono">{limits ? `${fmtUsdt(limits.deposit_min)} USDT` : "—"}</span> },
         { k: t("wallet.factCredit"), v: t("wallet.factCreditVal") },
       ]} />
-
-      {limits && limits.deposit_fee > 0 && (
-        <div className="callout info">
-          <IconShield />
-          <span>{t("wallet.depositFeeNote", {
-            fee: fmtUsdt(limits.deposit_fee), min: fmtUsdt(limits.deposit_min),
-          })}</span>
-        </div>
-      )}
     </>
   );
 }
