@@ -93,6 +93,7 @@ export function WalletPage() {
   const amountMicros = Math.round(parseFloat(amount || "0") * 1_000_000);
   const addrValid = TRON_RE.test(to.trim());
   const minMicros = limits?.withdraw_min ?? 0;
+  const feeMicros = limits?.withdraw_fee ?? 0;
   const maxSingle = limits?.withdraw_max_single ?? 0;
   const belowMin = amountMicros > 0 && minMicros > 0 && amountMicros < minMicros;
   const overSingle = maxSingle > 0 && amountMicros > maxSingle;
@@ -272,6 +273,23 @@ export function WalletPage() {
                 <span>{t("wallet.sumAmount")}</span>
                 <span className="mono tabular">{amountMicros > 0 ? fmtUsdt(amountMicros) : "0.00"} USDT</span>
               </div>
+              {feeMicros > 0 && (
+                <>
+                  <div className="wd-line">
+                    <span>{t("wallet.sumFee")}</span>
+                    <span className="mono tabular">−{fmtUsdt(feeMicros)} USDT</span>
+                  </div>
+                  {/* The fee is deducted from the amount above, so state the
+                      arriving figure rather than letting the user find it on
+                      the block explorer. */}
+                  <div className="wd-line strong">
+                    <span>{t("wallet.sumNet")}</span>
+                    <span className="mono tabular">
+                      {amountValid ? fmtUsdt(amountMicros - feeMicros) : "—"} USDT
+                    </span>
+                  </div>
+                </>
+              )}
               <div className="wd-line">
                 <span>{t("wallet.sumNetwork")}</span>
                 <span>TRON · TRC20</span>

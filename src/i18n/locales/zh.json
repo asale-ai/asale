@@ -249,6 +249,8 @@
     "scanToPay": "扫码转入 USDT",
     "addressHint": "请仔细核对地址，链上转账不可撤销。",
     "sumAmount": "提现金额",
+    "sumFee": "手续费",
+    "sumNet": "实际到账",
     "sumNetwork": "网络",
     "sumFlow": "流程",
     "sumFlowVal": "风控审核 → 链上广播 → 到账",

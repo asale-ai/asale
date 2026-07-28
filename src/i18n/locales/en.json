@@ -249,6 +249,8 @@
     "scanToPay": "Scan to send USDT",
     "addressHint": "Double-check the address — on-chain transfers cannot be reversed.",
     "sumAmount": "Amount",
+    "sumFee": "Network fee",
+    "sumNet": "You receive",
     "sumNetwork": "Network",
     "sumFlow": "Process",
     "sumFlowVal": "Review → broadcast → confirmed",

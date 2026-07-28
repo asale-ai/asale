@@ -249,6 +249,8 @@
     "scanToPay": "スキャンして USDT を送金",
     "addressHint": "アドレスをよく確認してください。オンチェーン送金は取り消せません。",
     "sumAmount": "出金額",
+    "sumFee": "手数料",
+    "sumNet": "受取額",
     "sumNetwork": "ネットワーク",
     "sumFlow": "流れ",
     "sumFlowVal": "審査 → ブロードキャスト → 着金",

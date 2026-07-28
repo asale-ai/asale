@@ -249,6 +249,8 @@
     "scanToPay": "掃碼轉入 USDT",
     "addressHint": "請仔細核對位址，鏈上轉帳無法撤銷。",
     "sumAmount": "提領金額",
+    "sumFee": "手續費",
+    "sumNet": "實際到帳",
     "sumNetwork": "網路",
     "sumFlow": "流程",
     "sumFlowVal": "風控審核 → 鏈上廣播 → 到帳",

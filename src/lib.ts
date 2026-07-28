@@ -151,6 +151,9 @@ export interface WithdrawalRow {
 /** Server-side withdrawal rules, surfaced so the form states them up front. */
 export interface WithdrawLimits {
   withdraw_min: number;
+  /** Flat fee carved out of the requested amount; the destination receives
+   *  `amount - withdraw_fee`. */
+  withdraw_fee: number;
   withdraw_max_single: number;
   withdraw_max_daily: number;
   withdraw_max_per_hour: number;
