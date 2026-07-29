@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use super::sell::{accounts_changed};
 use super::{R, err, now_secs};
 use super::usage::{WINDOW_SECS};
+use crate::cmd_err;
 
 /// Scan the machine for credentials of installed vendor CLIs (Claude Code,
 /// Codex, gemini-cli). Returns discoverable sources only — nothing is imported.
@@ -39,6 +40,7 @@ pub async fn import_cli_all(state: &AppState) -> R<Value> {
 
     let mut imported = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
+    let mut skipped: Vec<Value> = Vec::new();
     let mut errors = Vec::new();
     for provider in providers {
         match import_from_cli(state, provider.clone()).await {
@@ -56,15 +58,26 @@ pub async fn import_cli_all(state: &AppState) -> R<Value> {
                 if let Some(accounts) = v["accounts"].as_array() {
                     imported.extend(accounts.iter().cloned());
                 }
+                // Left out because this tool is buying — reported, not an
+                // error, so the UI can say why an account it expected is
+                // missing instead of leaving the user to guess.
+                if v["skipped"] == json!("buying") {
+                    skipped.push(json!({
+                        "provider": provider,
+                        "label": crate::tool_config::label(&provider),
+                        "reason": "buying",
+                        "dropped": v["dropped"].clone(),
+                    }));
+                }
             }
             Err(e) => {
                 tracing::warn!(provider, "cli auto-import failed: {e}");
-                errors.push(json!({"provider": provider, "error": e}));
+                errors.push(json!({"provider": provider, "error": e.message}));
             }
         }
     }
 
-    Ok(json!({"imported": imported, "warnings": warnings, "errors": errors}))
+    Ok(json!({"imported": imported, "warnings": warnings, "skipped": skipped, "errors": errors}))
 }
 
 /// The already-imported account whose stored refresh token *is* this
@@ -131,12 +144,32 @@ pub(crate) async fn resolve_account_id(state: &AppState, provider: &str, cred: &
 /// found in. Returns env-var conflict warnings alongside the accounts.
 pub async fn import_from_cli(state: &AppState, provider: String) -> R<Value> {
     if !matches!(provider.as_str(), "claude" | "codex" | "gemini") {
-        return Err("unknown CLI provider (claude | codex | gemini)".to_string());
+        return Err(cmd_err!("errors.cli.unknownProvider", "unknown CLI provider (claude | codex | gemini)"));
     }
+    // A tool that is buying is a consumer of the market, not a supplier — see
+    // `tool_config::is_buying`. Checked before the scan, so a credential asale
+    // itself wrote into that tool's directory is never even read: with the buy
+    // switch on and no ChatGPT login of its own, `~/.codex/auth.json` holds
+    // nothing but our own consumer key, and importing it would put that key up
+    // for sale.
+    if crate::tool_config::is_buying(&state.store, &provider).await {
+        return Ok(json!({
+            "provider": provider,
+            "accounts": [],
+            "dropped": [],
+            "warnings": [],
+            "skipped": "buying",
+        }));
+    }
+
     let prov = provider.clone();
     let candidates = tokio::task::spawn_blocking(move || cli_scan::load_all(&prov)).await.map_err(err)?;
     if candidates.is_empty() {
-        return Err(format!("no {provider} CLI credentials found on this machine"));
+        return Err(cmd_err!(
+            "errors.cli.noCredentials",
+            format!("no {provider} CLI credentials found on this machine"),
+            provider = provider.as_str()
+        ));
     }
 
     // Identity first, merge second: two stores holding one login collapse here.
@@ -178,7 +211,7 @@ pub async fn import_from_cli(state: &AppState, provider: String) -> R<Value> {
             .upsert_tool(&provider, &account_id, &keychain::token_ref(&provider, &account_id), &sources, "import")
             .await
             .map_err(err)?;
-    
+
         out.push(json!({
             "provider": provider,
             "account_id": account_id,
@@ -398,13 +431,27 @@ pub async fn connect_api_key(
 ) -> R<Value> {
     let p = Provider::from_str_opt(&provider).filter(|p| asale_protocol::ids::is_api_key_provider(*p));
     let Some(p) = p else {
-        return Err(
+        return Err(cmd_err!(
+            "errors.cli.notAnApiKeyProvider",
             "this provider is connected by signing in, not with an API key — \
              pasted keys are for the metered platform APIs (kimi_api | xai_api)"
-                .into(),
-        );
+        ));
     };
-    let cred = cli_import::api_key_cred(&provider, &api_key).map_err(|e| e.to_string())?;
+    // The same two shape checks `api_key_cred` makes, restated here so they can
+    // carry a translation key: this is a form the user typed into, and "paste
+    // just the key, not the whole command" is the one message on this screen
+    // that has to land. The library keeps its own guards as an invariant.
+    let trimmed = api_key.trim().trim_matches(['"', '\'']).trim();
+    if trimmed.is_empty() {
+        return Err(cmd_err!("errors.cli.apiKeyEmpty", "API key is empty"));
+    }
+    if trimmed.chars().any(char::is_whitespace) {
+        return Err(cmd_err!(
+            "errors.cli.apiKeyHasWhitespace",
+            "API key contains whitespace — paste just the key, not the whole command"
+        ));
+    }
+    let cred = cli_import::api_key_cred(&provider, &api_key).map_err(err)?;
 
     if let Err(e) = verify_api_key(p, &cred.access_token).await {
         return Err(e);
@@ -450,7 +497,7 @@ fn verify_hosts(p: Provider) -> &'static [&'static str] {
 ///
 /// `Ok(())` also covers "could not tell": only a host that positively refuses
 /// the credential is an error, and only when no other host accepted it.
-async fn verify_api_key(p: Provider, key: &str) -> Result<(), String> {
+async fn verify_api_key(p: Provider, key: &str) -> R<()> {
     let hosts = verify_hosts(p);
     if hosts.is_empty() {
         return Ok(());
@@ -476,8 +523,10 @@ async fn verify_api_key(p: Provider, key: &str) -> Result<(), String> {
         }
     }
     if rejected {
-        return Err(format!(
-            "{p} rejected this API key — check it was copied in full and has not been revoked"
+        return Err(cmd_err!(
+            "errors.cli.apiKeyRejected",
+            format!("{p} rejected this API key — check it was copied in full and has not been revoked"),
+            provider = p.to_string()
         ));
     }
     // Every host was unreachable. Being offline is not evidence of a bad key.

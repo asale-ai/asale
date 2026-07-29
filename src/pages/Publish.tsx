@@ -2,10 +2,11 @@ import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   invoke, inTauri, runOAuthFlow, fmtTokens,
-  type AccountStatus, type ImportAllResult, type Lane,
+  type AccountStatus, type ClientStatus, type ImportAllResult, type Lane,
 } from "../lib";
 import { Card, Ok, Err, SkeletonRows, PageHead, IconAction, Empty, Mark, CopyChip } from "../ui";
 import { IconTrash, IconShield, IconChip, IconRefresh, IconPlus, IconPencil, IconInfo } from "../icons";
+import { errText } from "../errors";
 
 /** Subscriptions connected by signing in through a loopback OAuth callback. */
 const PROVIDERS = [
@@ -94,6 +95,11 @@ export function Publish() {
   const [rescanning, setRescanning] = useState(false);
   const [importMsg, setImportMsg] = useState("");
   const [importWarnings, setImportWarnings] = useState<string[]>([]);
+  // Tools currently buying. Their local accounts are left out of the list
+  // below, and an account that vanished needs an explanation, not silence.
+  // Polled with the accounts would mean a keychain + filesystem scan every few
+  // seconds, so this is read once and refreshed when the user rescans.
+  const [buyingTools, setBuyingTools] = useState<string[]>([]);
   const [importErr, setImportErr] = useState("");
 
   const loadAccounts = useCallback(() => {
@@ -109,12 +115,21 @@ export function Publish() {
           return next;
         });
       })
-      .catch((e) => setAcctErr(String((e as Error).message)))
+      .catch((e) => setAcctErr(errText(e)))
       .finally(() => setAcctLoading(false));
     invoke<{ lanes: Lane[] }>("list_lanes")
       .then((r) => setLanes(r.lanes))
       .catch(() => {});
   }, []);
+
+  const loadBuying = useCallback(() => {
+    if (!inTauri) return;
+    invoke<ClientStatus>("client_status")
+      .then((s) => setBuyingTools(s.buying))
+      .catch(() => {});
+  }, []);
+
+  useEffect(loadBuying, [loadBuying]);
 
   useEffect(() => {
     if (!inTauri) return;
@@ -137,7 +152,7 @@ export function Publish() {
       });
       loadAccounts();
     } catch (e) {
-      setAcctErr(String((e as Error).message));
+      setAcctErr(errText(e));
     } finally {
       setResuming((r) => ({ ...r, [k]: false }));
     }
@@ -163,7 +178,7 @@ export function Publish() {
       });
       loadAccounts();
     } catch (e) {
-      setAcctErr(String((e as Error).message));
+      setAcctErr(errText(e));
       loadAccounts(); // roll the optimistic update back to server truth
     } finally {
       setPending((p) => ({ ...p, [k]: false }));
@@ -195,7 +210,7 @@ export function Publish() {
       const r = await runOAuthFlow<{ account_id: string }>("oauth_login", { provider });
       setMsg(t("publish.connected", { provider, account: r.account_id }));
       loadAccounts();
-    } catch (e) { setErr(String((e as Error).message)); } finally { setBusy(false); }
+    } catch (e) { setErr(errText(e)); } finally { setBusy(false); }
   }
 
   /** Device-code login. Identical two-step flow, except the user confirms a
@@ -211,7 +226,7 @@ export function Publish() {
       );
       setMsg(t("publish.connected", { provider, account: r.account_id }));
       loadAccounts();
-    } catch (e) { setErr(String((e as Error).message)); } finally { setBusy(false); setDeviceCode(null); }
+    } catch (e) { setErr(errText(e)); } finally { setBusy(false); setDeviceCode(null); }
   }
 
   /** Save a pasted API key as an account. The daemon checks it against the
@@ -228,7 +243,7 @@ export function Publish() {
       setMsg(t("publish.connected", { provider: keyProvider, account: r.account_id }));
       setKeyProvider(""); setKeyDraft(""); setKeyLabel("");
       loadAccounts();
-    } catch (e) { setErr(String((e as Error).message)); } finally { setBusy(false); }
+    } catch (e) { setErr(errText(e)); } finally { setBusy(false); }
   }
 
   // Re-run the local-CLI import (same routine the daemon runs on startup) —
@@ -243,15 +258,16 @@ export function Publish() {
           : t("publish.cliNone"),
       );
       setImportWarnings(r.warnings);
+      loadBuying();
       if (r.errors.length > 0) setImportErr(r.errors.map((e) => `${e.provider}: ${e.error}`).join("; "));
       loadAccounts();
-    } catch (e) { setImportErr(String((e as Error).message)); } finally { setRescanning(false); }
+    } catch (e) { setImportErr(errText(e)); } finally { setRescanning(false); }
   }
 
   async function removeAccount(a: AccountStatus) {
     setAcctErr("");
     try { await invoke<boolean>("remove_account", { provider: a.provider, accountId: a.account_id }); loadAccounts(); }
-    catch (e) { setAcctErr(String((e as Error).message)); }
+    catch (e) { setAcctErr(errText(e)); }
   }
 
   const statusPill = (s: AccountStatus["status"]) => {
@@ -388,7 +404,7 @@ export function Publish() {
         icon={<IconShield />}
         title={t("publish.accountsTitle")}
         desc={t("publish.accountsDesc")}
-        right={<span className="count-chip">{accounts.length}</span>}
+        right={<span className="count-chip">{acctLoading ? "—" : accounts.length}</span>}
       >
         {acctLoading ? (
           <SkeletonRows rows={2} />
@@ -598,6 +614,12 @@ export function Publish() {
         {importWarnings.length > 0 && (
           <div className="callout warn card-foot">
             <IconShield /><span>{t("publish.envWarning", { vars: importWarnings.join(", ") })}</span>
+          </div>
+        )}
+        {buyingTools.length > 0 && (
+          <div className="callout card-foot">
+            <IconInfo />
+            <span>{t("publish.cliSkippedBuying", { tools: buyingTools.join(", ") })}</span>
           </div>
         )}
         <Err>{importErr}</Err>

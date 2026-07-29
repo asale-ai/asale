@@ -54,6 +54,11 @@
     "goConnect": "Connect an account"
   },
   "status": {
+    "starting": {
+      "label": "Starting",
+      "desc": "Connecting to the local Asale service and reading its state.",
+      "hint": "This usually takes a second or two."
+    },
     "daemonDown": {
       "label": "Service down",
       "desc": "The local Asale service (asaled) is not responding.",
@@ -139,6 +144,7 @@
     "scanning": "Scanning…",
     "cliNone": "No CLI credentials found on this machine.",
     "envWarning": "Warning: {{vars}} is set in the environment and overrides the CLI's stored credentials.",
+    "cliSkippedBuying": "{{tools}} is buying through asale, so its local account is not offered for sale. Turn buying off to sell it again.",
     "connectVia": "Sign in via browser",
     "connectViaKey": "Connect with an API key",
     "connectViaCode": "Confirm a code in the browser",
@@ -244,8 +250,9 @@
     "depositWarnTitle": "USDT on {{network}} only",
     "depositWarnDesc": "Send USDT over the {{network}} network. Other coins, or USDT on any other network, will not arrive.",
     "qrAlt": "Payment QR code",
-    "payAmountLabel": "Amount (optional)",
+    "payAmountLabel": "Amount",
     "payAmountAny": "Any amount",
+    "payAmountCustom": "Other",
     "payAmountHintAny": "Leave empty to enter the amount in your wallet instead.",
     "payAmountHintSet": "Supported wallets fill this amount in for you after scanning.",
     "payAmountHintBelowMin": "Below the suggested minimum of {{amount}} USDT — smaller deposits are still credited.",
@@ -591,7 +598,9 @@
   },
   "common": {
     "copy": "Copy",
-    "copied": "Copied"
+    "copied": "Copied",
+    "networkError": "Could not reach the server. Check your connection and try again.",
+    "requestFailed": "The request failed. Please try again."
   },
   "modelPicker": {
     "title": "Choose models",
@@ -610,5 +619,181 @@
     "remove": "Remove",
     "choose": "Choose a model…",
     "shown": "{{n}} shown"
+  },
+  "errors": {
+    "common": {
+      "internal": "Something went wrong on our side. Please try again.",
+      "notFound": "Not found.",
+      "rateLimited": "Too many requests. Please wait a moment and try again."
+    },
+    "account": {
+      "banned": "This account has been banned.",
+      "blocked": "This account is blocked from trading."
+    },
+    "auth": {
+      "badCredentials": "Incorrect email or password.",
+      "weakCredentials": "Enter an email address and a password of at least 8 characters.",
+      "emailTaken": "That email address is already registered.",
+      "emailUnverified": "Your email address has not been verified yet.",
+      "tokenRequired": "The verification link is missing its token.",
+      "verifyInvalid": "This verification link is not valid.",
+      "verifyUsed": "This verification link has already been used.",
+      "verifyExpired": "This verification link has expired. Request a new one.",
+      "verifyStale": "This verification link is no longer valid. Request a new one.",
+      "missingBearer": "You are not signed in. Sign in and try again.",
+      "invalidToken": "Your session has expired. Sign in again.",
+      "deviceFieldsRequired": "Device id and device public key are required.",
+      "web3AddressShape": "Enter a wallet address as 0x followed by 40 hex characters.",
+      "siweMessageTooLong": "The signature message is too long.",
+      "siweNonceMissing": "The signature message has no Nonce line.",
+      "siweNonceExpired": "This signature request is unknown or has expired. Start again.",
+      "siweRejected": "Wallet signature verification failed: {{detail}}"
+    },
+    "field": {
+      "emailRequired": "Enter an email address.",
+      "emailTooLong": "That email address is too long.",
+      "emailWhitespace": "The email address must not contain spaces or control characters.",
+      "emailNoAt": "The email address must contain @.",
+      "emailInvalid": "That is not a valid email address.",
+      "emailBadDomain": "The email address needs a valid domain.",
+      "regionInvalid": "Choose a country or region."
+    },
+    "profile": {
+      "nameLength": "The name must be 1 to 64 characters.",
+      "avatarUrlTooLong": "That avatar URL is too long.",
+      "passwordTooShort": "The password must be at least 8 characters.",
+      "wrongCurrentPassword": "The current password is incorrect.",
+      "setPasswordBeforeUnlink": "Set a password before unlinking your last sign-in provider."
+    },
+    "apiKey": {
+      "missing": "No API key was sent.",
+      "badPrefix": "That API key has the wrong format.",
+      "unknown": "That API key is not recognised.",
+      "disabled": "That API key has been disabled."
+    },
+    "gateway": {
+      "unknownDialect": "This endpoint does not accept requests at {{path}}."
+    },
+    "market": {
+      "noSupply": "No provider is selling {{model}} right now.",
+      "modelNotTraded": "{{model}} is not traded on this platform."
+    },
+    "wallet": {
+      "insufficientBalance": "Insufficient balance.",
+      "insufficientForBudget": "Your balance does not cover this request's budget.",
+      "amountPositive": "Enter an amount greater than zero.",
+      "amountTooLarge": "That amount is too large.",
+      "unsupportedChain": "{{chain}} is not supported. Available networks: {{supported}}.",
+      "invalidChainAddress": "That is not a valid {{chain}} address.",
+      "withdrawBelowMin": "The minimum {{chain}} withdrawal is {{min}} micro-USDT.",
+      "withdrawFeeExceedsAmount": "The withdrawal fee ({{fee}} micro-USDT) leaves nothing to send.",
+      "withdrawSingleLimit": "This exceeds the single-withdrawal limit.",
+      "withdrawDailyLimit": "This exceeds your daily withdrawal limit.",
+      "withdrawNotWhitelisted": "This withdrawal address is not on your whitelist.",
+      "depositUnprovisioned": "Deposits are not available right now. Please try again later.",
+      "depositMisconfigured": "Deposits are temporarily unavailable. Please contact support.",
+      "depositPoolEmpty": "No deposit address is available right now. Please try again shortly."
+    },
+    "dispute": {
+      "fieldsRequired": "A task and a reason are required.",
+      "reasonTooLong": "The reason must be at most {{max}} characters.",
+      "notOwner": "This task does not belong to your account.",
+      "notTerminal": "This task has not settled yet, so it cannot be disputed.",
+      "windowExpired": "The {{hours}}-hour dispute window has passed.",
+      "alreadyFiled": "This task already has a dispute."
+    },
+    "publishConfig": {
+      "reserveFloorRange": "The reserved quota must be between 0 and {{max}}.",
+      "maxRpmRange": "The rate cap must be between 0 and {{max}}.",
+      "minPriceRange": "The floor price must be between 0 and {{max}}.",
+      "listTooLong": "{{field}} may hold at most {{max}} entries.",
+      "listEntryLength": "Each {{field}} entry must be 1 to {{max}} characters."
+    },
+    "oauth": {
+      "unknownProvider": "{{provider}} is not a supported sign-in provider.",
+      "notConfigured": "{{provider}} sign-in is not enabled on this deployment.",
+      "halfConfigured": "{{provider}} sign-in is only half-configured: {{missing}} is empty.",
+      "badRedirectUri": "The sign-in callback address was rejected: {{detail}}",
+      "codeRequired": "The sign-in callback carried no authorization code.",
+      "codeRejected": "{{provider}} rejected the sign-in: {{detail}}",
+      "noVerifiedEmail": "Your {{provider}} account has no verified email address.",
+      "identityLinkedElsewhere": "That account is already linked to another Asale user.",
+      "upstream": "Could not reach {{provider}}. Please try again.",
+      "upstreamIncomplete": "{{provider}} returned an incomplete profile. Please try again.",
+      "unknownFlow": "That sign-in is no longer in progress. Please start again.",
+      "exchangeFailed": "The sign-in could not be completed: {{detail}}",
+      "timedOut": "The sign-in timed out. Please try again."
+    },
+    "upstream": {
+      "provider": "The model provider returned an error ({{code}}): {{detail}}",
+      "badStream": "The {{dialect}} response stream was malformed.",
+      "streamFailed": "{{provider}} ended the response early: {{detail}}"
+    },
+    "catalog": {
+      "fetchFailed": "Could not fetch the upstream model catalog: {{detail}}",
+      "malformed": "The upstream model catalog could not be parsed: {{detail}}"
+    },
+    "admin": {
+      "roleRequired": "This action requires an administrator account.",
+      "amountNonZero": "The adjustment amount cannot be zero.",
+      "adjustLimit": "The adjustment exceeds the {{max}} micro-USDT per-operation limit.",
+      "reasonRequired": "A reason is required.",
+      "reasonTooLong": "The reason must be at most {{max}} characters.",
+      "withdrawalNotInReview": "Withdrawal {{id}} is not awaiting review (status {{status}}).",
+      "withdrawalNotRejectable": "Withdrawal {{id}} cannot be rejected in status {{status}}.",
+      "tooManyRules": "Too many rules — at most {{max}}.",
+      "modelAndRefPrice": "A model is required and the reference price must be at least 0.",
+      "unknownTokenType": "Unknown token type: {{value}}.",
+      "marketPriceNonNegative": "The market price cannot be negative.",
+      "modelIdRequired": "A model id is required.",
+      "modelIdsRequired": "Select at least one model.",
+      "refPricesNonNegative": "Reference prices cannot be negative.",
+      "modelExists": "Model {{model}} already exists.",
+      "unknownAction": "Unknown action: {{value}}.",
+      "noUpstreamIds": "None of the selected models exist upstream.",
+      "disputeActionInvalid": "The action must be refund or reject.",
+      "disputeNotPending": "Dispute {{id}} is not pending (status {{status}}).",
+      "noRefundableSettlement": "Task {{task}} has no refundable settlement.",
+      "disputeRaceLost": "Dispute {{id}} was resolved by someone else just now."
+    },
+    "daemon": {
+      "unreachable": "Asale service is not running. Start the app again or check asaled.",
+      "unauthorized": "This page is not authorized to talk to the Asale service. Reopen it from the link the service printed.",
+      "unknownCommand": "Unsupported operation: {{command}}. The app and the service may be different versions.",
+      "badArguments": "The request was malformed: {{detail}}"
+    },
+    "session": {
+      "expired": "Your session has expired. Sign in again.",
+      "signInToBuy": "Sign in before buying tokens.",
+      "notSignedIn": "You are not signed in. Sign in and try again."
+    },
+    "tool": {
+      "unknown": "Unsupported tool: {{tool}}. Choose Claude, Codex or Gemini."
+    },
+    "cli": {
+      "unknownProvider": "Unsupported CLI. Choose Claude, Codex or Gemini.",
+      "noCredentials": "No {{provider}} CLI sign-in was found on this machine.",
+      "notAnApiKeyProvider": "This provider is connected by signing in, not with an API key. Pasted keys are for the metered platform APIs (kimi_api, xai_api).",
+      "apiKeyRejected": "{{provider}} rejected this API key — check it was copied in full and has not been revoked.",
+      "apiKeyEmpty": "Enter an API key.",
+      "apiKeyHasWhitespace": "The API key contains spaces — paste just the key, not the whole command."
+    },
+    "settings": {
+      "unknownProxyMode": "Unknown proxy mode: {{value}}.",
+      "badConsumeMode": "The mode must be direct, market or auto."
+    },
+    "usage": {
+      "regionBlocked": "The provider blocks requests from this region. Configure an upstream proxy in Settings.",
+      "upstreamStatus": "The provider returned HTTP {{status}}. {{detail}}",
+      "upstreamUnreachable": "Could not reach the provider's usage API: {{detail}}",
+      "unreadable": "The usage response could not be read: {{detail}}",
+      "noWindows": "The provider reported no rate-limit windows."
+    },
+    "deviceFlow": {
+      "timedOut": "{{provider}} sign-in timed out — the code expired before it was approved.",
+      "expired": "The {{provider}} code expired before it was approved.",
+      "declined": "The {{provider}} sign-in was declined.",
+      "unsupportedProvider": "This provider does not use a device-code login (Kimi and Grok do)."
+    }
   }
 }

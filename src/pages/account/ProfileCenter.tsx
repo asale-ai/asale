@@ -13,6 +13,7 @@ import {
   IconSun, IconMoon, IconGlobe, IconRefresh, IconPencil, IconCheck,
 } from "../../icons";
 import { GitHubIcon, GoogleIcon } from "./icons";
+import { errText } from "../../errors";
 
 const TABS = ["profile", "security", "preferences"] as const;
 type Tab = (typeof TABS)[number];
@@ -189,7 +190,7 @@ function InlineField({
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (e2) {
-      setErr(String((e2 as Error).message));
+      setErr(errText(e2));
     } finally {
       setBusy(false);
     }
@@ -280,7 +281,7 @@ function SecurityTab({ profile, onProfile }: { profile: Profile; onProfile: (p: 
     if (!inTauri) return;
     invoke<{ key: string | null }>("ensure_api_key")
       .then((r) => { if (r.key) setApiKey(r.key); })
-      .catch((e) => setKeyErr(String((e as Error).message)));
+      .catch((e) => setKeyErr(errText(e)));
   }, []);
 
   async function refresh() { onProfile(await invoke<Profile>("me_profile")); }
@@ -290,7 +291,7 @@ function SecurityTab({ profile, onProfile }: { profile: Profile; onProfile: (p: 
     try {
       await invoke("change_password", { oldPassword: profile.has_password ? oldPw : undefined, newPassword: newPw });
       setOldPw(""); setNewPw(""); setPwMsg(t("account.security.passwordUpdated")); await refresh();
-    } catch (e) { setPwErr(String((e as Error).message)); } finally { setPwBusy(false); }
+    } catch (e) { setPwErr(errText(e)); } finally { setPwBusy(false); }
   }
 
   async function link(provider: string) {
@@ -298,13 +299,13 @@ function SecurityTab({ profile, onProfile }: { profile: Profile; onProfile: (p: 
     try {
       const r = await runOAuthFlow<{ provider: string; email: string }>("platform_oauth_login", { provider, link: true });
       setOauthMsg(t("account.security.linked", { provider: r.provider, email: r.email })); await refresh();
-    } catch (e) { setOauthErr(String((e as Error).message)); } finally { setOauthBusy(null); }
+    } catch (e) { setOauthErr(errText(e)); } finally { setOauthBusy(null); }
   }
 
   async function unlink(provider: string) {
     setOauthMsg(""); setOauthErr("");
     try { await invoke("unlink_oauth", { provider }); await refresh(); }
-    catch (e) { setOauthErr(String((e as Error).message)); }
+    catch (e) { setOauthErr(errText(e)); }
   }
 
   // Mint a brand-new key, invalidating the previous one. The daemon rewrites
@@ -318,7 +319,7 @@ function SecurityTab({ profile, onProfile }: { profile: Profile; onProfile: (p: 
       const tools = r.refreshed_tools ?? [];
       setKeyMsg(tools.length ? t("account.apiKey.refreshed", { tools: tools.join("、") }) : t("account.apiKey.regenerated"));
     }
-    catch (e) { setKeyErr(String((e as Error).message)); } finally { setKeyBusy(false); }
+    catch (e) { setKeyErr(errText(e)); } finally { setKeyBusy(false); }
   }
 
   return (

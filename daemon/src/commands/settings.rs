@@ -5,6 +5,7 @@ use crate::state::AppState;
 use asale_client_core::http;
 use serde_json::{json, Value};
 use super::{R, err, now_secs};
+use crate::cmd_err;
 
 /// Return the client endpoint config.
 pub fn client_config(state: &AppState) -> Value {
@@ -67,7 +68,13 @@ pub async fn set_proxy_settings(state: &AppState, mode: String, url: String) -> 
             http::validate(&url)?;
             http::ProxyPref::Manual(url)
         }
-        other => return Err(format!("unknown proxy mode: {other}")),
+        other => {
+            return Err(cmd_err!(
+                "errors.settings.unknownProxyMode",
+                format!("unknown proxy mode: {other}"),
+                value = other
+            ))
+        }
     };
     state.store.set_setting(PROXY_KEY, &pref.to_setting()).await.map_err(err)?;
     http::set_preference(pref);
@@ -93,7 +100,13 @@ pub async fn test_proxy(mode: String, url: String) -> R<Value> {
             http::validate(&url)?;
             Some(url)
         }
-        other => return Err(format!("unknown proxy mode: {other}")),
+        other => {
+            return Err(cmd_err!(
+                "errors.settings.unknownProxyMode",
+                format!("unknown proxy mode: {other}"),
+                value = other
+            ))
+        }
     };
     let started = std::time::Instant::now();
     let resp = http::build(candidate.as_deref())
@@ -129,7 +142,7 @@ pub async fn set_setting(state: &AppState, key: String, value: String) -> R<()> 
 /// Set the consumer routing mode: direct | market | auto (persisted).
 pub async fn consume_set_mode(state: &AppState, mode: String) -> R<Value> {
     if !matches!(mode.as_str(), "direct" | "market" | "auto") {
-        return Err("mode must be direct | market | auto".to_string());
+        return Err(cmd_err!("errors.settings.badConsumeMode", "mode must be direct | market | auto"));
     }
     state.store.set_setting("consume_mode", &mode).await.map_err(err)?;
     consume_get_mode(state).await

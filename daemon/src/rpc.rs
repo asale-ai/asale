@@ -36,6 +36,7 @@ use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use crate::cmd_err;
 
 #[derive(Clone)]
 pub struct Ctx {
@@ -146,8 +147,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 // multi-word field, and the arms below shrink to one line each.
 
 /// Decode a command's arguments, reporting a failure the frontend can show.
-fn args<T: serde::de::DeserializeOwned>(v: &Value) -> Result<T, String> {
-    serde_json::from_value(v.clone()).map_err(|e| format!("bad arguments: {e}"))
+fn args<T: serde::de::DeserializeOwned>(v: &Value) -> Result<T, commands::CmdError> {
+    serde_json::from_value(v.clone()).map_err(|e| {
+        cmd_err!("errors.daemon.badArguments", format!("bad arguments: {e}"), detail = e.to_string())
+    })
 }
 
 macro_rules! rpc_args {
@@ -234,7 +237,14 @@ async fn rpc(
     Json(a): Json<Value>,
 ) -> Response {
     if !authorized(&ctx, &peer, &headers) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized (missing or bad X-Asale-Token)"})))
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(cmd_err!(
+                "errors.daemon.unauthorized",
+                "unauthorized (missing or bad X-Asale-Token)"
+            )
+            .to_json()),
+        )
             .into_response();
     }
     let st = &ctx.state;
@@ -242,7 +252,7 @@ async fn rpc(
     // Every arm yields a `Value`; `?` inside the async block carries a
     // decode or command failure straight out as the error message. That is
     // what removes the `Err(e) => Err(e)` line each arm used to repeat.
-    let out: Result<Value, String> = async {
+    let out: Result<Value, commands::CmdError> = async {
         Ok(match cmd.as_str() {
         // ── no arguments ────────────────────────────────────────────────
         "client_config" => commands::client_config(st),
@@ -425,14 +435,20 @@ async fn rpc(
             .await?
         },
 
-        other => return Err(format!("unknown command: {other}")),
+        other => {
+            return Err(cmd_err!(
+                "errors.daemon.unknownCommand",
+                format!("unknown command: {other}"),
+                command = other
+            ))
+        }
         })
     }
     .await;
 
     match out {
         Ok(v) => Json(v).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(e.to_json())).into_response(),
     }
 }
 
@@ -515,7 +531,10 @@ mod tests {
     #[test]
     fn a_missing_required_argument_is_a_readable_error() {
         let e = args::<AccountArgs>(&json!({"provider": "claude"})).unwrap_err();
-        assert!(e.contains("accountId"), "unhelpful message: {e}");
+        assert!(e.message.contains("accountId"), "unhelpful message: {e}");
+        // Decode failures are translatable too, so the frontend does not have
+        // to show serde's English at a user.
+        assert_eq!(e.key.as_deref(), Some("errors.daemon.badArguments"));
     }
 
     #[test]

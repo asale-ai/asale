@@ -8,9 +8,11 @@
 // means adding an entry there and nothing else — the deposit and withdraw
 // bodies are written against the rail, not against a chain.
 //
-// The dialog is a fixed size. Its body scrolls, so switching tabs never resizes
-// it under the cursor — the tallest rail sets the height once and the rest live
-// inside it.
+// Withdrawal runs at a fixed body height, so switching rails never resizes the
+// dialog under the cursor. Deposit is laid out to fit instead: both its rails
+// render the same blocks at the same height, so the body sizes to its content
+// and only scrolls on a short window — a scrollbar over a QR reads as "there is
+// more to do down there" when there is not.
 //
 // Kept in sync with asale-web's `components/WalletDialog.tsx` — same rails,
 // same copy keys, same warning. If you change one, change the other.
@@ -24,6 +26,7 @@ import {
 import { qrPayload, walletsFor, type WalletBrand } from "../lib/wallets";
 import { PayQr } from "./PayQr";
 import { CopyChip, Err, FactGrid, Skeleton } from "../ui";
+import { errText } from "../errors";
 import {
   IconX, IconArrowRight, IconRefresh, IconInfo, IconShield, IconWallet, IconCheck,
 } from "../icons";
@@ -132,12 +135,6 @@ function Sheet({
           </button>
         </div>
 
-        {/* What the money is measured against, on every tab. */}
-        <div className="wdlg-bal">
-          <span>{t("wallet.available")}</span>
-          <span className="mono tabular">{fmtUsdt(balance)} USDT</span>
-        </div>
-
         <div className="wdlg-tabs">
           <div className="segmented">
             {available.map((m) => (
@@ -172,6 +169,10 @@ const POLL_MS = 4000;
 /** Debounce on the amount field, so typing "10.50" opens one session, not five. */
 const AMOUNT_DEBOUNCE_MS = 600;
 
+/** The top-ups people actually make, in USDT. One tap beats typing, and the
+ *  free field beside them still takes any figure — including none. */
+const AMOUNT_PRESETS = [10, 20, 50, 100];
+
 function RailDeposit({
   method, limits, onDone,
 }: {
@@ -185,7 +186,13 @@ function RailDeposit({
   const [walletId, setWalletId] = useState("");
   const wallet = wallets.find((w) => w.id === walletId) ?? wallets[0] ?? null;
 
-  const [amountInput, setAmountInput] = useState("");
+  /* The picker is one value in two places: a chip is either lit or the free
+     field holds the figure. Kept apart so typing "10" by hand does not silently
+     jump into the chip and empty the box under the cursor. */
+  const [preset, setPreset] = useState<number | null>(null);
+  const [custom, setCustom] = useState("");
+  const amountInput = preset != null ? String(preset) : custom;
+  const clearAmount = useCallback(() => { setPreset(null); setCustom(""); }, []);
   /* The amount the session was actually opened for, settled on the debounce —
      a half-typed "1" must not tear down the session meant for "10.50". */
   const [amount, setAmount] = useState<number | null>(null);
@@ -227,7 +234,7 @@ function RailDeposit({
         setErr("");
       })
       .catch((e) => {
-        if (seq === seqRef.current) setErr(String((e as Error).message));
+        if (seq === seqRef.current) setErr(errText(e));
       });
   }, [method.chain, amount, reopen]);
 
@@ -289,12 +296,23 @@ function RailDeposit({
       {/* Optional: an amount turns the QR into a filled-in payment request on
           wallets that support one. Empty means "send whatever", which is what
           an exchange withdrawal does anyway once its own fee is taken. */}
-      <div className="field">
+      <div className="field amt-field">
         <label>{t("wallet.payAmountLabel")}</label>
-        <div className="pay-amount">
-          <input className="input mono" value={amountInput} inputMode="decimal"
-            placeholder={t("wallet.payAmountAny")} onChange={(e) => setAmountInput(e.target.value)} />
-          <span className="pay-amount-unit">USDT</span>
+        <div className="amt-picker">
+          {AMOUNT_PRESETS.map((v) => (
+            <button key={v} type="button" className={`amt-chip${preset === v ? " active" : ""}`}
+              /* Tapping the lit chip again is how you get back to "any amount"
+                 without hunting for a clear button. */
+              onClick={() => { setPreset(preset === v ? null : v); setCustom(""); }}>
+              {v} <span className="amt-chip-unit">USDT</span>
+            </button>
+          ))}
+          <div className="amt-custom">
+            <input className="input mono" value={custom} inputMode="decimal"
+              placeholder={t("wallet.payAmountCustom")}
+              onChange={(e) => { setCustom(e.target.value); setPreset(null); }} />
+            <span className="amt-unit">USDT</span>
+          </div>
         </div>
         <div className="hint">
           {micros == null
@@ -330,11 +348,11 @@ function RailDeposit({
           <div className="paygrid-pay">
             {!session ? (
               <div className="dep-result">
-                <Skeleton w={200} h={200} r={12} />
+                <Skeleton w={184} h={184} r={12} />
                 <Skeleton h={34} r={8} />
               </div>
             ) : session.status === "credited" || session.status === "matched" ? (
-              <PayReceipt session={session} onRestart={() => { setAmountInput(""); restart(); }} />
+              <PayReceipt session={session} onRestart={() => { clearAmount(); restart(); }} />
             ) : (
               <>
                 <p className="pay-hint">
@@ -344,7 +362,7 @@ function RailDeposit({
                       ? t("wallet.payScanExchange", { wallet: wallet.name })
                       : t("wallet.payScanAddress")}
                 </p>
-                <PayQr payload={payload} alt={t("wallet.qrAlt")} size={200} />
+                <PayQr payload={payload} alt={t("wallet.qrAlt")} size={184} />
 
                 {/* Exchanges do not read payment requests, so the useful thing
                     to show is the steps their app actually needs. */}
@@ -475,7 +493,7 @@ function RailWithdraw({
       setTo(""); setAmount("");
       onDone();
     } catch (e) {
-      setErr(String((e as Error).message));
+      setErr(errText(e));
     } finally {
       setBusy(false);
     }

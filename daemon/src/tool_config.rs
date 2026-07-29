@@ -166,6 +166,72 @@ pub fn current_base_url(tool: &str) -> Option<String> {
     }
 }
 
+/// The local proxy's origin — the base URL a bought-through tool is pointed at.
+///
+/// Read from the same environment `ClientConfig` does, so code holding only the
+/// store can ask what a tool's config should say without the whole config being
+/// threaded down to it.
+pub fn proxy_base() -> String {
+    format!("http://127.0.0.1:{}", asale_client_core::config::ClientConfig::default().proxy_port)
+}
+
+/// Is this tool's live config actually pointed at our own local proxy? Codex
+/// addresses the proxy's `/v1` root, the others its origin.
+pub fn points_at_proxy(tool: &str) -> bool {
+    let base = proxy_base();
+    current_base_url(tool).is_some_and(|b| b == base || b == format!("{base}/v1"))
+}
+
+/// Is this tool buying right now?
+///
+/// Either half is enough. The stored switch is what the user asked for; a
+/// config whose base URL already names our proxy is what the tool is actually
+/// doing, which still holds when the switch record was lost or was written by
+/// an older build.
+///
+/// This is the sell side's exclusion rule: an account synced out of a tool's
+/// own directory (`origin = "import"`) is not this device's to sell while that
+/// tool is spending through the market. See `commands::accounts::list_accounts`,
+/// `publisher::rebuild_pool` and `auth_store::resync`, which all ask it — the
+/// list, the pool and the manifest have to agree, or an account would be hidden
+/// from the user while still serving traffic.
+///
+/// The one function here that is not blocking: it needs the store, and every
+/// caller is already async. The filesystem half goes to `spawn_blocking`.
+pub async fn is_buying(store: &asale_client_core::store::LocalStore, tool: &str) -> bool {
+    if !known(tool) {
+        return false;
+    }
+    if store.buy_tool(tool).await.map(|r| r.enabled).unwrap_or(false) {
+        return true;
+    }
+    let t = tool.to_string();
+    tokio::task::spawn_blocking(move || points_at_proxy(&t)).await.unwrap_or(false)
+}
+
+/// Which of `providers` are buying, deduplicated.
+///
+/// The set form exists because [`is_buying`] may read a config file off disk,
+/// and the pool rebuild runs on every status poll: asking once per rebuild
+/// keeps that at one read per tool instead of one per account row.
+pub async fn buying_set<'a>(
+    store: &asale_client_core::store::LocalStore,
+    providers: impl Iterator<Item = &'a str>,
+) -> std::collections::HashSet<String> {
+    let mut asked: Vec<&str> = Vec::new();
+    let mut buying = std::collections::HashSet::new();
+    for p in providers.filter(|p| known(p)) {
+        if asked.contains(&p) {
+            continue;
+        }
+        asked.push(p);
+        if is_buying(store, p).await {
+            buying.insert(p.to_string());
+        }
+    }
+    buying
+}
+
 // ── Backup / restore ───────────────────────────────────────────────────────
 
 /// The pre-switch content of one file. `raw: None` means the file did not exist.

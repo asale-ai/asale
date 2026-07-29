@@ -50,6 +50,36 @@ cargo test -p asale-client-core
 > ないとクライアントはゲートウェイの認可を検証できず、販売が「オンライン化中」から
 > 永久に進みません。
 
+### 製品版と同時に動かす
+
+`dev:app` はローカル状態一式を開発専用のコピーへ切り替えるので、インストール済みの
+製品版を開いたままでも並行して起動できます。
+
+| | 製品版 | `pnpm dev:app` |
+|---|---|---|
+| データディレクトリ | `~/.asale` | `~/.asale-dev`（`ASALE_DATA_DIR`） |
+| daemon | `127.0.0.1:9700` | `127.0.0.1:9701`（`ASALE_BIND`） |
+| ローカルプロキシ | `9787` | `9788`（`ASALE_PROXY_PORT`） |
+| bundle identifier | `com.asale.desktop` | `com.asale.desktop.dev`（`src-tauri/tauri.dev.conf.json`） |
+
+identifier は必ず分けてください。単一インスタンスのロックは `/tmp/<identifier>_si.sock` なので、
+共有すると開発版は起動直後に終了し、製品版のウィンドウが前面に出るだけになります。
+ウィンドウ状態とログイン時起動の登録も identifier 単位なので同時に分離されます。
+
+各変数は `${VAR:-既定値}` の形なので、一時的な差し替えは上書きするだけです。
+
+```bash
+ASALE_DATA_DIR=~/.asale-staging ASALE_BIND=127.0.0.1:9702 pnpm dev:app
+```
+
+`pnpm dev` 単体（ブラウザでのデバッグ）はフロントエンドが `127.0.0.1:9700` を向いたままなので、
+開発 daemon に繋ぐには `VITE_ASALE_DAEMON=http://127.0.0.1:9701 pnpm dev` とします。
+`dev:app` が起動する vite はこの変数を引き継ぐため、追加の設定は不要です。
+
+共有されたままなのは CLI ツール自身の設定（`~/.claude`、`~/.codex/config.toml`）だけです。
+購読と購入はまさにこれらの実ファイルを書き換える機能なので、両者は互いを上書きします。
+同時に操作しないでください。
+
 OAuth のクライアント認証情報は [`.env.example`](../.env.example) を参照
 （Gemini は自前で用意が必要、Claude/Codex は公開のデフォルト値あり）。
 

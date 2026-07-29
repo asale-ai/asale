@@ -150,3 +150,32 @@ export interface PriceHistory {
   market_prices: { input: number; output: number; cache_read: number; cache_write: number };
   points: PricePoint[];
 }
+
+// ── errors ──────────────────────────────────────────────────────────
+
+/**
+ * The body of every non-2xx REST response (`asale-server/src/error.rs`).
+ *
+ * `message` is English. It exists so a curl user and an untranslated build see
+ * something readable, but it is **not** what a UI should render: `key` names an
+ * entry in the frontend's own message catalog and `params` carries the values
+ * that entry interpolates, so the user reads the failure in their language. Use
+ * the shared helpers (`errorText` in each app) rather than reaching for
+ * `message` directly.
+ *
+ * `key` is absent for messages with no catalog entry — internal invariants and
+ * upstream provider text, which fall back to `message`.
+ */
+export interface ApiErrorBody {
+  message: string;
+  /** Coarse machine tag: `unauthorized`, `payment_required`, … Branch on this. */
+  code: string;
+  /** Catalog key, e.g. `errors.wallet.insufficientBalance`. */
+  key?: string;
+  /** Interpolation values named by the catalog entry. */
+  params?: Record<string, string | number | boolean>;
+}
+
+export interface ApiErrorEnvelope {
+  error: ApiErrorBody;
+}

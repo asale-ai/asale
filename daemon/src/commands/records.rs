@@ -23,7 +23,7 @@ pub async fn records_query(state: &AppState, role: String, page: i64) -> R<Value
     let server = authed(state, reqwest::Method::GET, &format!("/api/v1/me/records?role={role}&page={page}"), None).await;
     let (records, server_error) = match server {
         Ok(v) => (v["records"].clone(), Value::Null),
-        Err(e) => (json!([]), json!(e)),
+        Err(e) => (json!([]), json!(e.message)),
     };
 
     Ok(json!({

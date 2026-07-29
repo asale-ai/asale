@@ -1,4 +1,5 @@
-//! Run the local-CLI usage scanner against the REAL `~/.asale/asale.db` and
+//! Run the local-CLI usage scanner against the REAL `asale.db`
+//! (`$ASALE_DATA_DIR`, `~/.asale` by default) and
 //! print the resulting "我使用的" (used) totals from your real Claude Code logs.
 //!
 //!   cargo run --example scan_probe
@@ -8,8 +9,10 @@ use asale_daemon::usage_scan;
 
 #[tokio::main]
 async fn main() {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let store = LocalStore::open(&format!("{home}/.asale/asale.db")).await.expect("open store");
+    // $ASALE_DATA_DIR, like the daemon — a probe run alongside `pnpm dev:app`
+    // should read that app's store, not the release build's.
+    let db = format!("{}/asale.db", asale_daemon::state::data_dir());
+    let store = LocalStore::open(&db).await.expect("open store");
 
     let folded = usage_scan::scan_claude_logs(&store).await.expect("scan");
     println!("scan folded {folded} assistant message(s) from local Claude Code logs.\n");

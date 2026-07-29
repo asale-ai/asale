@@ -442,6 +442,95 @@ async fn import_retires_the_placeholder_row_of_an_account_it_can_now_name() {
     assert!(again["dropped"].as_array().unwrap().is_empty());
 }
 
+/// A tool pointed at the asale proxy is buying, and nothing synced out of its
+/// directory belongs on the sell side while that is true. The account has to go
+/// the moment the switch flips — not at the next scan — and come back with the
+/// switch and cap the user left on it, since turning buying on for an afternoon
+/// must not quietly cost them their sell settings.
+#[tokio::test(flavor = "current_thread")]
+async fn a_tool_that_is_buying_is_not_a_source_of_sellable_accounts() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let _sb = Sandbox::new("buying-not-sellable");
+    let state = signed_in_state().await;
+
+    // Seed the account first so the import resolves its identity from the token
+    // it already holds — no profile call, so the test stays offline.
+    keychain::set(&keychain::token_ref("claude", "me@x.com"), "access").unwrap();
+    keychain::set(&keychain::refresh_ref("claude", "me@x.com"), "rt-1").unwrap();
+    state
+        .store
+        .upsert_tool("claude", "me@x.com", &keychain::token_ref("claude", "me@x.com"), &["import"], "import")
+        .await
+        .unwrap();
+
+    let home = std::env::var("HOME").unwrap();
+    std::fs::create_dir_all(format!("{home}/.claude")).unwrap();
+    std::fs::write(
+        format!("{home}/.claude/.credentials.json"),
+        serde_json::json!({"claudeAiOauth": {
+            "accessToken": "access", "refreshToken": "rt-1",
+            "expiresAt": 4_000_000_000_000i64, "subscriptionType": "max"
+        }})
+        .to_string(),
+    )
+    .unwrap();
+
+    let r = commands::import_from_cli(&state, "claude".into()).await.expect("import");
+    assert_eq!(r["accounts"].as_array().unwrap().len(), 1);
+    commands::set_account_sell(&state, "claude".into(), "me@x.com".into(), true, Some(500_000))
+        .await
+        .unwrap();
+
+    // ── buying on ──
+    commands::set_buy_tool(&state, "claude".into(), true, None).await.expect("buy on");
+    let rows = commands::list_accounts(&state).await.unwrap();
+    assert!(
+        rows.as_array().unwrap().iter().all(|a| a["provider"] != "claude"),
+        "a tool that is buying offers nothing for sale"
+    );
+    assert!(
+        auth_store::list().iter().all(|m| m.provider != "claude"),
+        "and its manifest goes too, so the pool cannot serve from it"
+    );
+
+    // A rescan must not bring it back — the credential is still there to find.
+    let all = commands::import_cli_all(&state).await.expect("rescan");
+    assert!(all["imported"].as_array().unwrap().is_empty(), "nothing imported while buying");
+    let skipped = all["skipped"].as_array().unwrap();
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0]["provider"], "claude");
+    assert_eq!(skipped[0]["reason"], "buying");
+
+    // ── buying off ──
+    let off = commands::set_buy_tool(&state, "claude".into(), false, None).await.expect("buy off");
+    assert_eq!(off["accounts"][0]["account_id"], "me@x.com", "sellable again straight away");
+    let back = get_from(&commands::list_accounts(&state).await.unwrap(), "me@x.com");
+    assert_eq!(back["sell_enabled"], true, "under the identity and switch it was hidden with");
+    assert_eq!(back["sell_daily_limit"], 500_000, "and the cap");
+    assert!(auth_store::list().iter().any(|m| m.account_id == "me@x.com"), "manifest is back too");
+}
+
+/// The sharpest case: with the buy switch on and no ChatGPT login of its own,
+/// `~/.codex/auth.json` holds nothing but asale's *own* consumer key. Importing
+/// it would put that key up for sale — the market buying its own key back.
+#[tokio::test(flavor = "current_thread")]
+async fn the_consumer_key_a_buy_switch_writes_is_never_offered_for_sale() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let _sb = Sandbox::new("no-selling-our-own-key");
+    let state = signed_in_state().await;
+
+    commands::set_buy_tool(&state, "codex".into(), true, None).await.expect("buy on");
+    let auth = std::fs::read_to_string(format!("{}/.codex/auth.json", std::env::var("HOME").unwrap())).unwrap();
+    assert!(auth.contains("sk-asale-test"), "precondition: our key is the only credential there");
+
+    let all = commands::import_cli_all(&state).await.expect("scan");
+    assert!(all["imported"].as_array().unwrap().is_empty());
+    assert!(
+        commands::list_accounts(&state).await.unwrap().as_array().unwrap().is_empty(),
+        "our own consumer key never becomes a sellable account"
+    );
+}
+
 /// An account that reaches its daily cap must stop being offered, while its
 /// sibling keeps serving (auto-stop is per account, not per provider).
 #[tokio::test(flavor = "current_thread")]

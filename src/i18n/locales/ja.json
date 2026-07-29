@@ -17,7 +17,7 @@
   "dashboard": {
     "title": "ダッシュボード",
     "sub": "サブスクリプションの余剰枠を共有、またはマーケットから購入 — USDT で決済。",
-    "publishing": "販売状態",
+    "publishing": "販売",
     "online": "オンライン",
     "offline": "オフライン",
     "connecting": "接続中",
@@ -54,6 +54,11 @@
     "goConnect": "アカウントを接続"
   },
   "status": {
+    "starting": {
+      "label": "起動中",
+      "desc": "ローカルの Asale サービスに接続して状態を読み込んでいます。",
+      "hint": "通常は 1〜2 秒で完了します。"
+    },
     "daemonDown": {
       "label": "ローカルサービス停止",
       "desc": "ローカルの Asale サービス（asaled）が応答していません。",
@@ -139,6 +144,7 @@
     "scanning": "スキャン中…",
     "cliNone": "CLI の資格情報が見つかりませんでした。",
     "envWarning": "警告：環境変数 {{vars}} が設定されており、CLI の保存済み資格情報を上書きします。",
+    "cliSkippedBuying": "{{tools}} は asale 経由で購入中のため、そのローカルアカウントは販売に出されません。購入をオフにすると再び販売できます。",
     "connectVia": "ブラウザでログイン",
     "connectViaKey": "API キーで接続",
     "connectViaCode": "ブラウザでコードを確認",
@@ -244,8 +250,9 @@
     "depositWarnTitle": "{{network}} 上の USDT のみ",
     "depositWarnDesc": "{{network}} ネットワークで USDT を送ってください。他の通貨や、他のネットワーク上の USDT は届きません。",
     "qrAlt": "支払い用 QR コード",
-    "payAmountLabel": "金額（任意）",
+    "payAmountLabel": "金額",
     "payAmountAny": "金額を指定しない",
+    "payAmountCustom": "その他",
     "payAmountHintAny": "空欄のままにすると、ウォレット側で金額を入力します。",
     "payAmountHintSet": "対応ウォレットでは、読み取り後にこの金額が自動で入ります。",
     "payAmountHintBelowMin": "推奨最低額 {{amount}} USDT を下回っています — 少額の入金も反映されます。",
@@ -591,7 +598,9 @@
   },
   "common": {
     "copy": "コピー",
-    "copied": "コピーしました"
+    "copied": "コピーしました",
+    "networkError": "サーバーに接続できません。ネットワークを確認して再試行してください。",
+    "requestFailed": "リクエストに失敗しました。もう一度お試しください。"
   },
   "modelPicker": {
     "title": "モデルを選択",
@@ -610,5 +619,181 @@
     "remove": "削除",
     "choose": "モデルを選択…",
     "shown": "{{n}} 件"
+  },
+  "errors": {
+    "common": {
+      "internal": "サーバー側でエラーが発生しました。しばらくしてから再試行してください。",
+      "notFound": "見つかりませんでした。",
+      "rateLimited": "リクエストが多すぎます。少し待ってから再試行してください。"
+    },
+    "account": {
+      "banned": "このアカウントは停止されています。",
+      "blocked": "このアカウントは取引を制限されています。"
+    },
+    "auth": {
+      "badCredentials": "メールアドレスまたはパスワードが正しくありません。",
+      "weakCredentials": "メールアドレスを入力し、パスワードは 8 文字以上にしてください。",
+      "emailTaken": "このメールアドレスは既に登録されています。",
+      "emailUnverified": "メールアドレスがまだ確認されていません。",
+      "tokenRequired": "確認リンクにトークンがありません。",
+      "verifyInvalid": "この確認リンクは無効です。",
+      "verifyUsed": "この確認リンクは既に使用されています。",
+      "verifyExpired": "確認リンクの有効期限が切れました。再送信してください。",
+      "verifyStale": "この確認リンクは既に無効です。再送信してください。",
+      "missingBearer": "サインインしていません。サインインしてからお試しください。",
+      "invalidToken": "セッションの有効期限が切れました。再度サインインしてください。",
+      "deviceFieldsRequired": "デバイス ID とデバイス公開鍵が必要です。",
+      "web3AddressShape": "ウォレットアドレスは 0x で始まる 16 進数 40 文字で入力してください。",
+      "siweMessageTooLong": "署名メッセージが長すぎます。",
+      "siweNonceMissing": "署名メッセージに Nonce 行がありません。",
+      "siweNonceExpired": "この署名リクエストは存在しないか期限切れです。もう一度お試しください。",
+      "siweRejected": "ウォレット署名の検証に失敗しました：{{detail}}"
+    },
+    "field": {
+      "emailRequired": "メールアドレスを入力してください。",
+      "emailTooLong": "メールアドレスが長すぎます。",
+      "emailWhitespace": "メールアドレスにスペースや制御文字を含めることはできません。",
+      "emailNoAt": "メールアドレスには @ が必要です。",
+      "emailInvalid": "有効なメールアドレスではありません。",
+      "emailBadDomain": "メールアドレスのドメインが正しくありません。",
+      "regionInvalid": "国または地域を選択してください。"
+    },
+    "profile": {
+      "nameLength": "名前は 1〜64 文字で入力してください。",
+      "avatarUrlTooLong": "アバターの URL が長すぎます。",
+      "passwordTooShort": "パスワードは 8 文字以上にしてください。",
+      "wrongCurrentPassword": "現在のパスワードが正しくありません。",
+      "setPasswordBeforeUnlink": "最後のサインイン方法を解除する前にパスワードを設定してください。"
+    },
+    "apiKey": {
+      "missing": "API キーが送信されていません。",
+      "badPrefix": "API キーの形式が正しくありません。",
+      "unknown": "この API キーは登録されていません。",
+      "disabled": "この API キーは無効化されています。"
+    },
+    "gateway": {
+      "unknownDialect": "このエンドポイントは {{path}} へのリクエストに対応していません。"
+    },
+    "market": {
+      "noSupply": "現在 {{model}} を販売しているプロバイダーがいません。",
+      "modelNotTraded": "{{model}} はこのプラットフォームでは取引されていません。"
+    },
+    "wallet": {
+      "insufficientBalance": "残高が不足しています。",
+      "insufficientForBudget": "残高がこのリクエストの予算に足りません。",
+      "amountPositive": "金額は 0 より大きい値を入力してください。",
+      "amountTooLarge": "金額が大きすぎます。",
+      "unsupportedChain": "{{chain}} には対応していません。利用可能なネットワーク：{{supported}}。",
+      "invalidChainAddress": "有効な {{chain}} アドレスではありません。",
+      "withdrawBelowMin": "{{chain}} の最低出金額は {{min}} micro-USDT です。",
+      "withdrawFeeExceedsAmount": "出金手数料（{{fee}} micro-USDT）が金額を上回っています。",
+      "withdrawSingleLimit": "1 回あたりの出金上限を超えています。",
+      "withdrawDailyLimit": "1 日の出金上限を超えています。",
+      "withdrawNotWhitelisted": "この出金先アドレスはホワイトリストにありません。",
+      "depositUnprovisioned": "入金機能は現在利用できません。しばらくしてからお試しください。",
+      "depositMisconfigured": "入金機能に設定の問題があります。サポートにお問い合わせください。",
+      "depositPoolEmpty": "利用できる入金アドレスがありません。しばらくしてからお試しください。"
+    },
+    "dispute": {
+      "fieldsRequired": "タスクと理由の両方が必要です。",
+      "reasonTooLong": "理由は {{max}} 文字以内で入力してください。",
+      "notOwner": "このタスクはあなたのアカウントのものではありません。",
+      "notTerminal": "このタスクはまだ精算されていないため、異議申立てできません。",
+      "windowExpired": "異議申立て期間（{{hours}} 時間）を過ぎています。",
+      "alreadyFiled": "このタスクには既に異議申立てがあります。"
+    },
+    "publishConfig": {
+      "reserveFloorRange": "予約枠は 0〜{{max}} の範囲で指定してください。",
+      "maxRpmRange": "レート上限は 0〜{{max}} の範囲で指定してください。",
+      "minPriceRange": "最低価格は 0〜{{max}} の範囲で指定してください。",
+      "listTooLong": "{{field}} は最大 {{max}} 件までです。",
+      "listEntryLength": "{{field}} の各項目は 1〜{{max}} 文字にしてください。"
+    },
+    "oauth": {
+      "unknownProvider": "{{provider}} はサポートされていないサインイン方法です。",
+      "notConfigured": "このサイトでは {{provider}} サインインが有効になっていません。",
+      "halfConfigured": "{{provider}} サインインの設定が未完了です：{{missing}} が空です。",
+      "badRedirectUri": "サインインのコールバック URL が無効です：{{detail}}",
+      "codeRequired": "サインインのコールバックに認可コードがありません。",
+      "codeRejected": "{{provider}} がサインインを拒否しました：{{detail}}",
+      "noVerifiedEmail": "この {{provider}} アカウントには確認済みのメールアドレスがありません。",
+      "identityLinkedElsewhere": "このアカウントは既に別の Asale ユーザーに紐付けられています。",
+      "upstream": "{{provider}} に接続できませんでした。もう一度お試しください。",
+      "upstreamIncomplete": "{{provider}} から返された情報が不完全です。もう一度お試しください。",
+      "unknownFlow": "そのサインインは進行中ではありません。もう一度お試しください。",
+      "exchangeFailed": "サインインを完了できませんでした：{{detail}}",
+      "timedOut": "サインインがタイムアウトしました。もう一度お試しください。"
+    },
+    "upstream": {
+      "provider": "モデルのアップストリームがエラーを返しました（{{code}}）：{{detail}}",
+      "badStream": "{{dialect}} のレスポンスストリームが不正です。",
+      "streamFailed": "{{provider}} が応答を途中で終了しました：{{detail}}"
+    },
+    "catalog": {
+      "fetchFailed": "上流のモデルカタログを取得できませんでした：{{detail}}",
+      "malformed": "上流のモデルカタログを解析できませんでした：{{detail}}"
+    },
+    "admin": {
+      "roleRequired": "この操作には管理者権限が必要です。",
+      "amountNonZero": "調整額を 0 にすることはできません。",
+      "adjustLimit": "調整額が 1 回あたりの上限 {{max}} micro-USDT を超えています。",
+      "reasonRequired": "理由を入力してください。",
+      "reasonTooLong": "理由は {{max}} 文字以内で入力してください。",
+      "withdrawalNotInReview": "出金 {{id}} は審査待ちではありません（ステータス {{status}}）。",
+      "withdrawalNotRejectable": "出金 {{id}} はステータス {{status}} では却下できません。",
+      "tooManyRules": "ルールが多すぎます（最大 {{max}} 件）。",
+      "modelAndRefPrice": "モデルは必須で、参考価格は 0 以上にしてください。",
+      "unknownTokenType": "不明なトークン種別：{{value}}。",
+      "marketPriceNonNegative": "市場価格は 0 以上にしてください。",
+      "modelIdRequired": "model_id を入力してください。",
+      "modelIdsRequired": "モデルを 1 つ以上選択してください。",
+      "refPricesNonNegative": "参考価格は 0 以上にしてください。",
+      "modelExists": "モデル {{model}} は既に存在します。",
+      "unknownAction": "不明な操作：{{value}}。",
+      "noUpstreamIds": "選択したモデルは上流に存在しません。",
+      "disputeActionInvalid": "操作は返金または却下のいずれかにしてください。",
+      "disputeNotPending": "異議 {{id}} は保留中ではありません（ステータス {{status}}）。",
+      "noRefundableSettlement": "タスク {{task}} に返金可能な精算がありません。",
+      "disputeRaceLost": "異議 {{id}} は別の担当者が処理済みです。"
+    },
+    "daemon": {
+      "unreachable": "Asale サービスが起動していません。アプリを再起動するか asaled を確認してください。",
+      "unauthorized": "このページは Asale サービスの認証を受けていません。サービス起動時に表示されたリンクから開き直してください。",
+      "unknownCommand": "サポートされていない操作です：{{command}}。アプリとサービスのバージョンが異なる可能性があります。",
+      "badArguments": "リクエストのパラメータが不正です：{{detail}}"
+    },
+    "session": {
+      "expired": "セッションの有効期限が切れました。再度サインインしてください。",
+      "signInToBuy": "トークンを購入する前にサインインしてください。",
+      "notSignedIn": "サインインしていません。サインインしてからお試しください。"
+    },
+    "tool": {
+      "unknown": "サポートされていないツールです：{{tool}}。Claude / Codex / Gemini から選んでください。"
+    },
+    "cli": {
+      "unknownProvider": "サポートされていない CLI です。Claude / Codex / Gemini から選んでください。",
+      "noCredentials": "このマシンに {{provider}} CLI のサインイン情報が見つかりません。",
+      "notAnApiKeyProvider": "このプロバイダーはサインインで接続します。API キーは従量課金のプラットフォーム API（kimi_api、xai_api）専用です。",
+      "apiKeyRejected": "{{provider}} がこの API キーを拒否しました。全文をコピーしたか、失効していないか確認してください。",
+      "apiKeyEmpty": "API キーを入力してください。",
+      "apiKeyHasWhitespace": "API キーにスペースが含まれています。コマンド全体ではなくキーだけを貼り付けてください。"
+    },
+    "settings": {
+      "unknownProxyMode": "不明なプロキシモード：{{value}}。",
+      "badConsumeMode": "モードは direct / market / auto のいずれかにしてください。"
+    },
+    "usage": {
+      "regionBlocked": "このリージョンからのリクエストはプロバイダーにブロックされています。設定で上流プロキシを構成してください。",
+      "upstreamStatus": "プロバイダーが HTTP {{status}} を返しました。{{detail}}",
+      "upstreamUnreachable": "プロバイダーの使用量 API に接続できませんでした：{{detail}}",
+      "unreadable": "使用量のレスポンスを解析できませんでした：{{detail}}",
+      "noWindows": "プロバイダーからレート制限のウィンドウが返されませんでした。"
+    },
+    "deviceFlow": {
+      "timedOut": "{{provider}} のサインインがタイムアウトしました。承認される前にコードの有効期限が切れました。",
+      "expired": "{{provider}} のコードは承認される前に期限切れになりました。",
+      "declined": "{{provider}} のサインインが拒否されました。",
+      "unsupportedProvider": "このプロバイダーはデバイスコードによるサインインに対応していません（Kimi と Grok のみ）。"
+    }
   }
 }

@@ -286,25 +286,38 @@ struct RestConfigSource {
 #[async_trait]
 impl ConfigSource for RestConfigSource {
     async fn ws_config(&self) -> anyhow::Result<WsConfig> {
-        let access = keychain::get("access_token")?.ok_or_else(|| anyhow::anyhow!("not signed in"))?;
+        let mut access = keychain::get("access_token")?.ok_or_else(|| anyhow::anyhow!("not signed in"))?;
         let http = asale_client_core::http::plain();
-        let resp = http
-            .post(format!("{}/api/v1/devices", self.server_api_base))
-            .header("authorization", format!("Bearer {access}"))
-            .json(&json!({"device_id": self.device_id, "device_pubkey": self.device_pubkey}))
-            .send()
-            .await?;
-        let v: serde_json::Value = resp.json().await?;
-        let device_token = v
-            .get("device_token")
-            .and_then(|t| t.as_str())
-            .ok_or_else(|| anyhow::anyhow!("device registration failed: {v}"))?
-            .to_string();
-        Ok(WsConfig {
-            gateway_ws_url: self.gateway_ws_url.clone(),
-            device_id: self.device_id.clone(),
-            device_token,
-        })
+        // Same 401-then-refresh-once shape as `commands::server_client::authed`.
+        // Without it an access token that merely expired parks the reconnect
+        // loop on a dead token: it never refreshes, so it retries the same
+        // rejected credential until the app restarts.
+        for attempt in 0..2 {
+            let resp = http
+                .post(format!("{}/api/v1/devices", self.server_api_base))
+                .header("authorization", format!("Bearer {access}"))
+                .json(&json!({"device_id": self.device_id, "device_pubkey": self.device_pubkey}))
+                .send()
+                .await?;
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
+                access = crate::commands::server_client::refresh_access_token(&self.server_api_base, &http)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("device registration failed: {e}"))?;
+                continue;
+            }
+            let v: serde_json::Value = resp.json().await?;
+            let device_token = v
+                .get("device_token")
+                .and_then(|t| t.as_str())
+                .ok_or_else(|| anyhow::anyhow!("device registration failed: {v}"))?
+                .to_string();
+            return Ok(WsConfig {
+                gateway_ws_url: self.gateway_ws_url.clone(),
+                device_id: self.device_id.clone(),
+                device_token,
+            });
+        }
+        unreachable!("ws_config loop always returns")
     }
 }
 
@@ -597,8 +610,22 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
         }
     };
     let catalog = load_catalog(store).await;
+    // An account synced out of a local CLI's own directory stops being this
+    // device's to sell while that CLI is buying through the market. Dropped from
+    // the pool rather than merely switched off, because the pool is also what
+    // `list_accounts` renders: the sell page must not show an account it is not
+    // offering. asale's own logins (`origin = oauth`) and pasted keys are
+    // unaffected — they are not the local CLI's credential.
+    let buying = crate::tool_config::buying_set(
+        store,
+        tools.iter().filter(|t| t.origin.as_deref() == Some("import")).map(|t| t.provider.as_str()),
+    )
+    .await;
     let mut fresh = Vec::new();
     for tool in &tools {
+        if tool.origin.as_deref() == Some("import") && buying.contains(&tool.provider) {
+            continue;
+        }
         let plan = resolve_plan(store, tool).await;
         let expires_at: Option<i64> = store
             .get_setting(&exp_key(&tool.provider, &tool.account_id))

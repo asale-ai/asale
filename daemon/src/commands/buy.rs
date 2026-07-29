@@ -8,6 +8,7 @@ use crate::tool_config;
 use serde_json::{json, Value};
 use super::server_client::{authed, resp_json};
 use super::{R, err, now_secs};
+use crate::cmd_err;
 
 /// The models a tool is allowed to buy. Empty = no restriction. Takes the store
 /// rather than the whole app state so the local proxy can call it too.
@@ -19,6 +20,7 @@ pub async fn buy_models(store: &asale_client_core::store::LocalStore, tool: &str
 pub async fn buy_is_enabled(store: &asale_client_core::store::LocalStore, tool: &str) -> bool {
     store.buy_tool(tool).await.map(|r| r.enabled).unwrap_or(false)
 }
+
 
 /// Carry a pre-existing Claude Code subscription (the older Claude-only
 /// `subscribe_claude` flow) over to the per-tool buy switch. Without this an
@@ -78,7 +80,7 @@ pub async fn migrate_legacy_subscription(state: &AppState) -> R<bool> {
 /// switch is on, which models it may buy, and whether its config actually points
 /// at the asale proxy right now.
 pub async fn buy_tools(state: &AppState) -> R<Value> {
-    let proxy_base = format!("http://127.0.0.1:{}", state.cfg.proxy_port);
+    let proxy_base = tool_config::proxy_base();
     // One scan for all three tools — each hits the filesystem/keychain.
     let discovered = tokio::task::spawn_blocking(cli_scan::scan).await.map_err(err)?;
 
@@ -143,7 +145,11 @@ pub async fn set_buy_tool(
     models: Option<Vec<String>>,
 ) -> R<Value> {
     if !tool_config::known(&tool) {
-        return Err(format!("unknown tool: {tool} (claude | codex | gemini)"));
+        return Err(cmd_err!(
+            "errors.tool.unknown",
+            format!("unknown tool: {tool} (claude | codex | gemini)"),
+            tool = tool.as_str()
+        ));
     }
     // Model selection is stored whether or not the switch changes, so the user
     // can edit it while buying is already on.
@@ -158,10 +164,10 @@ pub async fn set_buy_tool(
     if enabled {
         // Verify login state (flow §3) before rewriting anything on disk.
         if keychain::get("access_token").map_err(err)?.is_none() {
-            return Err("sign in before buying".to_string());
+            return Err(cmd_err!("errors.session.signInToBuy", "sign in before buying"));
         }
         let key = ensure_consumer_key(state).await?;
-        let base = format!("http://127.0.0.1:{}", state.cfg.proxy_port);
+        let base = tool_config::proxy_base();
 
         // Editing the model selection of a tool that is already buying
         // re-applies its config, so the tool picks the new model up.
@@ -192,6 +198,11 @@ pub async fn set_buy_tool(
             .map_err(err)?;
         // Route the proxy through the market so requests reach the asale gateway.
         state.store.set_setting("consume_mode", "market").await.map_err(err)?;
+
+        // This tool's synced account stops being sellable the moment it starts
+        // buying. Re-derived here rather than at the next scan, so the pool,
+        // the manifest directory and the market session all drop it now.
+        super::sell::accounts_changed(state).await;
 
         Ok(json!({
             "tool": tool,
@@ -228,7 +239,21 @@ pub async fn set_buy_tool(
             .await
             .map_err(err)?;
 
-        Ok(json!({ "tool": tool, "enabled": false, "restored": true }))
+        // The tool is back on its own credential, so that credential is this
+        // device's to sell again — with the switch and cap it was hidden with,
+        // since the account row was never removed. Import too, in case the
+        // switch went on before this tool was ever scanned. Best-effort: a tool
+        // with no local login simply has nothing to bring back.
+        let accounts = match super::accounts::import_from_cli(state, tool.clone()).await {
+            Ok(v) => v["accounts"].clone(),
+            Err(e) => {
+                tracing::debug!(tool, "nothing to import after buying stopped: {e}");
+                super::sell::accounts_changed(state).await;
+                json!([])
+            }
+        };
+
+        Ok(json!({ "tool": tool, "enabled": false, "restored": true, "accounts": accounts }))
     }
 }
 
@@ -266,7 +291,7 @@ pub(crate) async fn mint_consumer_key(state: &AppState) -> R<String> {
 /// the key is regenerated, which reads as "asale broke" rather than "the key
 /// you replaced is the key they were holding".
 pub async fn refresh_buy_tool_keys(state: &AppState, key: &str) -> R<Vec<String>> {
-    let base = format!("http://127.0.0.1:{}", state.cfg.proxy_port);
+    let base = tool_config::proxy_base();
     let mut refreshed = Vec::new();
     for tool in tool_config::TOOLS {
         let buy = state.store.buy_tool(tool).await.map_err(err)?;

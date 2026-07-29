@@ -16,6 +16,60 @@ use asale_protocol::ids::Provider;
 use serde::Deserialize;
 use std::time::Duration;
 
+/// How a device flow ended, when it ended for a reason the *user* caused or can
+/// act on — as opposed to a protocol fault, which stays raw `anyhow` prose.
+///
+/// These three are what someone sees after walking away from the browser tab or
+/// pressing "Deny", so they have to be readable in the app's language. The
+/// daemon cannot translate them either (it has no locale), so each one names a
+/// message-catalog key that the frontend resolves; the `Display` text is the
+/// English fallback. Carried through `anyhow` and recovered with
+/// `downcast_ref`, which keeps every intermediate `?` unchanged.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeviceFlowFailure {
+    /// The user never approved before the code's lifetime ran out.
+    TimedOut { provider: String },
+    /// The provider says the code expired.
+    Expired { provider: String },
+    /// The user pressed "Deny".
+    Declined { provider: String },
+}
+
+impl DeviceFlowFailure {
+    /// Catalog key the frontends translate this with.
+    pub fn key(&self) -> &'static str {
+        match self {
+            DeviceFlowFailure::TimedOut { .. } => "errors.deviceFlow.timedOut",
+            DeviceFlowFailure::Expired { .. } => "errors.deviceFlow.expired",
+            DeviceFlowFailure::Declined { .. } => "errors.deviceFlow.declined",
+        }
+    }
+    pub fn provider(&self) -> &str {
+        match self {
+            DeviceFlowFailure::TimedOut { provider }
+            | DeviceFlowFailure::Expired { provider }
+            | DeviceFlowFailure::Declined { provider } => provider,
+        }
+    }
+}
+
+impl std::fmt::Display for DeviceFlowFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let p = self.provider();
+        match self {
+            DeviceFlowFailure::TimedOut { .. } => {
+                write!(f, "{p} authorization timed out — the code expired before it was approved")
+            }
+            DeviceFlowFailure::Expired { .. } => {
+                write!(f, "{p} authorization code expired before it was approved")
+            }
+            DeviceFlowFailure::Declined { .. } => write!(f, "{p} authorization was declined"),
+        }
+    }
+}
+
+impl std::error::Error for DeviceFlowFailure {}
+
 // ── Kimi Code ───────────────────────────────────────────────────────────────
 
 pub const KIMI_CLIENT_ID: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
@@ -224,7 +278,7 @@ pub async fn poll(provider: Provider, code: &DeviceCode) -> anyhow::Result<Devic
     loop {
         tokio::time::sleep(interval).await;
         if started.elapsed() >= deadline {
-            anyhow::bail!("{provider} authorization timed out — the code expired before it was approved");
+            return Err(DeviceFlowFailure::TimedOut { provider: provider.to_string() }.into());
         }
         match exchange(provider, &code.token_url, client_id, &code.device_code).await? {
             Poll::Ready(t) => return Ok(t),
@@ -263,8 +317,12 @@ async fn exchange(provider: Provider, token_url: &str, client_id: &str, device_c
         "" => {}
         "authorization_pending" => return Ok(Poll::Pending),
         "slow_down" => return Ok(Poll::SlowDown),
-        "expired_token" => anyhow::bail!("{provider} authorization code expired before it was approved"),
-        "access_denied" => anyhow::bail!("{provider} authorization was declined"),
+        "expired_token" => {
+            return Err(DeviceFlowFailure::Expired { provider: provider.to_string() }.into())
+        }
+        "access_denied" => {
+            return Err(DeviceFlowFailure::Declined { provider: provider.to_string() }.into())
+        }
         other => anyhow::bail!("{provider} authorization failed ({other}): {}", t.error_description),
     }
     if t.access_token.is_empty() {

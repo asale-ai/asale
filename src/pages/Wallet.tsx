@@ -11,6 +11,7 @@ import {
 } from "../lib";
 import { Card, Skeleton, useCopy, PageHead, IconAction, Empty } from "../ui";
 import { WalletDialog, type WalletMode } from "../components/WalletDialog";
+import { errText } from "../errors";
 import {
   IconWallet, IconRefresh, IconDownload, IconArrowRight,
   IconShield, IconCheck, IconCopy, IconRecords,
@@ -63,7 +64,7 @@ export function WalletPage() {
     if (manual) setRefreshing(true);
     Promise.allSettled([
       invoke<Wallet>("wallet_overview").then((v) => { setW(v); setErr(""); })
-        .catch((e) => setErr(String((e as Error).message))),
+        .catch((e) => setErr(errText(e))),
       // History is best-effort: an older server without the endpoint must not
       // take the balance view down with it.
       invoke<WalletHistory>("wallet_history").then(setHist).catch(() => {}),

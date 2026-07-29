@@ -4,7 +4,8 @@
 //!
 //!   cargo run --example limits_probe
 //!
-//! Reads the same `~/.asale/asale.db` + `~/.asale/secrets.enc` the app uses; it
+//! Reads the same `asale.db` + `secrets.enc` the app uses (`$ASALE_DATA_DIR`,
+//! `~/.asale` by default); it
 //! never writes anything.
 
 use asale_client_core::store::LocalStore;
@@ -13,8 +14,9 @@ use serde_json::Value;
 
 #[tokio::main]
 async fn main() {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let db = format!("{home}/.asale/asale.db");
+    // Follow $ASALE_DATA_DIR like the daemon does, so a probe run next to
+    // `pnpm dev:app` reads that app's store instead of the release build's.
+    let db = format!("{}/asale.db", asale_daemon::state::data_dir());
     let store = LocalStore::open(&db).await.expect("open store");
     let tools = store.list_tools().await.expect("list tools");
     println!("connected accounts: {}", tools.len());

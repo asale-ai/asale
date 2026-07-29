@@ -18,7 +18,11 @@ interface View { tone: Tone; key: string; pulse?: boolean }
 
 /** Collapse the raw status into the single state the user is actually in.
  *  Order is severity, not sequence: a signed-out client's link state is noise. */
-function resolve(down: boolean, s: ClientStatus | null): View {
+function resolve(ready: boolean, down: boolean, s: ClientStatus | null): View {
+  // Nothing has answered yet. This is the normal first second of a launch (the
+  // shell boots its daemon while the webview paints), so it must not read as a
+  // fault — "daemon down" here would be a false alarm on every start.
+  if (!ready) return { tone: "idle", key: "starting", pulse: true };
   if (down || !s) return { tone: "bad", key: "daemonDown" };
   if (!s.signed_in) return { tone: "warn", key: "signedOut" };
   switch (s.publish_state) {
@@ -53,6 +57,9 @@ export function StatusWidget() {
   const { t } = useTranslation();
   const [status, setStatus] = useState<ClientStatus | null>(null);
   const [down, setDown] = useState(false);
+  /** False until the daemon has been heard from at all — drives the neutral
+   *  "starting" chip instead of a red one. */
+  const [ready, setReady] = useState(false);
   // `pinned` = opened by click, so the details survive moving the pointer into
   // them (copying a device id, reading a long server URL).
   const [hovering, setHovering] = useState(false);
@@ -61,13 +68,45 @@ export function StatusWidget() {
 
   useEffect(() => {
     let alive = true;
-    const poll = () =>
+    let timer: ReturnType<typeof setTimeout>;
+    // A single missed poll is not an outage — the daemon restarts itself on
+    // update and a request can simply time out. Only a run of them is.
+    let fails = 0;
+    let settled = false;
+    // Launch grace, matching the app's own boot gate (`waitForDaemon`): a cold
+    // start has the shell bringing the daemon up (runtime, database, pending
+    // migrations) while this is already polling. Going red inside that window
+    // would contradict the rest of the screen, which is still loading.
+    const graceUntil = Date.now() + 4000;
+    // Fast while the answer is still unknown (boot, or a run of failures on the
+    // way to declaring an outage); the resting cadence once it is known.
+    let isDown = false;   // the local mirror of `down`; `down` itself is stale in here
+    const schedule = () => {
+      const delay = settled && fails === 0 ? 5000   // healthy, resting cadence
+        : isDown ? 2500                             // known outage, watch for the return
+        : 600;                                      // answer still unknown
+      timer = setTimeout(run, delay);
+    };
+    const run = () =>
       invoke<ClientStatus>("client_status")
-        .then((s) => { if (alive) { setStatus(s); setDown(false); } })
-        .catch(() => { if (alive) setDown(true); });
-    poll();
-    const id = setInterval(poll, 5000);
-    return () => { alive = false; clearInterval(id); };
+        .then((s) => {
+          if (!alive) return;
+          fails = 0; settled = true; isDown = false;
+          setStatus(s); setDown(false); setReady(true);
+        })
+        .catch(() => {
+          if (!alive) return;
+          // `settled` deliberately stays false through the grace window: while
+          // it is open the poll keeps its fast boot cadence, so the moment the
+          // daemon finishes coming up the chip turns green.
+          if (++fails >= 3 && Date.now() >= graceUntil) {
+            settled = true; isDown = true;
+            setDown(true); setReady(true);
+          }
+        })
+        .finally(() => { if (alive) schedule(); });
+    run();
+    return () => { alive = false; clearTimeout(timer); };
   }, []);
 
   useEffect(() => {
@@ -84,7 +123,7 @@ export function StatusWidget() {
     };
   }, [pinned]);
 
-  const v = resolve(down, status);
+  const v = resolve(ready, down, status);
   const open = pinned || hovering;
   const s = status;
 

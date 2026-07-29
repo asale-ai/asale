@@ -74,6 +74,40 @@ export function SkeletonRows({ rows = 2 }: { rows?: number }) {
   );
 }
 
+/* The whole content column as placeholders, shown while the app is still
+   reaching its daemon and no page has been mounted yet.
+   Deliberately shaped like the page that follows (heading, a row of stat
+   tiles, two cards) so the swap to real content shifts nothing. */
+export function PageSkeleton() {
+  return (
+    <div className="page-skeleton" aria-busy="true">
+      <div className="page-head">
+        <div className="ph-text" style={{ flex: 1 }}>
+          <Skeleton w={168} h={26} r={9} style={{ marginBottom: 10 }} />
+          <Skeleton w={260} h={13} />
+        </div>
+      </div>
+      <div className="stat-grid">
+        {[0, 1, 2].map((i) => (
+          <div key={i} className="stat-tile">
+            <Skeleton w={86} h={12} style={{ marginBottom: 14 }} />
+            <Skeleton w={120} h={26} r={9} style={{ marginBottom: 10 }} />
+            <Skeleton w={70} h={11} />
+          </div>
+        ))}
+      </div>
+      {[0, 1].map((i) => (
+        <div key={i} className="card">
+          <div className="card-head">
+            <Skeleton w={132} h={15} />
+          </div>
+          <SkeletonRows rows={2} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /* Identity mark for a provider / CLI (Claude, Codex, Gemini …).
    Deliberately monochrome and shared by every page: a screenful of vendor
    colours is the loudest thing on the screen and says nothing the label next
