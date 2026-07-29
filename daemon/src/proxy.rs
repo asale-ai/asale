@@ -155,22 +155,19 @@ async fn buy_gate(st: &ProxyState, path: &str, model: &str) -> BuyDecision {
     }
 
     if !allowed.is_empty() && !model.is_empty() && !in_buy_list(model) {
-        // Codex is not only what the user typed into: the ChatGPT app runs
-        // thread titling, auto-review and compaction against model ids baked
-        // into its own catalog (`gpt-5.6-luna` and friends) that no picker or
-        // config key can redirect. Refusing those breaks app features over a
-        // request the user never made, so serve them with the model they did
-        // buy — the same one `config.toml`'s `model` points at.
-        if tool == "codex" {
-            return BuyDecision::Substitute(allowed[0].clone());
-        }
-        return BuyDecision::Refuse(
-            (
-                StatusCode::FORBIDDEN,
-                format!("model '{model}' is not in the buy list for {tool} (allowed: {})", allowed.join(", ")),
-            )
-                .into_response(),
-        );
+        // No tool can be told to ask for the model that was bought. Their
+        // pickers only offer their own vendor's catalog (Claude Code lists
+        // Anthropic ids, Codex OpenAI ones), and on top of that both run
+        // app-internal work — thread titling, auto-review, compaction — against
+        // ids baked into the binary (`gpt-5.6-luna` and friends) that no picker
+        // or config key can redirect. Meanwhile the buy picker offers the whole
+        // market catalog to every tool, so "Claude Code + gpt-5.1" is a
+        // selection the user is invited to make and the caller can never
+        // satisfy. Refusing would break the tool over a request it never chose
+        // to send; serve everything with the model that was actually bought
+        // instead — the gateway translates dialects (spec §5), so a Claude Code
+        // session runs fine on a gpt model.
+        return BuyDecision::Substitute(allowed[0].clone());
     }
     BuyDecision::Pass
 }
@@ -647,7 +644,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_outside_the_buy_list_is_refused_per_tool() {
+    async fn a_selected_model_passes_the_gate_untouched() {
         let st = state(Some("sk-asale-test")).await;
         // Claude Code may only buy haiku; Gemini's list stays empty (= any).
         st.store
@@ -656,15 +653,28 @@ mod tests {
             .unwrap();
         let port = serve(st).await;
 
-        let resp = post_message(port, "claude-opus-4-1").await;
-        assert_eq!(resp.status(), 403, "model not in this tool's buy list");
-        let body = resp.text().await.unwrap();
-        assert!(body.contains("claude-3-5-haiku-latest"), "error names the allowed models");
-
         // A model that *is* selected passes the gate and reaches routing (502:
         // the market target is unreachable in tests).
         let resp = post_message(port, "claude-3-5-haiku-latest").await;
         assert_eq!(resp.status(), 502, "selected model passes the gate");
+    }
+
+    #[tokio::test]
+    async fn a_model_the_tool_cannot_be_asked_for_is_relabelled_not_refused() {
+        // Claude Code's picker only lists Anthropic ids, so buying gpt-5.1 for
+        // it means *every* call — the ones the user typed and the background
+        // ones alike — names a model outside the list. They must reach the
+        // market as the model that was bought; the gateway does the dialect
+        // translation from there.
+        let (addr, rx) = capturing_gateway().await;
+        let mut st = state(Some("sk-asale-test")).await;
+        st.server_api_base = format!("http://{addr}");
+        st.store.set_buy_tool("claude", None, Some(&["gpt-5.1".into()]), None, None).await.unwrap();
+        let port = serve(st).await;
+
+        let resp = post_message(port, "claude-opus-5").await;
+        assert_eq!(resp.status(), 200, "served, not 403'd");
+        assert_eq!(captured_body(rx.await.unwrap())["model"], "gpt-5.1", "relabelled to the bought model");
     }
 
     #[test]
@@ -704,9 +714,22 @@ mod tests {
 
         let resp = post_message(port, "claude-fable-5-e2e-1784891711622250000").await;
         assert_eq!(resp.status(), 502, "a release id of the selected family passes the gate");
+    }
+
+    #[tokio::test]
+    async fn another_family_is_relabelled_to_the_selection() {
+        // The flip side of the test above: a stamped id from a family the user
+        // did *not* select must not be mistaken for the selected one — it is
+        // served as the selected model instead of passing through untouched.
+        let (addr, rx) = capturing_gateway().await;
+        let mut st = state(Some("sk-asale-test")).await;
+        st.server_api_base = format!("http://{addr}");
+        st.store.set_buy_tool("claude", None, Some(&["claude-fable-5".into()]), None, None).await.unwrap();
+        let port = serve(st).await;
 
         let resp = post_message(port, "claude-opus-4-8-20260101").await;
-        assert_eq!(resp.status(), 403, "another family is still refused");
+        assert_eq!(resp.status(), 200);
+        assert_eq!(captured_body(rx.await.unwrap())["model"], "claude-fable-5", "served as the bought family");
     }
 
     #[tokio::test]

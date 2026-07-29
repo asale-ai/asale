@@ -71,7 +71,14 @@ pub struct OAuthProvider {
     pub client_id: String,
     pub client_secret: Option<String>,
     pub scope: &'static str,
-    /// Claude adds `code=true` to the authorize query (matches the CLI flow).
+    /// Loopback callback this client is registered with, as `(port, path)`.
+    /// `None` means the provider accepts any loopback port, and we bind a
+    /// random one. `Some` means it does not: the redirect_uri has to match the
+    /// vendor CLI's own listener byte for byte.
+    pub fixed_callback: Option<(u16, &'static str)>,
+    /// Extra authorize-query parameters the vendor's own CLI sends.
+    pub extra_authorize_params: &'static [(&'static str, &'static str)],
+    /// Anthropic's token endpoint takes a JSON body instead of a form post.
     pub anthropic_style: bool,
 }
 
@@ -85,6 +92,9 @@ pub fn provider(name: &str) -> Option<OAuthProvider> {
             client_id: env_or("ASALE_OAUTH_CLIENT_ID_CLAUDE", CLAUDE_CLIENT_ID),
             client_secret: None,
             scope: "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
+            fixed_callback: None,
+            // The Claude CLI flow requests an authorization code explicitly.
+            extra_authorize_params: &[("code", "true")],
             anthropic_style: true,
         },
         "codex" => OAuthProvider {
@@ -94,6 +104,23 @@ pub fn provider(name: &str) -> Option<OAuthProvider> {
             client_id: env_or("ASALE_OAUTH_CLIENT_ID_CODEX", CODEX_CLIENT_ID),
             client_secret: None,
             scope: "openid profile email offline_access",
+            // OpenAI registered exactly one redirect for this public client:
+            // the port and path Codex CLI itself listens on. A loopback URI
+            // that differs in either — a random port, or `/callback` — is
+            // refused before the login page even renders, with
+            // `authorize_hydra_invalid_request`. `localhost` is also part of
+            // the match: `127.0.0.1` is a different string, hence a different
+            // redirect_uri.
+            fixed_callback: Some((1455, "/auth/callback")),
+            // What Codex CLI sends alongside. `id_token_add_organizations`
+            // is what puts the ChatGPT account/plan claims in the id_token —
+            // without it the exchange returns a token we cannot attribute to
+            // an account.
+            extra_authorize_params: &[
+                ("id_token_add_organizations", "true"),
+                ("codex_cli_simplified_flow", "true"),
+                ("originator", "codex_cli"),
+            ],
             anthropic_style: false,
         },
         // Unconfigured Gemini credentials would only fail later at token exchange
@@ -106,6 +133,8 @@ pub fn provider(name: &str) -> Option<OAuthProvider> {
             client_id: gemini_client_id(),
             client_secret: Some(gemini_client_secret()),
             scope: "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email",
+            fixed_callback: None,
+            extra_authorize_params: &[],
             anthropic_style: false,
         },
         _ => return None,
@@ -137,9 +166,24 @@ pub struct AuthCode {
 /// Start a localhost callback listener and return the authorize URL to open.
 /// The returned future resolves once the browser redirects back with a code.
 pub async fn begin(p: &OAuthProvider) -> anyhow::Result<(String, AuthCodeFuture)> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let port = listener.local_addr()?.port();
-    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+    let (listener, redirect_uri) = match p.fixed_callback {
+        Some((port, path)) => {
+            // The port is not ours to choose, so it can genuinely be taken —
+            // most often by the vendor's own CLI sitting in its login flow.
+            let l = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "callback port {port} is in use — close any running `{} login` and try again ({e})",
+                    p.name
+                )
+            })?;
+            (l, format!("http://localhost:{port}{path}"))
+        }
+        None => {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let port = l.local_addr()?.port();
+            (l, format!("http://127.0.0.1:{port}/callback"))
+        }
+    };
     let pkce = gen_pkce();
     let state = uuid::Uuid::new_v4().to_string();
 
@@ -152,9 +196,8 @@ pub async fn begin(p: &OAuthProvider) -> anyhow::Result<(String, AuthCodeFuture)
         pkce.challenge,
         state,
     );
-    if p.anthropic_style {
-        // The Claude CLI flow requests an authorization code explicitly.
-        url.push_str("&code=true");
+    for (k, v) in p.extra_authorize_params {
+        url.push_str(&format!("&{}={}", urlencode(k), urlencode(v)));
     }
 
     let (tx, rx) = oneshot::channel::<String>();
@@ -162,20 +205,28 @@ pub async fn begin(p: &OAuthProvider) -> anyhow::Result<(String, AuthCodeFuture)
     let redirect2 = redirect_uri.clone();
     let verifier = pkce.verifier.clone();
 
-    // Minimal callback server: capture ?code= and close.
+    // Minimal callback server: capture ?code= and close. It keeps accepting
+    // until a request actually carries a code — a browser will happily spend
+    // the first connection on a favicon or a probe, and taking that one as
+    // "the callback" would fail the login with an empty code.
     tokio::spawn(async move {
-        if let Ok((mut sock, _)) = listener.accept().await {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        while let Ok((mut sock, _)) = listener.accept().await {
             let mut buf = [0u8; 4096];
             let n = sock.read(&mut buf).await.unwrap_or(0);
             let req = String::from_utf8_lossy(&buf[..n]);
             let code = extract_query(&req, "code");
+            if code.is_empty() {
+                let _ = sock.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").await;
+                continue;
+            }
             let body = "<html><body style='font-family:sans-serif'>asale: authorization received. You can close this window.</body></html>";
             let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
             let _ = sock.write_all(resp.as_bytes()).await;
             if let Some(sender) = tx.lock().unwrap().take() {
                 let _ = sender.send(code);
             }
+            break;
         }
     });
 
@@ -285,6 +336,16 @@ pub async fn exchange(p: &OAuthProvider, ac: &AuthCode) -> anyhow::Result<serde_
     };
     let v: serde_json::Value = resp.json().await?;
     Ok(v)
+}
+
+/// Read a claim out of an OIDC `id_token`, unverified. The token came straight
+/// off the provider's TLS token endpoint a moment ago and the value is only
+/// used to label the account locally, so there is nothing here to forge.
+/// Providers that return no `id_token` (Claude) simply yield `None`.
+pub fn id_token_claim(tokens: &serde_json::Value, claim: &str) -> Option<String> {
+    let payload = tokens["id_token"].as_str()?.split('.').nth(1)?;
+    let json: serde_json::Value = serde_json::from_slice(&B64URL.decode(payload).ok()?).ok()?;
+    Some(json.get(claim)?.as_str()?.to_string())
 }
 
 fn extract_query(req: &str, key: &str) -> String {

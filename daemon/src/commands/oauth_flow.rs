@@ -102,8 +102,10 @@ pub(crate) async fn finish_provider_oauth(
     let account_id = tokens["account"]["email"]
         .as_str()
         .or_else(|| tokens["email"].as_str())
-        .unwrap_or("account")
-        .to_string();
+        .map(str::to_string)
+        // Codex returns neither — the identity lives in the id_token claims.
+        .or_else(|| oauth::id_token_claim(&tokens, "email"))
+        .unwrap_or_else(|| "account".to_string());
     let plan = tokens["account"]["plan"].as_str().or_else(|| tokens["plan"].as_str());
 
     // Persist tokens in the secret store; the store only holds references (§3.4).
