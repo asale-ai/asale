@@ -47,6 +47,30 @@ cargo test -p asale-client-core
 > 用 `pnpm dev:app` 而不是 `pnpm tauri dev`：缺了 `ASALE_QUOTA_PUBKEY`，用戶端無法驗證
 > 閘道授權，賣出會永遠卡在「正在上線」。
 
+### 與正式版並存
+
+`dev:app` 已經把整套本機狀態挪到開發專用的一份，所以裝好的正式版可以同時開著：
+
+| | 正式版 | `pnpm dev:app` |
+|---|---|---|
+| 資料目錄 | `~/.asale` | `~/.asale-dev`（`ASALE_DATA_DIR`） |
+| daemon | `127.0.0.1:9700` | `127.0.0.1:9701`（`ASALE_BIND`） |
+| 本機代理 | `9787` | `9788`（`ASALE_PROXY_PORT`） |
+| bundle identifier | `com.asale.desktop` | `com.asale.desktop.dev`（`src-tauri/tauri.dev.conf.json`） |
+
+identifier 必須分開：單一實例外掛的鎖是 `/tmp/<identifier>_si.sock`，共用的話開發版一啟動就會自己結束、把正式版的視窗拉到前景。視窗狀態、開機自動啟動項也跟著 identifier 走，一併隔開了。
+
+每個變數都保留 `${VAR:-預設值}`，臨時換一套照樣能覆寫：
+
+```bash
+ASALE_DATA_DIR=~/.asale-staging ASALE_BIND=127.0.0.1:9702 pnpm dev:app
+```
+
+單獨跑 `pnpm dev`（瀏覽器除錯）時前端預設指向 `127.0.0.1:9700`，要接開發 daemon 得自己帶上
+`VITE_ASALE_DAEMON=http://127.0.0.1:9701 pnpm dev`；`dev:app` 會把這個變數傳給它啟動的 vite，無需額外設定。
+
+仍然共用的只有 CLI 工具自己的設定（`~/.claude`、`~/.codex/config.toml`）—— 訂閱和買入本來就是要改這些真實檔案，兩邊會互相覆寫，別同時操作。
+
 OAuth 用戶端憑證見 [`.env.example`](../.env.example)（Gemini 需要自備，Claude/Codex 有公開預設值）。
 
 ---

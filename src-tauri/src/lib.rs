@@ -78,8 +78,8 @@ pub fn run() {
             // token is in place before the first page script can issue an RPC.
             // A browser, which cannot read the file, uses the `?token=` URL the
             // daemon prints at startup instead.
+            let token = asale_daemon::load_or_create_token()?;
             {
-                let token = asale_daemon::load_or_create_token()?;
                 let script = format!(
                     "try{{localStorage.setItem('asale.daemon.token',{});}}catch(e){{}}",
                     serde_json::to_string(&token).unwrap_or_else(|_| "''".into())
@@ -97,7 +97,10 @@ pub fn run() {
                     .build()?;
             }
 
-            tray::setup(app.handle(), daemon_base.clone())?;
+            // The tray polls the same /rpc surface as the UI, so it needs the
+            // token too — without it every status read 401s and the entry is
+            // stuck reporting the service as offline.
+            tray::setup(app.handle(), daemon_base.clone(), token)?;
 
             // Deep link (asale://): macOS registers via the bundled Info.plist
             // (tauri.conf.json > plugins.deep-link); Windows/Linux register at

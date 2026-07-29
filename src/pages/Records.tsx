@@ -6,6 +6,7 @@ import {
 } from "../lib";
 import { Err, Skeleton, PageHead, IconAction, Empty } from "../ui";
 import { IconRefresh, IconRecords, IconArrowLeft, IconArrowRight, IconStore, IconChip } from "../icons";
+import { errText } from "../errors";
 
 type Role = "provider" | "consumer";
 const fmtTime = (secs: number) => (secs ? new Date(secs * 1000).toLocaleString() : "—");
@@ -24,7 +25,7 @@ export function Records() {
     if (manual) setRefreshing(true); else setLoading(true);
     invoke<RecordsPage>("records_query", { role: r, page: p })
       .then((d) => { setData(d); setErr(""); })
-      .catch((e) => setErr(String((e as Error).message)))
+      .catch((e) => setErr(errText(e)))
       .finally(() => { setLoading(false); setRefreshing(false); });
   }, []);
   useEffect(() => load(role, page), [role, page, load]);

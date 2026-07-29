@@ -11,7 +11,8 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use super::sell::{accounts_changed};
 use super::server_client::{finish_auth, resp_json};
-use super::{R, err, now_secs};
+use super::{R, err, err_keyed, now_secs};
+use crate::cmd_err;
 
 /// Record a flow result.
 pub(crate) async fn flow_set(state: &AppState, id: &str, status: FlowStatus) {
@@ -22,7 +23,7 @@ pub(crate) async fn flow_set(state: &AppState, id: &str, status: FlowStatus) {
 pub async fn oauth_result(state: &AppState, flow_id: String) -> R<Value> {
     let mut flows = state.oauth_flows.write().await;
     match flows.get(&flow_id) {
-        None => Err("unknown flow".to_string()),
+        None => Err(cmd_err!("errors.oauth.unknownFlow", "unknown flow")),
         Some(FlowStatus::Pending) => Ok(json!({ "status": "pending" })),
         Some(FlowStatus::Done(v)) => {
             let v = v.clone();
@@ -30,9 +31,13 @@ pub async fn oauth_result(state: &AppState, flow_id: String) -> R<Value> {
             Ok(json!({ "status": "ok", "result": v }))
         }
         Some(FlowStatus::Failed(e)) => {
-            let e = e.clone();
+            // Shaped like the RPC failure envelope (`error` + `key` + `params`)
+            // so the frontend translates a flow that failed asynchronously the
+            // same way it translates one that failed inline.
+            let mut out = e.to_json();
+            out["status"] = json!("error");
             flows.remove(&flow_id);
-            Ok(json!({ "status": "error", "error": e }))
+            Ok(out)
         }
     }
 }
@@ -97,7 +102,11 @@ pub(crate) async fn finish_provider_oauth(
     let tokens = oauth::exchange(p, &code).await.map_err(err)?;
     let access = tokens["access_token"].as_str().unwrap_or_default();
     if access.is_empty() {
-        return Err(format!("token exchange failed: {tokens}"));
+        return Err(cmd_err!(
+            "errors.oauth.exchangeFailed",
+            format!("token exchange failed: {tokens}"),
+            detail = tokens.to_string()
+        ));
     }
     let account_id = tokens["account"]["email"]
         .as_str()
@@ -145,9 +154,14 @@ pub(crate) async fn finish_provider_oauth(
 pub async fn oauth_device_login(state: &Arc<AppState>, provider: String, open_local: bool) -> R<Value> {
     let p = Provider::from_str_opt(&provider)
         .filter(|p| asale_protocol::ids::is_device_flow_provider(*p))
-        .ok_or("this provider does not use a device-code login (kimi | xai)")?;
+        .ok_or_else(|| {
+            cmd_err!(
+                "errors.deviceFlow.unsupportedProvider",
+                "this provider does not use a device-code login (kimi | xai)"
+            )
+        })?;
 
-    let code = device_flow::begin(p).await.map_err(err)?;
+    let code = device_flow::begin(p).await.map_err(err_keyed)?;
     let flow_id = uuid::Uuid::new_v4().simple().to_string();
     flow_set(state, &flow_id, FlowStatus::Pending).await;
 
@@ -191,7 +205,7 @@ async fn finish_device_login(
     provider: &str,
     code: device_flow::DeviceCode,
 ) -> R<Value> {
-    let tokens = device_flow::poll(p, &code).await.map_err(err)?;
+    let tokens = device_flow::poll(p, &code).await.map_err(err_keyed)?;
 
     // An OIDC id_token names the account; Kimi issues none, so those accounts
     // fall back to a digest of the refresh token — stable across refreshes and
@@ -252,11 +266,11 @@ pub async fn platform_oauth_login(
     region: String,
 ) -> R<Value> {
     if provider != "google" && provider != "github" {
-        return Err("unknown provider".to_string());
+        return Err(cmd_err!("errors.oauth.unknownProvider", "unknown provider", provider = provider.as_str()));
     }
     // Resolve the link token up front so we fail before opening the browser.
     let link_token = if link {
-        Some(keychain::get("access_token").map_err(err)?.ok_or("not logged in")?)
+        Some(keychain::get("access_token").map_err(err)?.ok_or_else(|| cmd_err!("errors.session.notSignedIn", "not logged in"))?)
     } else {
         None
     };

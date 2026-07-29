@@ -240,9 +240,21 @@ h4 { font-size: var(--fs-sub); font-weight: 600; letter-spacing: -0.006em; margi
 .sidebar-user:hover .su-name { color: var(--fg); }
 .sidebar-user.active { background: var(--surface-2); }
 .sidebar-user.active .su-name { color: var(--fg); }
+/* Placeholder card, shown until the profile call answers. Same box as the real
+   one so the sidebar does not shift when it resolves. */
+.sidebar-user.is-loading { pointer-events: none; }
+.sidebar-user.is-loading:hover { background: none; }
 .su-avatar {
   width: var(--nav-ico-w); height: var(--nav-ico-w); border-radius: 50%; flex-shrink: 0;
   object-fit: cover; display: grid; place-items: center;
+}
+/* The avatar fills the 26px icon column while the nav glyphs above are 17px
+   left-aligned in it, so sharing a left edge reads as the avatar sitting too
+   far right. Pull it back by half the difference to put it on the glyphs'
+   centre line, and hand the space to the gap so the labels keep their column. */
+.su-avatar, .sidebar-user.is-loading > .skel:first-child {
+  margin-left: -4px;
+  margin-right: 4px;
 }
 .su-initial {
   background: var(--surface-3); color: var(--fg-2);
@@ -1221,15 +1233,15 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
    not shouted: an alarm here reads as "this is risky" and stops people from
    funding at all, when all they need is the network name. */
 .depwarn {
-  margin-bottom: var(--s5); padding: var(--s3) var(--s4);
-  border-radius: var(--r3); background: var(--surface-2);
+  margin-bottom: var(--s3); padding: 9px var(--s3);
+  border-radius: var(--r2); background: var(--surface-2);
   box-shadow: inset 0 0 0 1px var(--line);
 }
 .depwarn-head { display: flex; align-items: center; gap: var(--s2); color: var(--fg); }
-.depwarn-head svg { width: 15px; height: 15px; flex-shrink: 0; color: var(--fg-3); }
+.depwarn-head svg { width: 14px; height: 14px; flex-shrink: 0; color: var(--fg-3); }
 .depwarn-title { font-size: var(--fs-sub); font-weight: 600; line-height: 1.3; letter-spacing: -0.005em; }
 .depwarn-body {
-  margin: 4px 0 0; font-size: var(--fs-sub); color: var(--fg-2); line-height: 1.6;
+  margin: 2px 0 0; font-size: var(--fs-meta); color: var(--fg-2); line-height: 1.5;
 }
 
 .wallet-hero .wh-actions { display: flex; gap: var(--s2); flex-wrap: wrap; margin-top: var(--s5); }
@@ -1253,22 +1265,28 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
   font-size: var(--fs-meta); font-weight: 400; color: var(--fg-2);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-/* Context, not a heading — quiet on every step. */
-.wdlg-bal {
-  display: flex; align-items: baseline; justify-content: space-between; gap: var(--s4);
-  padding: 10px var(--s5); background: var(--surface-2);
-  font-size: var(--fs-meta); color: var(--fg-2);
-}
-.wdlg-bal .mono { font-size: var(--fs-sub); font-weight: 500; color: var(--fg); }
 /* One tab per funding rail. */
 .wdlg-tabs { padding: var(--s3) var(--s5) 0; }
 .wdlg-tabs .segmented { max-width: 100%; overflow-x: auto; }
 
-/* Fixed height, deliberately: the tallest rail sets it once and every other tab
-   scrolls inside it. A body that sized itself to its content made the sheet
-   jump — and the tab strip move out from under the cursor — on every switch. */
+/* Fixed height on withdrawal, deliberately: the tallest rail sets it once and
+   every other tab scrolls inside it. A body that sized itself to its content
+   made the sheet jump — and the tab strip move out from under the cursor — on
+   every switch. */
 .wdlg-body { height: clamp(300px, 58vh, 480px); overflow-y: auto; padding: var(--s5); }
 .wdlg-body > :first-child { margin-top: 0; }
+/* Deposit gets the whole window instead. Its two rails render identical blocks,
+   so there is nothing to jump between, and the QR, the address and the amount
+   are meant to be on screen together — sizing to content is what keeps them
+   there without a scrollbar. */
+.modal.wdlg.wide .wdlg-body { height: auto; padding: var(--s4) var(--s5) var(--s5); }
+/* Facts are a footnote here, not a section — one tight row under the code. */
+.wdlg-body .fact-grid {
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  padding: 9px var(--s4); gap: 0 var(--s5); margin-top: var(--s3);
+}
+.wdlg-body .fact-grid:last-child { margin-bottom: 0; }
+.wdlg-body .fact-k { margin-bottom: 2px; }
 
 /* Address + QR, stacked: the sheet is too narrow for the side-by-side the
    full-page layout used. */
@@ -1281,14 +1299,26 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
    actually scan (see lib/wallets.ts). Below 640px the columns stack — the list
    first, since picking is still the first thing you do. */
 .paygrid {
+  position: relative;
   display: grid; grid-template-columns: 190px 1fr; gap: var(--s4);
   border: 1px solid var(--line); border-radius: var(--r2); overflow: hidden;
-  margin-top: var(--s4);
+  margin-top: var(--s3);
 }
 @media (max-width: 640px) { .paygrid { grid-template-columns: 1fr; gap: 0; } }
 
-.paygrid-wallets { background: var(--surface-2); padding: 12px 10px; max-height: 380px; overflow-y: auto; }
-@media (max-width: 640px) { .paygrid-wallets { max-height: 170px; } }
+/* The list fills the row and scrolls inside it. Out of flow on purpose: in flow
+   it is the taller column, so the picker — not the code it is there to serve —
+   would set the height of the whole block, and merely capping it left the column
+   short of its own border. */
+.paygrid-wallets {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 190px;
+  background: var(--surface-2); padding: 10px 8px; overflow-y: auto;
+}
+.paygrid-pay { grid-column: 2; }
+@media (max-width: 640px) {
+  .paygrid-wallets { position: static; width: auto; max-height: 170px; }
+  .paygrid-pay { grid-column: 1; }
+}
 .paygrid-label { display: block; padding: 0 6px 8px; font-size: var(--fs-micro); font-weight: 600; color: var(--fg-2); }
 .wallet-group + .wallet-group { margin-top: 10px; }
 .wallet-group-head { display: block; padding: 6px 6px 4px; font-size: var(--fs-micro); color: var(--fg-3); letter-spacing: 0.02em; }
@@ -1309,8 +1339,8 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 }
 
 .paygrid-pay {
-  display: flex; flex-direction: column; align-items: center; gap: 12px;
-  padding: var(--s5) var(--s4); min-width: 0;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: var(--s4) var(--s4) var(--s3); min-width: 0;
 }
 .paygrid-pay .dep-result { width: 100%; align-items: center; }
 .pay-hint { font-size: var(--fs-sub); color: var(--fg-2); text-align: center; margin: 0; }
@@ -1350,10 +1380,41 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .pay-done-amount { font-size: 22px; font-weight: 600; margin: 0; }
 .pay-done-desc { font-size: var(--fs-sub); color: var(--fg-3); max-width: 300px; line-height: 1.6; margin: 0; }
 
-/* Amount field: the unit sits beside the box so the number stays the input. */
-.pay-amount { display: flex; align-items: center; gap: 10px; }
-.pay-amount .input { flex: 1; min-width: 0; }
-.pay-amount-unit { font-size: var(--fs-sub); color: var(--fg-3); flex-shrink: 0; }
+/* ── Amount picker ──────────────────────────────────────────────────────────
+   The common top-ups as chips, with a free field in the last cell. One row: the
+   choice is small enough not to earn a second line, and the height it saves is
+   height the QR below needs. Below 560px it folds to two rows of two with the
+   free field spanning the width. */
+.amt-field { margin-bottom: 0; }
+.amt-picker {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)) minmax(110px, 1.3fr);
+  gap: var(--s2);
+}
+@media (max-width: 560px) {
+  .amt-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .amt-custom { grid-column: 1 / -1; }
+}
+/* Centred, not baseline-aligned: a baseline group in a fixed-height flex box is
+   laid out from the top, which left the figure riding high in the chip. */
+.amt-chip {
+  display: flex; align-items: center; justify-content: center; gap: 3px;
+  padding: 0 6px; height: 34px; min-width: 0; line-height: 1;
+  border: 1px solid transparent; border-radius: var(--r2);
+  background: var(--bg-2); color: var(--fg-2); cursor: pointer;
+  font-size: var(--fs-sub); font-weight: 500; font-variant-numeric: tabular-nums;
+  transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease);
+}
+.amt-chip:hover { border-color: var(--line-2); color: var(--fg); }
+.amt-chip:focus-visible { outline: none; box-shadow: var(--ring); }
+/* The lit chip carries the accent because it is the one figure the QR is for. */
+.amt-chip.active {
+  border-color: var(--accent); background: var(--accent-soft); color: var(--accent);
+}
+.amt-chip-unit { font-size: var(--fs-micro); font-weight: 400; opacity: 0.75; }
+.amt-custom { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.amt-custom .input { flex: 1; min-width: 0; height: 34px; padding-top: 0; padding-bottom: 0; }
+.amt-unit { font-size: var(--fs-micro); color: var(--fg-3); flex-shrink: 0; }
 
 .deposit-panel { display: flex; gap: var(--s6); flex-wrap: wrap; align-items: flex-start; }
 .qr-box {
@@ -1534,6 +1595,12 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
   animation: shimmer 1.6s var(--ease) infinite;
 }
 @keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+
+/* The whole content column while the app is still reaching its daemon. Held
+   back a beat: on a warm start the daemon answers almost immediately, and a
+   skeleton that flashes for 200ms is more distracting than no skeleton. */
+.page-skeleton { animation: skel-in var(--t-slow) var(--ease) both; animation-delay: 220ms; }
+@keyframes skel-in { from { opacity: 0; } to { opacity: 1; } }
 
 .spin { animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

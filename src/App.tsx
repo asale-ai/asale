@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { invoke, inTauri, type Profile } from "./lib";
+import { invoke, inTauri, isDaemonDown, waitForDaemon, type Profile } from "./lib";
 import { Dashboard } from "./pages/Dashboard";
 import { Publish } from "./pages/Publish";
 import { Consume } from "./pages/Consume";
@@ -15,6 +15,7 @@ import {
   IconRecords, IconUsage, IconGauge, IconAccount, IconSettings,
 } from "./icons";
 import { StatusWidget } from "./components/StatusWidget";
+import { Skeleton, PageSkeleton } from "./ui";
 import type { JSX } from "react";
 
 type Tab = "dashboard" | "publish" | "consume" | "usage" | "limits" | "wallet" | "records" | "account" | "settings";
@@ -46,20 +47,39 @@ const NAV: Array<{ label?: string; items: Tab[] } | "spacer"> = [
 export function App() {
   const { t } = useTranslation();
   const [tab, setTab] = useState<Tab>("dashboard");
-  const [profile, setProfile] = useState<Profile | null>(null);
+  // `undefined` = not answered yet (show placeholders), `null` = signed out.
+  const [profile, setProfile] = useState<Profile | null | undefined>(undefined);
+  // The desktop shell starts its daemon in a background thread while this
+  // webview is already painting, so the first RPCs of a healthy launch fail.
+  // Pages mount only once the daemon has answered — otherwise every one of
+  // them renders its "daemon down" / "signed out" branch for a second first.
+  const [booted, setBooted] = useState(false);
 
   useEffect(() => {
-    if (!inTauri) return;
-    invoke<Profile>("me_profile").then(setProfile).catch(() => {});
+    if (!inTauri) { setBooted(true); return; }
+    let alive = true;
+    // Resolves either way: if the daemon really never comes up, the pages must
+    // still mount and say so (that is what the status widget is for).
+    waitForDaemon().then(() => { if (alive) setBooted(true); });
+    return () => { alive = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!inTauri || !booted) return;
+    let alive = true;
     // Provision the asale API key automatically on launch (no-op if not yet
     // signed in; the account view provisions it again right after login).
     invoke("ensure_api_key").catch(() => {});
-    // Keep the sidebar user card in sync after sign in / sign out.
-    const poll = () => invoke<Profile>("me_profile").then(setProfile).catch(() => setProfile(null));
+    // Keep the sidebar user card in sync after sign in / sign out. A dead
+    // daemon is not a sign-out — leave the card as it was rather than
+    // flipping it to "sign in" on a transient failure.
+    const poll = () => invoke<Profile>("me_profile")
+      .then((p) => { if (alive) setProfile(p); })
+      .catch((e) => { if (alive && !isDaemonDown(e)) setProfile(null); });
     poll();
     const id = setInterval(poll, 4000);
-    return () => clearInterval(id);
-  }, []);
+    return () => { alive = false; clearInterval(id); };
+  }, [booted]);
 
   // Allow any page to request navigation (e.g. "manage limits" from Publish).
   useEffect(() => {
@@ -82,7 +102,17 @@ export function App() {
   );
 
   const initial = (profile?.name || profile?.email || "?").trim().charAt(0).toUpperCase();
-  const userCard = (
+  // Until the profile call answers, the card is a placeholder: rendering the
+  // signed-out state here would tell a signed-in user they are logged out.
+  const userCard = profile === undefined ? (
+    <div className="sidebar-user is-loading" aria-busy="true">
+      <Skeleton w="var(--nav-ico-w)" h="var(--nav-ico-w)" r={999} />
+      <span className="su-text">
+        <Skeleton w="72%" h={11} style={{ marginBottom: 5 }} />
+        <Skeleton w="52%" h={9} />
+      </span>
+    </div>
+  ) : (
     <button
       className={`sidebar-user ${tab === "account" ? "active" : ""}`}
       onClick={() => setTab("account")}
@@ -128,16 +158,20 @@ export function App() {
             <StatusWidget />
           </div>
         </div>
-        <div className="main-inner fade-in" key={tab}>
-          {tab === "dashboard" && <Dashboard onNavigate={setTab} />}
-          {tab === "publish" && <Publish />}
-          {tab === "consume" && <Consume />}
-          {tab === "usage" && <Usage />}
-          {tab === "limits" && <Limits />}
-          {tab === "wallet" && <WalletPage />}
-          {tab === "records" && <Records />}
-          {tab === "account" && <Account />}
-          {tab === "settings" && <Settings />}
+        <div className="main-inner fade-in" key={booted ? tab : "boot"}>
+          {!booted ? <PageSkeleton /> : (
+            <>
+              {tab === "dashboard" && <Dashboard onNavigate={setTab} />}
+              {tab === "publish" && <Publish />}
+              {tab === "consume" && <Consume />}
+              {tab === "usage" && <Usage />}
+              {tab === "limits" && <Limits />}
+              {tab === "wallet" && <WalletPage />}
+              {tab === "records" && <Records />}
+              {tab === "account" && <Account />}
+              {tab === "settings" && <Settings />}
+            </>
+          )}
         </div>
       </main>
     </div>

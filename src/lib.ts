@@ -58,6 +58,84 @@ export function apiBase(): string {
   return "";
 }
 
+/**
+ * A failed RPC, carrying what the UI needs to say why *in the user's language*.
+ *
+ * The daemon cannot translate its own failures — one binary serves the desktop
+ * shell and any browser, while the chosen locale lives here in i18next. So it
+ * sends a catalog `key` plus the values that key interpolates
+ * (`daemon/src/commands/mod.rs`, `CmdError`), and errors that originated at the
+ * asale server arrive with the server's own key intact. `message` is the
+ * English fallback for keys this build has no translation for.
+ */
+export class DaemonError extends Error {
+  /** Message-catalog key, e.g. `errors.wallet.insufficientBalance`; "" when the
+   *  daemon had no entry for this failure and `message` is all there is. */
+  key: string;
+  /** Values the catalog entry interpolates. */
+  params: Record<string, string | number | boolean>;
+  constructor(
+    message: string,
+    key = "",
+    params: Record<string, string | number | boolean> = {}
+  ) {
+    super(message);
+    this.name = "DaemonError";
+    this.key = key;
+    this.params = params;
+  }
+}
+
+/** The daemon did not answer at all (socket refused / no route).
+ *
+ *  Distinct from a daemon that answered with an error, because the two mean
+ *  opposite things at startup: the desktop shell boots its daemon in a
+ *  background thread while the webview is already painting, so the first few
+ *  RPCs of a perfectly healthy launch fail this way. Callers use this to hold a
+ *  loading state instead of flashing "not connected" / "signed out". */
+export class DaemonUnreachable extends DaemonError {
+  constructor() {
+    super("Asale daemon unreachable (asaled not running?)", "errors.daemon.unreachable");
+    this.name = "DaemonUnreachable";
+  }
+}
+export const isDaemonDown = (e: unknown) => e instanceof DaemonUnreachable;
+
+/** Resolve once the daemon answers anything, or `false` after `timeoutMs`.
+ *
+ *  Used as the app's boot gate: pages mount only after this settles, so no page
+ *  ever renders its "daemon down" / "signed out" branch just because the daemon
+ *  was still coming up. */
+export async function waitForDaemon(timeoutMs = 4000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      await invoke("client_status");
+      return true;
+    } catch (e) {
+      // An error response is still an answer — the daemon is up.
+      if (!isDaemonDown(e)) return true;
+      if (Date.now() >= deadline) return false;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+}
+
+/**
+ * Read the daemon's failure envelope — `{error, key?, params?}` — into a
+ * `DaemonError`. Also used for the async OAuth flow, which reports its failure
+ * in the same shape inside a 200 response.
+ */
+export function toDaemonError(body: unknown, fallback: string): DaemonError {
+  const v = (body ?? {}) as { error?: unknown; key?: unknown; params?: unknown };
+  const message = typeof v.error === "string" && v.error ? v.error : fallback;
+  return new DaemonError(
+    message,
+    typeof v.key === "string" ? v.key : "",
+    (v.params as Record<string, string | number | boolean>) ?? {}
+  );
+}
+
 export async function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const headers: Record<string, string> = { "content-type": "application/json" };
   const tok = localStorage.getItem(TOKEN_KEY);
@@ -71,12 +149,11 @@ export async function invoke<T = unknown>(cmd: string, args?: Record<string, unk
       body: JSON.stringify(args ?? {}),
     });
   } catch {
-    throw new Error("Asale daemon unreachable (asaled not running?)");
+    throw new DaemonUnreachable();
   }
   const v = await resp.json().catch(() => null);
   if (!resp.ok) {
-    const msg = v && typeof v === "object" && "error" in (v as object) ? String((v as { error: unknown }).error) : `HTTP ${resp.status}`;
-    throw new Error(msg);
+    throw toDaemonError(v, `HTTP ${resp.status}`);
   }
   return v as T;
 }
@@ -114,13 +191,16 @@ export async function runOAuthFlow<T = unknown>(
   const deadline = Date.now() + 300_000;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 2000));
-    const res = await invoke<{ status: string; result?: T; error?: string }>("oauth_result", {
+    // A flow that failed after the browser handed control back reports it in
+    // the RPC *body* (status 200), so the envelope is unwrapped by hand — but
+    // it carries the same key/params a synchronous failure would.
+    const res = await invoke<{ status: string; result?: T }>("oauth_result", {
       flowId: start.flow_id,
     });
     if (res.status === "ok") return res.result as T;
-    if (res.status === "error") throw new Error(res.error || "authorization failed");
+    if (res.status === "error") throw toDaemonError(res, "authorization failed");
   }
-  throw new Error("authorization timed out");
+  throw new DaemonError("authorization timed out", "errors.oauth.timedOut");
 }
 
 export interface ClientConfig {
@@ -299,10 +379,20 @@ export interface ImportResult {
   expires_at: number | null;
   has_refresh_token: boolean;
 }
+/** A local CLI left out of the import because it is buying: its config points at
+ *  the asale proxy, so nothing in its directory is this device's to sell.
+ *  `dropped` lists accounts already imported from it that were retired. */
+export interface ImportSkipped {
+  provider: string;
+  label: string;
+  reason: "buying";
+  dropped: string[];
+}
 /** Result of the bulk local-CLI import (runs at daemon startup + refresh button). */
 export interface ImportAllResult {
   imported: ImportResult[];
   warnings: string[];
+  skipped: ImportSkipped[];
   errors: { provider: string; error: string }[];
 }
 

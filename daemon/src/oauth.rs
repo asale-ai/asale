@@ -71,15 +71,15 @@ pub struct OAuthProvider {
     pub client_id: String,
     pub client_secret: Option<String>,
     pub scope: &'static str,
-    /// Loopback callback this client is registered with, as `(port, path)`.
-    /// `None` means the provider accepts any loopback port, and we bind a
-    /// random one. `Some` means it does not: the redirect_uri has to match the
-    /// vendor CLI's own listener byte for byte.
-    pub fixed_callback: Option<(u16, &'static str)>,
     /// Extra authorize-query parameters the vendor's own CLI sends.
     pub extra_authorize_params: &'static [(&'static str, &'static str)],
     /// Anthropic's token endpoint takes a JSON body instead of a form post.
     pub anthropic_style: bool,
+    /// Loopback port the provider's registered redirect pins us to. `None` =
+    /// any ephemeral port is accepted (Anthropic, Google).
+    pub redirect_port: Option<u16>,
+    /// Path component of the registered redirect URI.
+    pub redirect_path: &'static str,
 }
 
 pub fn provider(name: &str) -> Option<OAuthProvider> {
@@ -92,10 +92,13 @@ pub fn provider(name: &str) -> Option<OAuthProvider> {
             client_id: env_or("ASALE_OAUTH_CLIENT_ID_CLAUDE", CLAUDE_CLIENT_ID),
             client_secret: None,
             scope: "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
-            fixed_callback: None,
             // The Claude CLI flow requests an authorization code explicitly.
             extra_authorize_params: &[("code", "true")],
             anthropic_style: true,
+            // Anthropic accepts any ephemeral loopback port on `/callback`
+            // (claude-code builds `http://localhost:{port}/callback`).
+            redirect_port: None,
+            redirect_path: "/callback",
         },
         "codex" => OAuthProvider {
             name: name.to_string(),
@@ -104,14 +107,6 @@ pub fn provider(name: &str) -> Option<OAuthProvider> {
             client_id: env_or("ASALE_OAUTH_CLIENT_ID_CODEX", CODEX_CLIENT_ID),
             client_secret: None,
             scope: "openid profile email offline_access",
-            // OpenAI registered exactly one redirect for this public client:
-            // the port and path Codex CLI itself listens on. A loopback URI
-            // that differs in either — a random port, or `/callback` — is
-            // refused before the login page even renders, with
-            // `authorize_hydra_invalid_request`. `localhost` is also part of
-            // the match: `127.0.0.1` is a different string, hence a different
-            // redirect_uri.
-            fixed_callback: Some((1455, "/auth/callback")),
             // What Codex CLI sends alongside. `id_token_add_organizations`
             // is what puts the ChatGPT account/plan claims in the id_token —
             // without it the exchange returns a token we cannot attribute to
@@ -122,6 +117,15 @@ pub fn provider(name: &str) -> Option<OAuthProvider> {
                 ("originator", "codex_cli"),
             ],
             anthropic_style: false,
+            // OpenAI registered exactly one redirect for this public client:
+            // the port and path Codex CLI itself listens on. A loopback URI
+            // that differs in either — a random port, or `/callback` — is
+            // refused before the login page even renders, with
+            // `authorize_hydra_invalid_request`. `localhost` is also part of
+            // the match: `127.0.0.1` is a different string, hence a different
+            // redirect_uri.
+            redirect_port: Some(1455),
+            redirect_path: "/auth/callback",
         },
         // Unconfigured Gemini credentials would only fail later at token exchange
         // with an opaque Google error — refuse the provider up front instead.
@@ -133,9 +137,12 @@ pub fn provider(name: &str) -> Option<OAuthProvider> {
             client_id: gemini_client_id(),
             client_secret: Some(gemini_client_secret()),
             scope: "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email",
-            fixed_callback: None,
             extra_authorize_params: &[],
             anthropic_style: false,
+            // Google installed-app clients ignore the loopback port but match
+            // the path; gemini-cli registers `/oauth2callback`.
+            redirect_port: None,
+            redirect_path: "/oauth2callback",
         },
         _ => return None,
     })
@@ -166,24 +173,25 @@ pub struct AuthCode {
 /// Start a localhost callback listener and return the authorize URL to open.
 /// The returned future resolves once the browser redirects back with a code.
 pub async fn begin(p: &OAuthProvider) -> anyhow::Result<(String, AuthCodeFuture)> {
-    let (listener, redirect_uri) = match p.fixed_callback {
-        Some((port, path)) => {
-            // The port is not ours to choose, so it can genuinely be taken —
-            // most often by the vendor's own CLI sitting in its login flow.
-            let l = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| {
-                anyhow::anyhow!(
-                    "callback port {port} is in use — close any running `{} login` and try again ({e})",
-                    p.name
-                )
-            })?;
-            (l, format!("http://localhost:{port}{path}"))
+    let want_port = p.redirect_port.unwrap_or(0);
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", want_port)).await.map_err(|e| {
+        match p.redirect_port {
+            // A pinned port that is already taken is almost always the vendor's
+            // own CLI mid-login — say so instead of surfacing EADDRINUSE.
+            Some(port) => anyhow::anyhow!(
+                "loopback port {port} is busy — close any running `{}` login and retry ({e})",
+                p.name
+            ),
+            None => anyhow::anyhow!("cannot bind loopback callback: {e}"),
         }
-        None => {
-            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-            let port = l.local_addr()?.port();
-            (l, format!("http://127.0.0.1:{port}/callback"))
-        }
-    };
+    })?;
+    let port = listener.local_addr()?.port();
+    // Host must be `localhost`, not `127.0.0.1`: the vendors' public CLI clients
+    // whitelist the literal hostname, and Anthropic rejects the dotted-quad form
+    // outright ("Redirect URI http://127.0.0.1:… is not supported by client").
+    let redirect_uri = format!("http://localhost:{port}{}", p.redirect_path);
+    // `localhost` may resolve to ::1 first, so answer on both loopback stacks.
+    let listener_v6 = tokio::net::TcpListener::bind(("::1", port)).await.ok();
     let pkce = gen_pkce();
     let state = uuid::Uuid::new_v4().to_string();
 
@@ -211,18 +219,34 @@ pub async fn begin(p: &OAuthProvider) -> anyhow::Result<(String, AuthCodeFuture)
     // "the callback" would fail the login with an empty code.
     tokio::spawn(async move {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        while let Ok((mut sock, _)) = listener.accept().await {
+        loop {
+            let accepted = match &listener_v6 {
+                Some(v6) => tokio::select! {
+                    r = listener.accept() => r,
+                    r = v6.accept() => r,
+                },
+                None => listener.accept().await,
+            };
+            let Ok((mut sock, _)) = accepted else { break };
             let mut buf = [0u8; 4096];
             let n = sock.read(&mut buf).await.unwrap_or(0);
             let req = String::from_utf8_lossy(&buf[..n]);
             let code = extract_query(&req, "code");
-            if code.is_empty() {
+            // The provider can redirect back with `?error=access_denied` when the
+            // user declines — that is not a success, so don't claim it is. A
+            // request carrying neither is not the callback at all (favicon, probe):
+            // answer it and keep waiting for the real one.
+            let denied = !extract_query(&req, "error").is_empty();
+            if code.is_empty() && !denied {
                 let _ = sock.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").await;
                 continue;
             }
-            let body = "<html><body style='font-family:sans-serif'>asale: authorization received. You can close this window.</body></html>";
-            let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
-            let _ = sock.write_all(resp.as_bytes()).await;
+            let body = if code.is_empty() {
+                landing_page("授权未完成", "授权被取消或已过期，请回到应用重试。", false)
+            } else {
+                landing_page("授权成功", "账号已连接，可以关闭此页面并返回应用。", true)
+            };
+            write_page(&mut sock, &body).await;
             if let Some(sender) = tx.lock().unwrap().take() {
                 let _ = sender.send(code);
             }
@@ -268,22 +292,18 @@ pub async fn begin_platform_loopback() -> anyhow::Result<PlatformCallback> {
 
     tokio::spawn(async move {
         if let Ok((mut sock, _)) = listener.accept().await {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            use tokio::io::AsyncReadExt;
             let mut buf = [0u8; 8192];
             let n = sock.read(&mut buf).await.unwrap_or(0);
             let req = String::from_utf8_lossy(&buf[..n]);
             let code = extract_query(&req, "code");
             let state = extract_query(&req, "state");
-            let body = "<!doctype html><html><head><meta charset='utf-8'><title>asale</title></head>\
-                <body style='font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:90vh'>\
-                <div style='text-align:center'><h2>登录成功，请返回应用</h2>\
-                <p style='color:#666'>Signed in — you can return to the app and close this tab.</p></div></body></html>";
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = sock.write_all(resp.as_bytes()).await;
+            let body = if code.is_empty() {
+                landing_page("登录未完成", "授权被取消或已过期，请回到应用重试。", false)
+            } else {
+                landing_page("登录成功", "可以关闭此页面并返回应用。", true)
+            };
+            write_page(&mut sock, &body).await;
             if let Some(sender) = tx.lock().unwrap().take() {
                 let _ = sender.send((code, state));
             }
@@ -348,6 +368,93 @@ pub fn id_token_claim(tokens: &serde_json::Value, claim: &str) -> Option<String>
     Some(json.get(claim)?.as_str()?.to_string())
 }
 
+/// The page the browser lands on after a provider (or the platform) redirects
+/// back. Both loopback listeners serve it, so the two flows look the same.
+///
+/// Deliberately self-contained — no network at all: the callback host is a
+/// four-line TCP server, and the tab often loads while the machine is mid-login,
+/// so any external font/asset would just render as a broken box.
+///
+/// The inline script rewrites the address bar to drop `?code=…`: the raw
+/// authorization code would otherwise sit in the URL bar, in history, and in
+/// whatever syncs that history.
+fn landing_page(headline: &str, sub: &str, tone_ok: bool) -> String {
+    let (mark, mark_fg, mark_bg) = if tone_ok {
+        // A check, drawn rather than an emoji so it can't fall back to a glyph
+        // the platform renders in its own colour.
+        ("M4 10.5l4 4 8-9", "var(--ok)", "var(--ok-soft)")
+    } else {
+        ("M10 5v7M10 15.2v.1", "var(--bad)", "var(--bad-soft)")
+    };
+    format!(
+        r#"<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>asale</title><style>
+:root {{
+  --bg:#f9f9fb; --card:#fff; --fg:#16171c; --muted:#626671; --border:#ebebf0;
+  --ok:#14a06a; --ok-soft:rgba(20,160,106,.1); --bad:#d94a50; --bad-soft:rgba(217,74,80,.09);
+  --shadow:0 20px 48px -24px rgba(18,20,28,.25);
+  color-scheme:light;
+}}
+@media (prefers-color-scheme:dark) {{
+  :root {{
+    --bg:#0c0d11; --card:#15171c; --fg:#e9eaee; --muted:#9ca1ad; --border:#23262e;
+    --ok:#3ecf8e; --ok-soft:rgba(62,207,142,.13); --bad:#f0666b; --bad-soft:rgba(240,102,107,.13);
+    --shadow:0 20px 48px -22px rgba(0,0,0,.8);
+    color-scheme:dark;
+  }}
+}}
+* {{ box-sizing:border-box; }}
+body {{
+  margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+  padding:24px; background:var(--bg); color:var(--fg);
+  font:400 14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased;
+}}
+.card {{
+  width:100%; max-width:400px; padding:40px 32px 32px; text-align:center;
+  background:var(--card); border:1px solid var(--border); border-radius:16px; box-shadow:var(--shadow);
+}}
+.badge {{
+  width:52px; height:52px; margin:0 auto 20px; border-radius:50%;
+  background:{mark_bg}; display:flex; align-items:center; justify-content:center;
+}}
+h1 {{ margin:0 0 8px; font-size:17px; font-weight:600; letter-spacing:-.01em; }}
+p {{ margin:0; color:var(--muted); font-size:13px; }}
+.en {{ margin-top:4px; font-size:12px; opacity:.75; }}
+.brand {{
+  margin-top:28px; padding-top:18px; border-top:1px solid var(--border);
+  color:var(--muted); font-size:11px; letter-spacing:.14em; text-transform:uppercase;
+}}
+</style></head><body>
+<div class="card">
+  <div class="badge"><svg width="20" height="20" viewBox="0 0 20 20" fill="none"
+    stroke="{mark_fg}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+    aria-hidden="true"><path d="{mark}"/></svg></div>
+  <h1>{headline}</h1>
+  <p>{sub}</p>
+  <p class="en">You can close this tab and return to the app.</p>
+  <div class="brand">asale</div>
+</div>
+<script>
+  // Keep the one-time authorization code out of the URL bar and history.
+  try {{ history.replaceState(null, "", location.pathname); }} catch (e) {{}}
+</script>
+</body></html>"#
+    )
+}
+
+/// Serve one HTML response and let the socket close.
+async fn write_page(sock: &mut tokio::net::TcpStream, body: &str) {
+    use tokio::io::AsyncWriteExt;
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = sock.write_all(resp.as_bytes()).await;
+    let _ = sock.flush().await;
+}
+
 fn extract_query(req: &str, key: &str) -> String {
     // First line: GET /callback?code=...&state=... HTTP/1.1
     let first = req.lines().next().unwrap_or("");
@@ -373,6 +480,45 @@ fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Anthropic (and OpenAI) whitelist the loopback redirect by hostname, and
+    /// reject `http://127.0.0.1:{port}/…` with "Redirect URI … is not supported
+    /// by client" — the authorize URL must use `localhost`.
+    #[tokio::test]
+    async fn claude_authorize_url_uses_localhost_loopback() {
+        let p = provider("claude_work").unwrap();
+        let (url, fut) = begin(&p).await.unwrap();
+        assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A"), "bad redirect in {url}");
+        assert!(!url.contains("127.0.0.1"), "dotted-quad loopback in {url}");
+        assert!(url.ends_with("&code=true"));
+        // The exchange must replay the exact same value.
+        assert!(fut.redirect_uri.starts_with("http://localhost:"));
+        assert!(fut.redirect_uri.ends_with("/callback"));
+    }
+
+    #[test]
+    fn landing_page_renders_both_tones() {
+        let ok = landing_page("授权成功", "账号已连接。", true);
+        assert!(ok.contains("授权成功") && ok.contains("var(--ok)"));
+        // `format!` escaping mistakes show up as leftover doubled braces in CSS.
+        assert!(!ok.contains("{{") && !ok.contains("}}"), "unescaped braces leaked into the page");
+        // The code must never survive in the address bar.
+        assert!(ok.contains("history.replaceState"));
+        let bad = landing_page("授权未完成", "已取消。", false);
+        assert!(bad.contains("var(--bad)") && !bad.contains("var(--ok)"));
+    }
+
+    #[test]
+    fn codex_redirect_is_pinned_to_the_registered_uri() {
+        let p = provider("codex").unwrap();
+        assert_eq!(p.redirect_port, Some(1455));
+        assert_eq!(p.redirect_path, "/auth/callback");
+    }
 }
 
 fn urldecode(s: &str) -> String {

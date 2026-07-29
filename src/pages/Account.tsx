@@ -4,7 +4,8 @@ import { countryOptions, guessCountry } from "@shared/countries";
 import { invoke, inTauri, runOAuthFlow, type Profile } from "../lib";
 import { ProfileCenter } from "./account/ProfileCenter";
 import { GitHubIcon, GoogleIcon } from "./account/icons";
-import { Err } from "../ui";
+import { Err, Skeleton } from "../ui";
+import { errText } from "../errors";
 
 export function Account() {
   const { t, i18n } = useTranslation();
@@ -16,7 +17,9 @@ export function Account() {
   // starting value is the desktop locale's region, not the network's.
   const [region, setRegion] = useState(() => guessCountry());
   const countries = useMemo(() => countryOptions(i18n.language), [i18n.language]);
-  const [profile, setProfile] = useState<Profile | null>(null);
+  // `undefined` until the profile call answers: rendering the sign-in form in
+  // the meantime tells a signed-in user they are signed out.
+  const [profile, setProfile] = useState<Profile | null | undefined>(undefined);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [oauthBusy, setOauthBusy] = useState<string | null>(null);
@@ -27,7 +30,8 @@ export function Account() {
   const [notice, setNotice] = useState("");
 
   useEffect(() => {
-    if (inTauri) invoke<Profile>("me_profile").then(setProfile).catch(() => {});
+    if (!inTauri) { setProfile(null); return; }
+    invoke<Profile>("me_profile").then(setProfile).catch(() => setProfile(null));
   }, []);
 
   async function loadProfile() {
@@ -54,7 +58,7 @@ export function Account() {
         return;
       }
       await loadProfile();
-    } catch (e) { setErr(String((e as Error).message)); } finally { setBusy(false); }
+    } catch (e) { setErr(errText(e)); } finally { setBusy(false); }
   }
 
   async function resendVerification() {
@@ -62,7 +66,7 @@ export function Account() {
     try {
       await invoke("resend_verification", { email: pending });
       setNotice(t("account.verifyResent"));
-    } catch (e) { setErr(String((e as Error).message)); } finally { setBusy(false); }
+    } catch (e) { setErr(errText(e)); } finally { setBusy(false); }
   }
 
   function leavePending() {
@@ -81,12 +85,33 @@ export function Account() {
       });
       await loadProfile();
     }
-    catch (e) { setErr(String((e as Error).message)); } finally { setOauthBusy(null); }
+    catch (e) { setErr(errText(e)); } finally { setOauthBusy(null); }
   }
 
   async function logout() {
     try { await invoke("logout"); } catch { /* clear local state regardless */ }
     setProfile(null);
+  }
+
+  if (profile === undefined) {
+    return (
+      <div className="auth-wrap">
+        <div className="auth-card" aria-busy="true">
+          <div className="auth-head">
+            <div className="logo">
+              <img className="logo-mark" src="/logo.svg" alt="Asale" />
+            </div>
+            <Skeleton w={148} h={22} r={9} style={{ margin: "0 auto 10px" }} />
+            <Skeleton w={220} h={12} style={{ margin: "0 auto" }} />
+          </div>
+          <div className="card auth-panel">
+            <Skeleton h={38} r={10} style={{ marginBottom: 10 }} />
+            <Skeleton h={38} r={10} style={{ marginBottom: 16 }} />
+            <Skeleton h={40} r={10} />
+          </div>
+        </div>
+      </div>
+    );
   }
 
   if (profile) return <ProfileCenter profile={profile} onProfile={setProfile} onLogout={logout} />;

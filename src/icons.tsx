@@ -27,11 +27,15 @@ function Svg({ size, children, ...rest }: P & { children: ReactNode }) {
 export const IconDashboard = (p: P) => (
   <Svg {...p}><rect x="3" y="3" width="7" height="9" rx="1.5" /><rect x="14" y="3" width="7" height="5" rx="1.5" /><rect x="14" y="12" width="7" height="9" rx="1.5" /><rect x="3" y="16" width="7" height="5" rx="1.5" /></Svg>
 );
+/* Sell and buy are one pair, not two icons: the same tray, the arrow leaving it
+   or arriving in it. They sit next to each other in the sidebar and on the
+   dashboard, so the only thing that should differ between them is the direction
+   — which is the only thing that differs between the two actions. */
 export const IconPublish = (p: P) => (
-  <Svg {...p}><path d="M4.9 19.1a10 10 0 0 1 0-14.2M7.8 16.2a6 6 0 0 1 0-8.4M16.2 7.8a6 6 0 0 1 0 8.4M19.1 4.9a10 10 0 0 1 0 14.2" /><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none" /></Svg>
+  <Svg {...p}><path d="M12 15V3" /><path d="m7.5 7.5 4.5-4.5 4.5 4.5" /><path d="M4 16v2.5A2.5 2.5 0 0 0 6.5 21h11a2.5 2.5 0 0 0 2.5-2.5V16" /></Svg>
 );
 export const IconConsume = (p: P) => (
-  <Svg {...p}><path d="M12 3v12" /><path d="m7 10 5 5 5-5" /><path d="M5 21h14" /></Svg>
+  <Svg {...p}><path d="M12 3v12" /><path d="m7.5 10.5 4.5 4.5 4.5-4.5" /><path d="M4 16v2.5A2.5 2.5 0 0 0 6.5 21h11a2.5 2.5 0 0 0 2.5-2.5V16" /></Svg>
 );
 export const IconWallet = (p: P) => (
   <Svg {...p}><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H18a1 1 0 0 1 1 1v1" /><path d="M3 7.5V17a2 2 0 0 0 2 2h14a1 1 0 0 0 1-1v-3" /><path d="M21 10h-4a2 2 0 0 0 0 4h4a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1Z" /></Svg>

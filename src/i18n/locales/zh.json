@@ -17,7 +17,7 @@
   "dashboard": {
     "title": "概览",
     "sub": "共享订阅的空闲额度，或从市场购买额度 — 以 USDT 结算。",
-    "publishing": "出售状态",
+    "publishing": "卖出",
     "online": "在线",
     "offline": "离线",
     "connecting": "连接中",
@@ -54,6 +54,11 @@
     "goConnect": "去连接账号"
   },
   "status": {
+    "starting": {
+      "label": "正在启动",
+      "desc": "正在连接本地 Asale 服务并读取状态。",
+      "hint": "通常只需一两秒。"
+    },
     "daemonDown": {
       "label": "本地服务未运行",
       "desc": "本地 Asale 服务（asaled）没有响应。",
@@ -139,6 +144,7 @@
     "scanning": "扫描中…",
     "cliNone": "本机未发现 CLI 凭证。",
     "envWarning": "警告：环境变量 {{vars}} 已设置，会覆盖 CLI 的本地凭证。",
+    "cliSkippedBuying": "{{tools}} 正在通过 asale 买入，其本地账号不会用于卖出。关闭买入后即可重新卖出。",
     "connectVia": "通过浏览器登录",
     "connectViaKey": "使用 API Key 连接",
     "connectViaCode": "在浏览器中确认验证码",
@@ -244,8 +250,9 @@
     "depositWarnTitle": "仅支持 {{network}} 上的 USDT",
     "depositWarnDesc": "请通过 {{network}} 网络转入 USDT。其他币种，或其他网络上的 USDT，都不会到账。",
     "qrAlt": "付款二维码",
-    "payAmountLabel": "充值金额（选填）",
+    "payAmountLabel": "充值金额",
     "payAmountAny": "任意金额",
+    "payAmountCustom": "其他金额",
     "payAmountHintAny": "留空则在钱包中自行输入金额。",
     "payAmountHintSet": "支持的钱包扫码后会自动填入该金额。",
     "payAmountHintBelowMin": "低于建议的最低充值额 {{amount}} USDT —— 小额转账同样会入账。",
@@ -591,7 +598,9 @@
   },
   "common": {
     "copy": "复制",
-    "copied": "已复制"
+    "copied": "已复制",
+    "networkError": "无法连接服务器，请检查网络后重试。",
+    "requestFailed": "请求失败，请重试。"
   },
   "modelPicker": {
     "title": "选择模型",
@@ -610,5 +619,181 @@
     "remove": "移除",
     "choose": "选择模型…",
     "shown": "{{n}} 个结果"
+  },
+  "errors": {
+    "common": {
+      "internal": "服务器出错了，请稍后重试。",
+      "notFound": "未找到。",
+      "rateLimited": "请求过于频繁，请稍候再试。"
+    },
+    "account": {
+      "banned": "该账号已被封禁。",
+      "blocked": "该账号已被限制交易。"
+    },
+    "auth": {
+      "badCredentials": "邮箱或密码不正确。",
+      "weakCredentials": "请填写邮箱，密码至少 8 位。",
+      "emailTaken": "该邮箱已被注册。",
+      "emailUnverified": "邮箱尚未验证。",
+      "tokenRequired": "验证链接缺少令牌。",
+      "verifyInvalid": "验证链接无效。",
+      "verifyUsed": "验证链接已被使用。",
+      "verifyExpired": "验证链接已过期，请重新获取。",
+      "verifyStale": "验证链接已失效，请重新获取。",
+      "missingBearer": "尚未登录，请登录后重试。",
+      "invalidToken": "登录状态已失效，请重新登录。",
+      "deviceFieldsRequired": "缺少设备 ID 或设备公钥。",
+      "web3AddressShape": "钱包地址需为 0x 开头的 40 位十六进制字符。",
+      "siweMessageTooLong": "签名消息过长。",
+      "siweNonceMissing": "签名消息缺少 Nonce 行。",
+      "siweNonceExpired": "签名请求不存在或已过期，请重新发起。",
+      "siweRejected": "钱包签名验证失败：{{detail}}"
+    },
+    "field": {
+      "emailRequired": "请输入邮箱地址。",
+      "emailTooLong": "邮箱地址过长。",
+      "emailWhitespace": "邮箱地址不能包含空格或控制字符。",
+      "emailNoAt": "邮箱地址必须包含 @。",
+      "emailInvalid": "邮箱地址格式不正确。",
+      "emailBadDomain": "邮箱域名不正确。",
+      "regionInvalid": "请选择国家或地区。"
+    },
+    "profile": {
+      "nameLength": "名称长度需为 1–64 个字符。",
+      "avatarUrlTooLong": "头像链接过长。",
+      "passwordTooShort": "密码至少需要 8 位。",
+      "wrongCurrentPassword": "当前密码不正确。",
+      "setPasswordBeforeUnlink": "解绑最后一个登录方式前，请先设置密码。"
+    },
+    "apiKey": {
+      "missing": "请求缺少 API Key。",
+      "badPrefix": "API Key 格式不正确。",
+      "unknown": "API Key 不存在。",
+      "disabled": "API Key 已被停用。"
+    },
+    "gateway": {
+      "unknownDialect": "该接口不支持路径 {{path}}。"
+    },
+    "market": {
+      "noSupply": "当前没有卖家在售 {{model}}。",
+      "modelNotTraded": "本平台不交易 {{model}}。"
+    },
+    "wallet": {
+      "insufficientBalance": "余额不足。",
+      "insufficientForBudget": "余额不足以覆盖本次请求的预算。",
+      "amountPositive": "金额必须大于 0。",
+      "amountTooLarge": "金额过大。",
+      "unsupportedChain": "不支持 {{chain}}，可用网络：{{supported}}。",
+      "invalidChainAddress": "这不是有效的 {{chain}} 地址。",
+      "withdrawBelowMin": "{{chain}} 最低提现额为 {{min}} micro-USDT。",
+      "withdrawFeeExceedsAmount": "提现手续费（{{fee}} micro-USDT）已超过提现金额。",
+      "withdrawSingleLimit": "超过单笔提现限额。",
+      "withdrawDailyLimit": "超过当日提现限额。",
+      "withdrawNotWhitelisted": "该提现地址不在白名单中。",
+      "depositUnprovisioned": "充值服务暂不可用，请稍后再试。",
+      "depositMisconfigured": "充值服务配置异常，请联系客服。",
+      "depositPoolEmpty": "暂时没有可用的充值地址，请稍后再试。"
+    },
+    "dispute": {
+      "fieldsRequired": "请填写任务与申诉理由。",
+      "reasonTooLong": "理由最多 {{max}} 个字符。",
+      "notOwner": "该任务不属于当前账号。",
+      "notTerminal": "该任务尚未结算，暂不能申诉。",
+      "windowExpired": "已超过 {{hours}} 小时申诉期。",
+      "alreadyFiled": "该任务已有申诉记录。"
+    },
+    "publishConfig": {
+      "reserveFloorRange": "保留额度需在 0–{{max}} 之间。",
+      "maxRpmRange": "速率上限需在 0–{{max}} 之间。",
+      "minPriceRange": "最低价需在 0–{{max}} 之间。",
+      "listTooLong": "{{field}} 最多 {{max}} 条。",
+      "listEntryLength": "{{field}} 中每一项需为 1–{{max}} 个字符。"
+    },
+    "oauth": {
+      "unknownProvider": "不支持的登录方式：{{provider}}。",
+      "notConfigured": "本站未启用 {{provider}} 登录。",
+      "halfConfigured": "{{provider}} 登录配置不完整：{{missing}} 为空。",
+      "badRedirectUri": "登录回调地址无效：{{detail}}",
+      "codeRequired": "登录回调缺少授权码。",
+      "codeRejected": "{{provider}} 拒绝了本次登录：{{detail}}",
+      "noVerifiedEmail": "该 {{provider}} 账号没有已验证的邮箱。",
+      "identityLinkedElsewhere": "该第三方账号已绑定到其他 Asale 账号。",
+      "upstream": "无法连接 {{provider}}，请重试。",
+      "upstreamIncomplete": "{{provider}} 返回的账号信息不完整，请重试。",
+      "unknownFlow": "该登录流程已结束，请重新发起。",
+      "exchangeFailed": "登录未能完成：{{detail}}",
+      "timedOut": "登录超时，请重试。"
+    },
+    "upstream": {
+      "provider": "模型上游返回错误（{{code}}）：{{detail}}",
+      "badStream": "{{dialect}} 响应流格式异常。",
+      "streamFailed": "{{provider}} 提前中断了响应：{{detail}}"
+    },
+    "catalog": {
+      "fetchFailed": "拉取上游模型目录失败：{{detail}}",
+      "malformed": "上游模型目录解析失败：{{detail}}"
+    },
+    "admin": {
+      "roleRequired": "该操作需要管理员权限。",
+      "amountNonZero": "调整金额不能为 0。",
+      "adjustLimit": "调整金额超过单次上限 {{max}} micro-USDT。",
+      "reasonRequired": "请填写原因。",
+      "reasonTooLong": "原因最多 {{max}} 个字符。",
+      "withdrawalNotInReview": "提现单 {{id}} 不在风控审核中（状态 {{status}}）。",
+      "withdrawalNotRejectable": "提现单 {{id}} 在状态 {{status}} 下无法驳回。",
+      "tooManyRules": "规则过多，最多 {{max}} 条。",
+      "modelAndRefPrice": "请填写模型，且参考价不能为负。",
+      "unknownTokenType": "未知的 token 类型：{{value}}。",
+      "marketPriceNonNegative": "市场价不能为负。",
+      "modelIdRequired": "请填写 model_id。",
+      "modelIdsRequired": "请至少选择一个模型。",
+      "refPricesNonNegative": "参考价不能为负。",
+      "modelExists": "模型 {{model}} 已存在。",
+      "unknownAction": "未知操作：{{value}}。",
+      "noUpstreamIds": "所选模型在上游均不存在。",
+      "disputeActionInvalid": "操作必须是退款或驳回。",
+      "disputeNotPending": "申诉 {{id}} 不在待处理状态（状态 {{status}}）。",
+      "noRefundableSettlement": "任务 {{task}} 没有可退款的结算记录。",
+      "disputeRaceLost": "申诉 {{id}} 刚刚已被他人处理。"
+    },
+    "daemon": {
+      "unreachable": "Asale 服务未运行，请重新启动应用或检查 asaled。",
+      "unauthorized": "本页面未通过 Asale 服务鉴权，请用服务启动时打印的链接重新打开。",
+      "unknownCommand": "不支持的操作：{{command}}，应用与服务版本可能不一致。",
+      "badArguments": "请求参数有误：{{detail}}"
+    },
+    "session": {
+      "expired": "登录已过期，请重新登录。",
+      "signInToBuy": "购买 Token 前请先登录。",
+      "notSignedIn": "尚未登录，请登录后重试。"
+    },
+    "tool": {
+      "unknown": "不支持的工具：{{tool}}，请选择 Claude、Codex 或 Gemini。"
+    },
+    "cli": {
+      "unknownProvider": "不支持的 CLI，请选择 Claude、Codex 或 Gemini。",
+      "noCredentials": "本机未找到 {{provider}} CLI 的登录信息。",
+      "notAnApiKeyProvider": "该服务通过登录连接，而不是粘贴 API Key；API Key 仅用于按量计费的平台接口（kimi_api、xai_api）。",
+      "apiKeyRejected": "{{provider}} 拒绝了该 API Key，请确认已完整复制且未被吊销。",
+      "apiKeyEmpty": "请输入 API Key。",
+      "apiKeyHasWhitespace": "API Key 中包含空格，请只粘贴密钥本身，而不是整条命令。"
+    },
+    "settings": {
+      "unknownProxyMode": "未知的代理模式：{{value}}。",
+      "badConsumeMode": "模式必须是 direct、market 或 auto。"
+    },
+    "usage": {
+      "regionBlocked": "上游在当前地区不可用，请在设置中配置上游代理。",
+      "upstreamStatus": "上游返回 HTTP {{status}}。{{detail}}",
+      "upstreamUnreachable": "无法访问上游用量接口：{{detail}}",
+      "unreadable": "用量响应无法解析：{{detail}}",
+      "noWindows": "上游未返回任何限额窗口。"
+    },
+    "deviceFlow": {
+      "timedOut": "{{provider}} 登录超时，验证码在批准前已过期。",
+      "expired": "{{provider}} 验证码在批准前已过期。",
+      "declined": "{{provider}} 登录被拒绝。",
+      "unsupportedProvider": "该服务不使用设备码登录（仅 Kimi 与 Grok 支持）。"
+    }
   }
 }

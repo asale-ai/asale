@@ -435,7 +435,7 @@ async fn remint_key(st: &ProxyState, used: &str) -> Result<String, String> {
             return Ok(current); // another request already replaced it
         }
     }
-    crate::commands::mint_consumer_key(app).await
+    crate::commands::mint_consumer_key(app).await.map_err(|e| e.message)
 }
 
 /// Market route: forward to the asale server gateway with the asale API key,

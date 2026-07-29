@@ -4,8 +4,9 @@
 use crate::keychain;
 use crate::state::AppState;
 use serde_json::{json, Value};
-use super::server_client::{authed, finish_auth, resp_json};
+use super::server_client::{authed, finish_auth, server_error, resp_json};
 use super::{R, err};
+use crate::cmd_err;
 
 /// Register a new account on the server; stores tokens in the secret store.
 ///
@@ -76,7 +77,7 @@ pub async fn login(state: &AppState, email: String, password: String) -> R<Value
         if v["error"]["code"].as_str() == Some("email_unverified") {
             return Ok(json!({"verification_required": true, "email": email}));
         }
-        return Err(v["error"]["message"].as_str().unwrap_or("request failed").to_string());
+        return Err(server_error(&v, "request failed"));
     }
     finish_auth(&v).await
 }
@@ -119,7 +120,7 @@ pub async fn change_password(state: &AppState, old_password: Option<String>, new
 /// Unlink a platform OAuth provider from the account.
 pub async fn unlink_oauth(state: &AppState, provider: String) -> R<Value> {
     if provider != "google" && provider != "github" {
-        return Err("unknown provider".to_string());
+        return Err(cmd_err!("errors.oauth.unknownProvider", "unknown provider", provider = provider.as_str()));
     }
     authed(state, reqwest::Method::DELETE, &format!("/api/v1/me/oauth/{provider}"), None).await
 }

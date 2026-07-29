@@ -7,6 +7,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { invoke, realTauri } from "../lib";
 import { Card, Err, Ok, PageHead, FactGrid } from "../ui";
 import { IconPower, IconDownload, IconRefresh, IconCheck, IconServer, IconGlobe, IconInfo } from "../icons";
+import { errText } from "../errors";
 
 type UpdatePhase = "idle" | "checking" | "none" | "available" | "downloading" | "ready" | "error";
 
@@ -62,12 +63,12 @@ export function Settings() {
     // Daemon self-description — real data in every mode (shell or browser).
     invoke<DaemonInfo>("daemon_info")
       .then((d) => { setDaemon(d); setDaemonErr(""); })
-      .catch((e) => setDaemonErr(String((e as Error).message)));
-    invoke<ProxySettings>("proxy_settings").then(applyProxy).catch((e) => setProxyErr(String((e as Error).message)));
+      .catch((e) => setDaemonErr(errText(e)));
+    invoke<ProxySettings>("proxy_settings").then(applyProxy).catch((e) => setProxyErr(errText(e)));
     if (!realTauri) return;
     // Shell-only info: the desktop app's own version (updater target).
     getVersion().then(setVersion).catch(() => {});
-    isEnabled().then(setAutostart).catch((e) => setAutostartErr(String(e)));
+    isEnabled().then(setAutostart).catch((e) => setAutostartErr(errText(e)));
   }, []);
 
   const applyProxy = (p: ProxySettings) => {
@@ -82,7 +83,7 @@ export function Settings() {
     try {
       applyProxy(await invoke<ProxySettings>("set_proxy_settings", { mode: proxyMode, url: proxyUrl }));
       setProxySaved(true);
-    } catch (e) { setProxyErr(String((e as Error).message)); } finally { setProxyBusy(""); }
+    } catch (e) { setProxyErr(errText(e)); } finally { setProxyBusy(""); }
   };
 
   // Tests what is on screen, not what is saved, so a proxy can be verified
@@ -90,7 +91,7 @@ export function Settings() {
   const runProxyTest = async () => {
     setProxyBusy("test"); setProxyErr(""); setProxyTest(null);
     try { setProxyTest(await invoke<ProxyTest>("test_proxy", { mode: proxyMode, url: proxyUrl })); }
-    catch (e) { setProxyErr(String((e as Error).message)); } finally { setProxyBusy(""); }
+    catch (e) { setProxyErr(errText(e)); } finally { setProxyBusy(""); }
   };
 
   const proxyDirty = proxy !== null && (proxyMode !== proxy.mode || (proxyMode === "manual" && proxyUrl !== proxy.url));
@@ -99,7 +100,7 @@ export function Settings() {
     if (autostart === null || autostartBusy) return;
     setAutostartBusy(true); setAutostartErr("");
     try { if (autostart) await disable(); else await enable(); setAutostart(await isEnabled()); }
-    catch (e) { setAutostartErr(String(e)); } finally { setAutostartBusy(false); }
+    catch (e) { setAutostartErr(errText(e)); } finally { setAutostartBusy(false); }
   };
 
   const checkForUpdate = async () => {
@@ -107,7 +108,7 @@ export function Settings() {
     try {
       const u = await check();
       if (u) { setUpdate(u); setPhase("available"); } else setPhase("none");
-    } catch (e) { setUpdateErr(String(e)); setPhase("error"); }
+    } catch (e) { setUpdateErr(errText(e)); setPhase("error"); }
   };
 
   const downloadAndInstall = async () => {
@@ -121,7 +122,7 @@ export function Settings() {
         else if (ev.event === "Finished") setProgress(100);
       });
       setPhase("ready");
-    } catch (e) { setUpdateErr(String(e)); setPhase("error"); }
+    } catch (e) { setUpdateErr(errText(e)); setPhase("error"); }
   };
 
   return (

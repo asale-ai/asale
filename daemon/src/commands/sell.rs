@@ -200,7 +200,7 @@ pub async fn publish_policy_get(state: &AppState) -> R<Value> {
         Err(e) => Ok(json!({
             "policy": publisher::local_policy(&state.store).await,
             "source": "cache",
-            "server_error": e,
+            "server_error": e.message,
         })),
     }
 }

@@ -5,7 +5,7 @@ import {
   type UsageLimits, type LimitProvider, type LimitWindow,
 } from "../lib";
 import { computePace, resetToMs, formatReset, formatExactReset, type DisplayMode, type Pace } from "../lib/limit-pace";
-import { PageHead, IconAction, Mark } from "../ui";
+import { PageHead, IconAction, Mark, Skeleton } from "../ui";
 import { IconRefresh, IconPlus } from "../icons";
 
 const PROVIDERS = [
@@ -105,6 +105,10 @@ export function Limits() {
   const [data, setData] = useState<UsageLimits | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  // The first read is slow (it fetches each provider's live usage). Without
+  // this the page opens claiming every provider is "not connected" — a wrong
+  // answer, and the one the user is least equipped to second-guess.
+  const [loading, setLoading] = useState(inTauri);
   const containerRef = useRef<HTMLDivElement>(null);
   const [labelWidth, setLabelWidth] = useState(0);
   // Display is fixed to "used" — this page only surfaces consumed quota.
@@ -120,7 +124,8 @@ export function Limits() {
     if (force) setRefreshing(true);
     invoke<UsageLimits>("usage_limits", { force })
       .then(setData)
-      .finally(() => setRefreshing(false));
+      .catch(() => {})
+      .finally(() => { setRefreshing(false); setLoading(false); });
   }, []);
 
   useEffect(() => {
@@ -280,9 +285,17 @@ export function Limits() {
       >
         <div className="limits-panel-head">
           <h3 className="limits-panel-title">{t("limits.panelTitle")}</h3>
-          <span className="count-chip">{connectedCount}/{providers.length}</span>
+          <span className="count-chip">{loading ? "—" : connectedCount}/{providers.length}</span>
         </div>
-        <div className="limit-cards">{providers.map(renderProvider)}</div>
+        <div className="limit-cards">
+          {loading
+            ? PROVIDERS.map((p) => (
+                <ToolGroup key={p.id} id={p.id} name={p.label}>
+                  <div className="limit-status"><Skeleton w={132} h={11} /></div>
+                </ToolGroup>
+              ))
+            : providers.map(renderProvider)}
+        </div>
         <p className="limits-foot">{t("limits.explainBody")}</p>
       </div>
     </div>

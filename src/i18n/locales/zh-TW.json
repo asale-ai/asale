@@ -17,7 +17,7 @@
   "dashboard": {
     "title": "總覽",
     "sub": "共享訂閱的閒置額度，或從市場購買額度 — 以 USDT 結算。",
-    "publishing": "出售狀態",
+    "publishing": "賣出",
     "online": "上線",
     "offline": "離線",
     "connecting": "連線中",
@@ -54,6 +54,11 @@
     "goConnect": "去連接帳號"
   },
   "status": {
+    "starting": {
+      "label": "正在啟動",
+      "desc": "正在連線本機 Asale 服務並讀取狀態。",
+      "hint": "通常只需一兩秒。"
+    },
     "daemonDown": {
       "label": "本機服務未執行",
       "desc": "本機 Asale 服務（asaled）沒有回應。",
@@ -139,6 +144,7 @@
     "scanning": "掃描中…",
     "cliNone": "本機未發現 CLI 憑證。",
     "envWarning": "警告：環境變數 {{vars}} 已設定，會覆寫 CLI 的本機憑證。",
+    "cliSkippedBuying": "{{tools}} 正在透過 asale 買入，其本機帳號不會用於賣出。關閉買入後即可重新賣出。",
     "connectVia": "透過瀏覽器登入",
     "connectViaKey": "使用 API Key 連接",
     "connectViaCode": "在瀏覽器中確認驗證碼",
@@ -244,8 +250,9 @@
     "depositWarnTitle": "僅支援 {{network}} 上的 USDT",
     "depositWarnDesc": "請透過 {{network}} 網路轉入 USDT。其他幣種，或其他網路上的 USDT，都不會入帳。",
     "qrAlt": "付款 QR Code",
-    "payAmountLabel": "儲值金額（選填）",
+    "payAmountLabel": "儲值金額",
     "payAmountAny": "任意金額",
+    "payAmountCustom": "其他金額",
     "payAmountHintAny": "留空則在錢包中自行輸入金額。",
     "payAmountHintSet": "支援的錢包掃碼後會自動帶入該金額。",
     "payAmountHintBelowMin": "低於建議的最低儲值額 {{amount}} USDT —— 小額轉帳同樣會入帳。",
@@ -591,7 +598,9 @@
   },
   "common": {
     "copy": "複製",
-    "copied": "已複製"
+    "copied": "已複製",
+    "networkError": "無法連線伺服器，請檢查網路後重試。",
+    "requestFailed": "請求失敗，請重試。"
   },
   "modelPicker": {
     "title": "選擇模型",
@@ -610,5 +619,181 @@
     "remove": "移除",
     "choose": "選擇模型…",
     "shown": "{{n}} 個結果"
+  },
+  "errors": {
+    "common": {
+      "internal": "伺服器發生錯誤，請稍後再試。",
+      "notFound": "找不到資料。",
+      "rateLimited": "請求過於頻繁，請稍候再試。"
+    },
+    "account": {
+      "banned": "此帳號已被封鎖。",
+      "blocked": "此帳號已被限制交易。"
+    },
+    "auth": {
+      "badCredentials": "電子郵件或密碼不正確。",
+      "weakCredentials": "請填寫電子郵件，密碼至少 8 個字元。",
+      "emailTaken": "此電子郵件已被註冊。",
+      "emailUnverified": "電子郵件尚未驗證。",
+      "tokenRequired": "驗證連結缺少權杖。",
+      "verifyInvalid": "驗證連結無效。",
+      "verifyUsed": "驗證連結已被使用。",
+      "verifyExpired": "驗證連結已過期，請重新取得。",
+      "verifyStale": "驗證連結已失效，請重新取得。",
+      "missingBearer": "尚未登入，請登入後重試。",
+      "invalidToken": "登入狀態已失效，請重新登入。",
+      "deviceFieldsRequired": "缺少裝置 ID 或裝置公鑰。",
+      "web3AddressShape": "錢包地址需為 0x 開頭的 40 位十六進位字元。",
+      "siweMessageTooLong": "簽章訊息過長。",
+      "siweNonceMissing": "簽章訊息缺少 Nonce 行。",
+      "siweNonceExpired": "簽章請求不存在或已過期，請重新發起。",
+      "siweRejected": "錢包簽章驗證失敗：{{detail}}"
+    },
+    "field": {
+      "emailRequired": "請輸入電子郵件地址。",
+      "emailTooLong": "電子郵件地址過長。",
+      "emailWhitespace": "電子郵件地址不能包含空格或控制字元。",
+      "emailNoAt": "電子郵件地址必須包含 @。",
+      "emailInvalid": "電子郵件地址格式不正確。",
+      "emailBadDomain": "電子郵件網域不正確。",
+      "regionInvalid": "請選擇國家或地區。"
+    },
+    "profile": {
+      "nameLength": "名稱長度需為 1–64 個字元。",
+      "avatarUrlTooLong": "頭像連結過長。",
+      "passwordTooShort": "密碼至少需要 8 個字元。",
+      "wrongCurrentPassword": "目前密碼不正確。",
+      "setPasswordBeforeUnlink": "解除綁定最後一個登入方式前，請先設定密碼。"
+    },
+    "apiKey": {
+      "missing": "請求缺少 API Key。",
+      "badPrefix": "API Key 格式不正確。",
+      "unknown": "API Key 不存在。",
+      "disabled": "API Key 已被停用。"
+    },
+    "gateway": {
+      "unknownDialect": "此介面不支援路徑 {{path}}。"
+    },
+    "market": {
+      "noSupply": "目前沒有賣家在售 {{model}}。",
+      "modelNotTraded": "本平台不交易 {{model}}。"
+    },
+    "wallet": {
+      "insufficientBalance": "餘額不足。",
+      "insufficientForBudget": "餘額不足以支付本次請求的預算。",
+      "amountPositive": "金額必須大於 0。",
+      "amountTooLarge": "金額過大。",
+      "unsupportedChain": "不支援 {{chain}}，可用網路：{{supported}}。",
+      "invalidChainAddress": "這不是有效的 {{chain}} 位址。",
+      "withdrawBelowMin": "{{chain}} 最低提領金額為 {{min}} micro-USDT。",
+      "withdrawFeeExceedsAmount": "提領手續費（{{fee}} micro-USDT）已超過提領金額。",
+      "withdrawSingleLimit": "超過單筆提領限額。",
+      "withdrawDailyLimit": "超過當日提領限額。",
+      "withdrawNotWhitelisted": "此提領位址不在白名單中。",
+      "depositUnprovisioned": "儲值服務暫不可用，請稍後再試。",
+      "depositMisconfigured": "儲值服務設定異常，請聯絡客服。",
+      "depositPoolEmpty": "暫時沒有可用的儲值位址，請稍後再試。"
+    },
+    "dispute": {
+      "fieldsRequired": "請填寫任務與申訴理由。",
+      "reasonTooLong": "理由最多 {{max}} 個字元。",
+      "notOwner": "此任務不屬於目前帳號。",
+      "notTerminal": "此任務尚未結算，暫不能申訴。",
+      "windowExpired": "已超過 {{hours}} 小時申訴期。",
+      "alreadyFiled": "此任務已有申訴紀錄。"
+    },
+    "publishConfig": {
+      "reserveFloorRange": "保留額度需在 0–{{max}} 之間。",
+      "maxRpmRange": "速率上限需在 0–{{max}} 之間。",
+      "minPriceRange": "最低價需在 0–{{max}} 之間。",
+      "listTooLong": "{{field}} 最多 {{max}} 筆。",
+      "listEntryLength": "{{field}} 中每一項需為 1–{{max}} 個字元。"
+    },
+    "oauth": {
+      "unknownProvider": "不支援的登入方式：{{provider}}。",
+      "notConfigured": "本站未啟用 {{provider}} 登入。",
+      "halfConfigured": "{{provider}} 登入設定不完整：{{missing}} 為空。",
+      "badRedirectUri": "登入回呼位址無效：{{detail}}",
+      "codeRequired": "登入回呼缺少授權碼。",
+      "codeRejected": "{{provider}} 拒絕了本次登入：{{detail}}",
+      "noVerifiedEmail": "此 {{provider}} 帳號沒有已驗證的電子郵件。",
+      "identityLinkedElsewhere": "此第三方帳號已綁定到其他 Asale 帳號。",
+      "upstream": "無法連線 {{provider}}，請重試。",
+      "upstreamIncomplete": "{{provider}} 回傳的帳號資訊不完整，請重試。",
+      "unknownFlow": "此登入流程已結束，請重新發起。",
+      "exchangeFailed": "登入未能完成：{{detail}}",
+      "timedOut": "登入逾時，請重試。"
+    },
+    "upstream": {
+      "provider": "模型上游回傳錯誤（{{code}}）：{{detail}}",
+      "badStream": "{{dialect}} 回應串流格式異常。",
+      "streamFailed": "{{provider}} 提前中斷了回應：{{detail}}"
+    },
+    "catalog": {
+      "fetchFailed": "拉取上游模型目錄失敗：{{detail}}",
+      "malformed": "上游模型目錄解析失敗：{{detail}}"
+    },
+    "admin": {
+      "roleRequired": "此操作需要管理員權限。",
+      "amountNonZero": "調整金額不能為 0。",
+      "adjustLimit": "調整金額超過單次上限 {{max}} micro-USDT。",
+      "reasonRequired": "請填寫原因。",
+      "reasonTooLong": "原因最多 {{max}} 個字元。",
+      "withdrawalNotInReview": "提領單 {{id}} 不在風控審核中（狀態 {{status}}）。",
+      "withdrawalNotRejectable": "提領單 {{id}} 在狀態 {{status}} 下無法駁回。",
+      "tooManyRules": "規則過多，最多 {{max}} 筆。",
+      "modelAndRefPrice": "請填寫模型，且參考價不能為負。",
+      "unknownTokenType": "未知的 token 類型：{{value}}。",
+      "marketPriceNonNegative": "市場價不能為負。",
+      "modelIdRequired": "請填寫 model_id。",
+      "modelIdsRequired": "請至少選擇一個模型。",
+      "refPricesNonNegative": "參考價不能為負。",
+      "modelExists": "模型 {{model}} 已存在。",
+      "unknownAction": "未知操作：{{value}}。",
+      "noUpstreamIds": "所選模型在上游均不存在。",
+      "disputeActionInvalid": "操作必須是退款或駁回。",
+      "disputeNotPending": "申訴 {{id}} 不在待處理狀態（狀態 {{status}}）。",
+      "noRefundableSettlement": "任務 {{task}} 沒有可退款的結算紀錄。",
+      "disputeRaceLost": "申訴 {{id}} 剛剛已被他人處理。"
+    },
+    "daemon": {
+      "unreachable": "Asale 服務未執行，請重新啟動應用程式或檢查 asaled。",
+      "unauthorized": "本頁面未通過 Asale 服務驗證，請用服務啟動時列印的連結重新開啟。",
+      "unknownCommand": "不支援的操作：{{command}}，應用程式與服務版本可能不一致。",
+      "badArguments": "請求參數有誤：{{detail}}"
+    },
+    "session": {
+      "expired": "登入已過期，請重新登入。",
+      "signInToBuy": "購買 Token 前請先登入。",
+      "notSignedIn": "尚未登入，請登入後重試。"
+    },
+    "tool": {
+      "unknown": "不支援的工具：{{tool}}，請選擇 Claude、Codex 或 Gemini。"
+    },
+    "cli": {
+      "unknownProvider": "不支援的 CLI，請選擇 Claude、Codex 或 Gemini。",
+      "noCredentials": "本機未找到 {{provider}} CLI 的登入資訊。",
+      "notAnApiKeyProvider": "此服務透過登入連接，而不是貼上 API Key；API Key 僅用於按量計費的平台介面（kimi_api、xai_api）。",
+      "apiKeyRejected": "{{provider}} 拒絕了該 API Key，請確認已完整複製且未被撤銷。",
+      "apiKeyEmpty": "請輸入 API Key。",
+      "apiKeyHasWhitespace": "API Key 中包含空格，請只貼上金鑰本身，而不是整條命令。"
+    },
+    "settings": {
+      "unknownProxyMode": "未知的代理模式：{{value}}。",
+      "badConsumeMode": "模式必須是 direct、market 或 auto。"
+    },
+    "usage": {
+      "regionBlocked": "上游在目前地區不可用，請在設定中設定上游代理。",
+      "upstreamStatus": "上游回傳 HTTP {{status}}。{{detail}}",
+      "upstreamUnreachable": "無法存取上游用量介面：{{detail}}",
+      "unreadable": "用量回應無法解析：{{detail}}",
+      "noWindows": "上游未回傳任何限額視窗。"
+    },
+    "deviceFlow": {
+      "timedOut": "{{provider}} 登入逾時，驗證碼在核准前已過期。",
+      "expired": "{{provider}} 驗證碼在核准前已過期。",
+      "declined": "{{provider}} 登入被拒絕。",
+      "unsupportedProvider": "此服務不使用裝置碼登入（僅 Kimi 與 Grok 支援）。"
+    }
   }
 }

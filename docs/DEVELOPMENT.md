@@ -49,6 +49,36 @@ cargo test -p asale-client-core
 > Use `pnpm dev:app`, not `pnpm tauri dev`: without `ASALE_QUOTA_PUBKEY` the client cannot
 > verify the gateway's authorization, and selling stays stuck at "coming online" forever.
 
+### Running alongside the released app
+
+`dev:app` moves every piece of local state to a development-only copy, so an installed
+release build can stay open at the same time:
+
+| | Release | `pnpm dev:app` |
+|---|---|---|
+| Data dir | `~/.asale` | `~/.asale-dev` (`ASALE_DATA_DIR`) |
+| Daemon | `127.0.0.1:9700` | `127.0.0.1:9701` (`ASALE_BIND`) |
+| Local proxy | `9787` | `9788` (`ASALE_PROXY_PORT`) |
+| Bundle identifier | `com.asale.desktop` | `com.asale.desktop.dev` (`src-tauri/tauri.dev.conf.json`) |
+
+The identifier has to differ: the single-instance lock is `/tmp/<identifier>_si.sock`, so
+sharing one makes the dev build exit on launch and focus the release window instead. Window
+state and the launch-at-login entry are keyed by identifier too, so they separate as well.
+
+Every variable keeps a `${VAR:-default}`, so a one-off set is still just an override:
+
+```bash
+ASALE_DATA_DIR=~/.asale-staging ASALE_BIND=127.0.0.1:9702 pnpm dev:app
+```
+
+Plain `pnpm dev` (browser debugging) still points the frontend at `127.0.0.1:9700`; to reach
+the dev daemon run `VITE_ASALE_DAEMON=http://127.0.0.1:9701 pnpm dev`. The vite server that
+`dev:app` starts inherits the variable, so nothing extra is needed there.
+
+What stays shared is the CLI tools' own configuration (`~/.claude`, `~/.codex/config.toml`) —
+subscribing and buying exist to rewrite those real files, so the two builds overwrite each
+other's. Don't drive both at once.
+
 OAuth client credentials are documented in [`.env.example`](../.env.example) (Gemini
 requires your own; Claude/Codex have public defaults).
 

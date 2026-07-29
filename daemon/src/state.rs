@@ -16,7 +16,10 @@ use tokio::task::JoinHandle;
 pub enum FlowStatus {
     Pending,
     Done(serde_json::Value),
-    Failed(String),
+    /// Keeps the failure's translation key, not just its English text — the
+    /// frontend renders an async flow's error the same way it renders a
+    /// synchronous one (`commands::CmdError`).
+    Failed(crate::commands::CmdError),
 }
 
 pub struct AppState {

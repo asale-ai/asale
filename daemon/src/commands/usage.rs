@@ -7,6 +7,7 @@ use asale_client_core::store::ToolRow;
 use asale_client_core::{discovery, Provider};
 use serde_json::{json, Value};
 use super::{R, day_start_ts, day_str, err, now_secs};
+use crate::cmd_err;
 
 /// Rolling window used for the subscription capacity estimate (5h, mirrors
 /// `publisher::WINDOW_SECS`).
@@ -281,7 +282,7 @@ pub(crate) async fn claude_windows_cached(
 /// Fetch + normalize Claude's OAuth usage windows into our LimitWindow shape.
 /// The `Err` string is user-facing: it is what the Limits page shows to explain
 /// an estimate, so it names the status and the upstream's own message.
-pub(crate) async fn fetch_claude_windows(access_token: &str) -> Result<Vec<Value>, String> {
+pub(crate) async fn fetch_claude_windows(access_token: &str) -> R<Vec<Value>> {
     let resp = asale_client_core::http::upstream()
         .get("https://api.anthropic.com/api/oauth/usage")
         .header("Authorization", format!("Bearer {access_token}"))
@@ -290,7 +291,13 @@ pub(crate) async fn fetch_claude_windows(access_token: &str) -> Result<Vec<Value
         .timeout(std::time::Duration::from_secs(12))
         .send()
         .await
-        .map_err(|e| format!("request to api.anthropic.com failed: {e}"))?;
+        .map_err(|e| {
+            cmd_err!(
+                "errors.usage.upstreamUnreachable",
+                format!("request to api.anthropic.com failed: {e}"),
+                detail = e.to_string()
+            )
+        })?;
     let status = resp.status();
     if !status.is_success() {
         let body: Value = resp.json().await.unwrap_or(Value::Null);
@@ -298,15 +305,29 @@ pub(crate) async fn fetch_claude_windows(access_token: &str) -> Result<Vec<Value
         return Err(match (status.as_u16(), msg) {
             // What a geo-blocked region answers to *every* request, including
             // unauthenticated ones — the fix is an upstream proxy, not a re-login.
-            (403, m) if m.contains("not allowed") => format!("HTTP 403 {m} (region-blocked upstream)"),
-            (_, "") => format!("HTTP {status}"),
-            (code, m) => format!("HTTP {code} {m}"),
+            (403, m) if m.contains("not allowed") => cmd_err!(
+                "errors.usage.regionBlocked",
+                format!("HTTP 403 {m} (region-blocked upstream)"),
+                detail = m
+            ),
+            (_, "") => cmd_err!(
+                "errors.usage.upstreamStatus",
+                format!("HTTP {status}"),
+                status = status.as_u16(),
+                detail = ""
+            ),
+            (code, m) => cmd_err!(
+                "errors.usage.upstreamStatus",
+                format!("HTTP {code} {m}"),
+                status = code,
+                detail = m
+            ),
         });
     }
-    let body: Value = resp.json().await.map_err(|e| format!("unreadable usage response: {e}"))?;
+    let body: Value = resp.json().await.map_err(|e| cmd_err!("errors.usage.unreadable", format!("unreadable usage response: {e}"), detail = e.to_string()))?;
     let windows = normalize_claude_windows(&body);
     if windows.is_empty() {
-        Err("usage endpoint returned no rate-limit windows".into())
+        Err(cmd_err!("errors.usage.noWindows", "usage endpoint returned no rate-limit windows"))
     } else {
         Ok(windows)
     }

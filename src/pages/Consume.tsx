@@ -7,6 +7,7 @@ import {
 import { Card, Ok, Err, SkeletonRows, PageHead, IconAction, Mark } from "../ui";
 import { ModelMultiSelect, type ModelOption } from "../components/ModelPicker";
 import { IconRoute, IconConsume, IconRefresh, IconCheck, IconAlert, IconX } from "../icons";
+import { errText } from "../errors";
 
 const priceOf = (m: MarketModel, type: string) => m.prices.find((p) => p.token_type === type);
 const usd = (micros: number) => `$${pricePerMillion(micros).toFixed(2)}`;
@@ -70,7 +71,7 @@ export function Consume() {
     if (!inTauri) return Promise.resolve();
     return invoke<BuyTools>("buy_tools")
       .then((r) => setTools(r.tools || []))
-      .catch((e) => setErr(String((e as Error).message)));
+      .catch((e) => setErr(errText(e)));
   }, []);
 
   const refresh = useCallback(() => {
@@ -112,7 +113,7 @@ export function Consume() {
       setRestart((r) => ({ ...r, [tool.id]: true }));
       await loadTools();
     } catch (e) {
-      setErr(String((e as Error).message));
+      setErr(errText(e));
       await loadTools(); // roll the optimistic update back to server truth
     } finally {
       setPending((p) => ({ ...p, [tool.id]: false }));
@@ -143,7 +144,7 @@ export function Consume() {
         icon={<IconConsume />}
         title={t("consume.toolsTitle")}
         desc={t("consume.toolsDesc")}
-        right={<span className="count-chip">{tools.filter((x) => x.installed).length}/{tools.length}</span>}
+        right={<span className="count-chip">{loading ? "—/—" : `${tools.filter((x) => x.installed).length}/${tools.length}`}</span>}
       >
         {loading ? (
           <SkeletonRows rows={3} />

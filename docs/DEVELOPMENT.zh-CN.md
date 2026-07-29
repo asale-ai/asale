@@ -47,6 +47,30 @@ cargo test -p asale-client-core
 > 用 `pnpm dev:app` 而不是 `pnpm tauri dev`：缺了 `ASALE_QUOTA_PUBKEY`，客户端无法验证
 > 网关授权，卖出会永远卡在「正在上线」。
 
+### 与正式版并存
+
+`dev:app` 已经把整套本地状态挪到开发专用的一份，所以装好的正式版可以同时开着：
+
+| | 正式版 | `pnpm dev:app` |
+|---|---|---|
+| 数据目录 | `~/.asale` | `~/.asale-dev`（`ASALE_DATA_DIR`） |
+| daemon | `127.0.0.1:9700` | `127.0.0.1:9701`（`ASALE_BIND`） |
+| 本地代理 | `9787` | `9788`（`ASALE_PROXY_PORT`） |
+| bundle identifier | `com.asale.desktop` | `com.asale.desktop.dev`（`src-tauri/tauri.dev.conf.json`） |
+
+identifier 必须分开：单实例插件的锁是 `/tmp/<identifier>_si.sock`，共用的话开发版一启动就会自己退出、把正式版的窗口拉到前台。窗口状态、开机自启项也跟着 identifier 走，一并隔开了。
+
+每个变量都保留 `${VAR:-默认值}`，临时换一套照样能覆盖：
+
+```bash
+ASALE_DATA_DIR=~/.asale-staging ASALE_BIND=127.0.0.1:9702 pnpm dev:app
+```
+
+单独跑 `pnpm dev`（浏览器调试）时前端默认指向 `127.0.0.1:9700`，要接开发 daemon 得自己带上
+`VITE_ASALE_DAEMON=http://127.0.0.1:9701 pnpm dev`；`dev:app` 会把这个变量传给它拉起的 vite，无需额外设置。
+
+仍然共用的只有 CLI 工具自己的配置（`~/.claude`、`~/.codex/config.toml`）—— 订阅和买入本来就是要改这些真实文件，两边会互相覆盖，别同时操作。
+
 OAuth 客户端凭证见 [`.env.example`](../.env.example)（Gemini 需要自备，Claude/Codex 有公开默认值）。
 
 ---

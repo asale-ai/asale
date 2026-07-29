@@ -157,8 +157,19 @@ pub fn delete(provider: &str, account_id: &str) {
 /// source of truth, so a write failure is logged and the command carries on.
 pub async fn resync(store: &LocalStore) -> Vec<AuthManifest> {
     let Ok(tools) = store.list_tools().await else { return Vec::new() };
+    // A CLI that is buying is not a supplier: its synced account has no manifest
+    // while that is true, matching what `publisher::rebuild_pool` offers and
+    // what the sell page shows.
+    let buying = crate::tool_config::buying_set(
+        store,
+        tools.iter().filter(|t| t.origin.as_deref() == Some("import")).map(|t| t.provider.as_str()),
+    )
+    .await;
     let mut manifests = Vec::with_capacity(tools.len());
     for t in &tools {
+        if t.origin.as_deref() == Some("import") && buying.contains(&t.provider) {
+            continue;
+        }
         let plan = store
             .get_setting(&format!("plan:{}:{}", t.provider, t.account_id))
             .await

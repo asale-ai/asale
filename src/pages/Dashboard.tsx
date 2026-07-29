@@ -27,20 +27,27 @@ export function Dashboard({ onNavigate }: { onNavigate: (t: Tab) => void }) {
 
   useEffect(() => {
     if (!inTauri) { setLoading(false); return; }
-    const poll = () => {
+    // One dropped poll is not an outage (the daemon restarts itself on update);
+    // only a run of them earns the red banner.
+    let fails = 0;
+    const proxy = () =>
       invoke<ProxyStatus>("proxy_status")
-        .then((s) => { setStatus(s); setDaemonDown(false); })
-        .catch(() => setDaemonDown(true));
+        .then((s) => { fails = 0; setStatus(s); setDaemonDown(false); })
+        .catch(() => { if (++fails >= 3) setDaemonDown(true); });
+    const poll = () => {
+      proxy();
       invoke<AccountStatus[]>("list_accounts").then(setAccounts).catch(() => {});
       invoke<BuyTools>("buy_tools").then((r) => setTools(r.tools || [])).catch(() => {});
       // The balance moves on its own as requests settle, and a failure at boot
       // must not leave the headline number blank until the next page visit.
       invoke<Wallet>("wallet_overview").then(setWallet).catch(() => {});
     };
-    poll();
     // Initial data load — shimmer until the first batch settles (polling below
-    // refreshes silently and does not re-trigger the skeleton).
+    // refreshes silently and does not re-trigger the skeleton). `proxy_status`
+    // is part of it: without it the sell tile would drop out of the skeleton
+    // reading "offline" before the link state is actually known.
     Promise.allSettled([
+      proxy(),
       invoke<Wallet>("wallet_overview").then(setWallet),
       invoke<AccountStatus[]>("list_accounts").then(setAccounts),
       invoke<BuyTools>("buy_tools").then((r) => setTools(r.tools || [])),
