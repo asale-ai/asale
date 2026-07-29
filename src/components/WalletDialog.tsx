@@ -173,6 +173,12 @@ const AMOUNT_DEBOUNCE_MS = 600;
  *  free field beside them still takes any figure — including none. */
 const AMOUNT_PRESETS = [10, 20, 50, 100];
 
+/** Lit on open. Most top-ups land here anyway, and it means the QR is a
+ *  filled-in payment request from the first frame rather than a bare address
+ *  waiting for a decision. Tapping the lit chip still gets you back to "any
+ *  amount". */
+const DEFAULT_AMOUNT = 20;
+
 function RailDeposit({
   method, limits, onDone,
 }: {
@@ -189,13 +195,15 @@ function RailDeposit({
   /* The picker is one value in two places: a chip is either lit or the free
      field holds the figure. Kept apart so typing "10" by hand does not silently
      jump into the chip and empty the box under the cursor. */
-  const [preset, setPreset] = useState<number | null>(null);
+  const [preset, setPreset] = useState<number | null>(DEFAULT_AMOUNT);
   const [custom, setCustom] = useState("");
   const amountInput = preset != null ? String(preset) : custom;
   const clearAmount = useCallback(() => { setPreset(null); setCustom(""); }, []);
   /* The amount the session was actually opened for, settled on the debounce —
-     a half-typed "1" must not tear down the session meant for "10.50". */
-  const [amount, setAmount] = useState<number | null>(null);
+     a half-typed "1" must not tear down the session meant for "10.50". Seeded
+     with the lit chip so the first session is opened for it directly, rather
+     than one for "any amount" that the debounce immediately replaces. */
+  const [amount, setAmount] = useState<number | null>(DEFAULT_AMOUNT * 1_000_000);
 
   const [session, setSession] = useState<DepositSession | null>(null);
   const [err, setErr] = useState("");

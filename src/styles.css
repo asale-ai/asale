@@ -1394,9 +1394,11 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
   .amt-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .amt-custom { grid-column: 1 / -1; }
 }
+/* Centred, not baseline-aligned: a baseline group in a fixed-height flex box is
+   laid out from the top, which left the figure riding high in the chip. */
 .amt-chip {
-  display: flex; align-items: baseline; justify-content: center; gap: 3px;
-  padding: 0 6px; height: 34px; min-width: 0;
+  display: flex; align-items: center; justify-content: center; gap: 3px;
+  padding: 0 6px; height: 34px; min-width: 0; line-height: 1;
   border: 1px solid transparent; border-radius: var(--r2);
   background: var(--bg-2); color: var(--fg-2); cursor: pointer;
   font-size: var(--fs-sub); font-weight: 500; font-variant-numeric: tabular-nums;
