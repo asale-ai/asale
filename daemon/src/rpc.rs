@@ -213,11 +213,14 @@ rpc_args! {
     ModeArgs       { mode: String }
     // `models` absent → leave the selection unchanged; `[]` → clear it.
     BuyToolArgs    { tool: String, enabled: bool, #[serde(default)] models: Option<Vec<String>> }
+    // Every field past `enabled` absent → leave that term of the sale as it is.
     SellArgs       {
         provider: String,
         #[serde(alias = "account_id")] account_id: String,
         enabled: bool,
         #[serde(default, alias = "daily_limit")] daily_limit: Option<i64>,
+        #[serde(default, alias = "min_ratio")] min_ratio: Option<i64>,
+        #[serde(default, alias = "max_ratio")] max_ratio: Option<i64>,
     }
     LaneArgs       {
         #[serde(default)] provider: Option<String>,
@@ -370,10 +373,13 @@ async fn rpc(
             let p: AccountArgs = args(&a)?;
             commands::remove_account(st, p.provider, p.account_id).await.map(Value::Bool)?
         },
-        // Sell side: one switch + daily cap per subscription account.
+        // Sell side: one switch + daily cap + price band per subscription account.
         "set_account_sell" => {
             let p: SellArgs = args(&a)?;
-            commands::set_account_sell(st, p.provider, p.account_id, p.enabled, p.daily_limit).await?
+            commands::set_account_sell(
+                st, p.provider, p.account_id, p.enabled, p.daily_limit, p.min_ratio, p.max_ratio,
+            )
+            .await?
         },
         "resume_lane" => {
             let p: LaneArgs = args(&a)?;

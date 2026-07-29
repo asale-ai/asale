@@ -31,8 +31,6 @@ const KEY_PROVIDERS = [
   { id: "xai_api", label: "xAI API", keyUrl: "https://console.x.ai" },
 ];
 
-const fmtTime = (secs: number | null) => (secs ? new Date(secs * 1000).toLocaleString() : "—");
-
 /** "in 4m 12s" — a countdown is what makes an auto-recovering pause read as
  *  "wait" rather than "broken". Returns "" once the instant has passed. */
 const countdown = (until: number, now: number) => {
@@ -52,6 +50,187 @@ const shortSource = (s: string) =>
   s === "oauth" ? "Asale OAuth"
     : s.startsWith("keychain:") ? s.slice("keychain:".length)
     : s.split("/").filter(Boolean).slice(-2).join("/");
+
+/** The band's legal range, which is also the widest one there is: the server
+ *  clamps the market ratio to [0.10, 1.00], so 10–100 percent *of* list price
+ *  covers every price a model can have and can only ever mean "sell at whatever
+ *  the market pays". */
+const FULL_BAND: [number, number] = [10, 100];
+const isFullBand = (lo: number, hi: number) => lo <= FULL_BAND[0] && hi >= FULL_BAND[1];
+const clampRatio = (n: number) => Math.min(FULL_BAND[1], Math.max(FULL_BAND[0], n));
+
+/** Floors worth one click. A seller's decision is almost always "not below X",
+ *  so the presets set the floor and leave the ceiling at list price — typing
+ *  two numbers to express one intent is the part that makes this tedious. */
+const BAND_PRESETS = [FULL_BAND[0], 50, 60, 70, 80];
+
+/** Why a lane is or is not on the market, collapsed to the four cases the
+ *  ranking chart draws differently.
+ *
+ *  These are *states*, not series, so they wear the app's status colours rather
+ *  than a categorical palette — and each one carries its own words in the row
+ *  beside the bar, because a colour on its own is not an answer. */
+type LaneTone = "selling" | "price" | "blocked" | "off";
+
+const laneTone = (l: Lane): LaneTone =>
+  l.status === "selling" ? "selling"
+    : l.status === "withheld" ? "price"
+    : l.status === "off" ? "off"
+    : "blocked";
+
+/** How many models a chart shows before it needs asking. Enough that the whole
+ *  band question is answerable at a glance for every provider we sell, without
+ *  a hundred-row catalog burying the account below it. */
+const RANK_VISIBLE = 8;
+
+/** One subscription's models, ranked by what the market currently pays for
+ *  them, and split into what is selling and what is not.
+ *
+ *  The bar is the price as a fraction of the vendor's list price, so a longer
+ *  bar is more money, and the account's band is drawn on the same scale as the
+ *  zone those bars have to land in. That is the whole question this chart
+ *  exists to answer: which of my models has the market pushed below the price I
+ *  said I would sell at.
+ *
+ *  The scale is fixed at 0–100% rather than fitted to the data. Bars need a zero
+ *  baseline to be read as lengths at all, and the band markers are only
+ *  meaningful against an axis that does not move when the prices do.
+ */
+function DiscountRank({
+  lanes, band, now, onResume, resuming,
+}: {
+  lanes: Lane[];
+  band: [number, number];
+  now: number;
+  onResume: (lane: Lane) => void;
+  resuming: Record<string, boolean>;
+}) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const [lo, hi] = band;
+  const full = isFullBand(lo, hi);
+
+  // Cheapest first: the models the market has pushed furthest down are the ones
+  // a band is about, so they are the ones worth reading first. A lane with no
+  // known price sorts last — it has nothing to rank on.
+  const rows = [...lanes].sort((a, b) => {
+    const ra = a.ratio ?? 1e9;
+    const rb = b.ratio ?? 1e9;
+    return ra - rb || a.model.localeCompare(b.model);
+  });
+  const shown = expanded ? rows : rows.slice(0, RANK_VISIBLE);
+  const hidden = rows.length - shown.length;
+  const sellingCount = rows.filter((l) => l.status === "selling").length;
+  const priceCount = rows.filter((l) => l.status === "withheld").length;
+  const priced = rows.filter((l) => l.ratio != null).length;
+
+  const stateText = (l: Lane): string => {
+    if (l.status === "selling") return t("publish.rank.onSale");
+    if (l.status === "withheld") return t("publish.rank.heldOnPrice");
+    if (l.status === "off") return t("publish.rank.switchedOff");
+    if (l.paused_reason) return t(`publish.lanePause.${l.paused_reason}`, { defaultValue: l.paused_reason });
+    return t(`publish.laneStatus.${l.status}`, { defaultValue: l.status });
+  };
+
+  return (
+    <div className="disc-rank">
+      <div className="dr-head">
+        <span className="dr-title">{t("publish.rank.title")}</span>
+        <span className="dr-count">{t("publish.rank.onSaleOfTotal", { n: sellingCount, total: rows.length })}</span>
+      </div>
+
+      {/* No price for anything is a state of its own, and a very different one
+          from "the market pays nothing" — which is what a chart of empty bars
+          would otherwise be saying. */}
+      {priced === 0 && <div className="dr-nodata">{t("publish.rank.noPrices")}</div>}
+
+      <div className="dr-rows">
+        {shown.map((l) => {
+          const lk = `${l.provider}:${l.account_id}:${l.model}`;
+          const tone = laneTone(l);
+          const r = l.ratio;
+          const back = countdown(Math.max(l.resume_at, l.cooldown_until ?? 0), now);
+          const state = stateText(l);
+          return (
+            <div
+              key={lk}
+              className={`dr-row ${tone}${l.requires_user ? " attention" : ""}`}
+              title={`${l.model} · ${state}${l.last_error ? `\n${l.last_error}` : ""}`}
+            >
+              <span className="dr-model mono">{l.model}</span>
+              <div className="dr-track">
+                {/* The zone the operator said they would sell in. Left out when
+                    the band is the full range: a tint over the whole track
+                    would read as a threshold where there is none. A band that
+                    reaches list price has no upper edge to draw — there is no
+                    such thing as a price too good to accept. */}
+                {!full && (
+                  <span
+                    className={`dr-band${hi >= FULL_BAND[1] ? " to-top" : ""}`}
+                    style={{ left: `${lo}%`, width: `${Math.max(hi - lo, 0)}%` }}
+                  />
+                )}
+                {r != null && (
+                  <span className="dr-fill" style={{ width: `${clampRatio(r)}%` }} />
+                )}
+              </div>
+              <span className="dr-val mono tabular">{r == null ? "—" : `${r}%`}</span>
+              <span className="dr-state">
+                {state}
+                {back && <span className="dr-back"> · {back}</span>}
+              </span>
+              {l.requires_user && (
+                <button
+                  className="lane-resume"
+                  onClick={() => onResume(l)}
+                  disabled={!inTauri || !!resuming[lk]}
+                  title={t("publish.laneResumeHint")}
+                >
+                  {t("publish.laneResume")}
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* A cap that hides rows has to say so — a chart that quietly stops at
+          eight reads as a complete answer when it is not. */}
+      {hidden > 0 && (
+        <button className="lane-resume dr-more" onClick={() => setExpanded(true)}>
+          {t("publish.rank.showAll", { n: hidden })}
+        </button>
+      )}
+      {expanded && rows.length > RANK_VISIBLE && (
+        <button className="lane-resume dr-more" onClick={() => setExpanded(false)}>
+          {t("publish.rank.showLess")}
+        </button>
+      )}
+
+      <div className="dr-foot">
+        <span className="dr-key">
+          <i className="dr-swatch selling" /> {t("publish.rank.onSale")}
+        </span>
+        <span className="dr-key">
+          <i className="dr-swatch price" /> {t("publish.rank.heldOnPrice")}
+        </span>
+        <span className="dr-key">
+          <i className="dr-swatch blocked" /> {t("publish.rank.otherwiseOff")}
+        </span>
+        <span className="dr-scale">
+          {/* A ceiling of 100 is not a ceiling — no price is too good — so a
+              band that reaches list price reads as the floor it really is. */}
+          {full
+            ? t("publish.rank.noBand")
+            : hi >= FULL_BAND[1]
+              ? t("publish.rank.bandFloor", { lo })
+              : t("publish.rank.bandIs", { lo, hi })}
+          {priceCount > 0 && ` · ${t("publish.rank.heldCount", { n: priceCount })}`}
+        </span>
+      </div>
+    </div>
+  );
+}
 
 /** Selling is per subscription account — there is no device-wide sell switch.
  *  The market session simply follows these switches (the daemon connects on the
@@ -83,6 +262,14 @@ export function Publish() {
   const [limitSaved, setLimitSaved] = useState("");
   const [limitEditing, setLimitEditing] = useState("");
 
+  // Per-account discount band drafts, edited on the same pencil pattern as the
+  // cap above. Two numbers rather than one because the operator is describing a
+  // window — "sell between 10% and 40% off" — and the pair only means anything
+  // together.
+  const [bandDraft, setBandDraft] = useState<Record<string, [string, string]>>({});
+  const [bandSaved, setBandSaved] = useState("");
+  const [bandEditing, setBandEditing] = useState("");
+
   // The code a device-code login is waiting on, shown until it completes.
   const [deviceCode, setDeviceCode] = useState<{ provider: string; code: string; url: string } | null>(null);
 
@@ -112,6 +299,15 @@ export function Publish() {
         setLimitDraft((d) => {
           const next = { ...d };
           for (const a of list) if (next[keyOf(a)] === undefined) next[keyOf(a)] = String(a.sell_daily_limit || 0);
+          return next;
+        });
+        setBandDraft((d) => {
+          const next = { ...d };
+          for (const a of list) {
+            if (next[keyOf(a)] === undefined) {
+              next[keyOf(a)] = [String(a.sell_min_ratio ?? FULL_BAND[0]), String(a.sell_max_ratio ?? FULL_BAND[1])];
+            }
+          }
           return next;
         });
       })
@@ -158,15 +354,27 @@ export function Publish() {
     }
   }
 
-  /** Flip one account's sell switch, or save its cap, via the same RPC. */
-  async function setSell(a: AccountStatus, enabled: boolean, dailyLimit?: number) {
+  /** Flip one account's sell switch, or save one of its selling terms, via the
+   *  same RPC. Terms left out are kept as they are by the daemon. */
+  async function setSell(
+    a: AccountStatus,
+    enabled: boolean,
+    terms: { dailyLimit?: number; minRatio?: number; maxRatio?: number } = {},
+  ) {
     const k = keyOf(a);
+    const { dailyLimit, minRatio, maxRatio } = terms;
     setAcctErr("");
     setPending((p) => ({ ...p, [k]: true }));
     // Optimistic: the list refreshes on a 4s poll, too slow for a toggle.
     setAccounts((list) =>
       list.map((x) => (keyOf(x) === k
-        ? { ...x, sell_enabled: enabled, sell_daily_limit: dailyLimit ?? x.sell_daily_limit }
+        ? {
+            ...x,
+            sell_enabled: enabled,
+            sell_daily_limit: dailyLimit ?? x.sell_daily_limit,
+            sell_min_ratio: minRatio ?? x.sell_min_ratio,
+            sell_max_ratio: maxRatio ?? x.sell_max_ratio,
+          }
         : x)),
     );
     try {
@@ -175,6 +383,8 @@ export function Publish() {
         accountId: a.account_id,
         enabled,
         ...(dailyLimit === undefined ? {} : { dailyLimit }),
+        ...(minRatio === undefined ? {} : { minRatio }),
+        ...(maxRatio === undefined ? {} : { maxRatio }),
       });
       loadAccounts();
     } catch (e) {
@@ -189,9 +399,38 @@ export function Publish() {
     const raw = parseInt(limitDraft[keyOf(a)] ?? "0", 10);
     const dailyLimit = Number.isFinite(raw) && raw > 0 ? raw : 0;
     setLimitEditing("");
-    await setSell(a, a.sell_enabled, dailyLimit);
+    await setSell(a, a.sell_enabled, { dailyLimit });
     setLimitSaved(keyOf(a));
     setTimeout(() => setLimitSaved(""), 2000);
+  }
+
+  /** Save one account's price band. An empty or unreadable end falls back to
+   *  that end of the full range, so a half-filled form widens the band rather
+   *  than closing it — the failure that costs a sale, not the one that makes
+   *  an unwanted one. */
+  async function saveBand(a: AccountStatus, override?: [number, number]) {
+    const [rawLo, rawHi] = bandDraft[keyOf(a)] ?? ["", ""];
+    const num = (s: string, fallback: number) => {
+      const n = parseInt(s, 10);
+      return Number.isFinite(n) ? clampRatio(n) : fallback;
+    };
+    let [minRatio, maxRatio] = override
+      ? [clampRatio(override[0]), clampRatio(override[1])]
+      : [num(rawLo, FULL_BAND[0]), num(rawHi, FULL_BAND[1])];
+    if (minRatio > maxRatio) [minRatio, maxRatio] = [maxRatio, minRatio];
+    setBandEditing("");
+    setBandDraft((d) => ({ ...d, [keyOf(a)]: [String(minRatio), String(maxRatio)] }));
+    await setSell(a, a.sell_enabled, { minRatio, maxRatio });
+    setBandSaved(keyOf(a));
+    setTimeout(() => setBandSaved(""), 2000);
+  }
+
+  /** Open the band editor on the values currently in force, for the same reason
+   *  `editLimit` does. */
+  function editBand(a: AccountStatus) {
+    const k = keyOf(a);
+    setBandDraft((d) => ({ ...d, [k]: [String(a.sell_min_ratio ?? FULL_BAND[0]), String(a.sell_max_ratio ?? FULL_BAND[1])] }));
+    setBandEditing(k);
   }
 
   /** Open the cap editor on the value currently in force (so cancelling an edit
@@ -425,14 +664,30 @@ export function Publish() {
             {accounts.map((a) => {
               const k = keyOf(a);
               const limit = a.sell_daily_limit;
-              // Progress is measured against the cap when one is set, else
-              // against the plan's daily-equivalent allowance.
-              const denom = limit > 0 ? limit : a.daily_cap;
-              const pct = denom > 0 ? (a.used_today / denom) * 100 : 0;
-              const capPct = a.daily_cap > 0 && limit > 0 ? Math.round((limit / a.daily_cap) * 100) : 0;
-              const own = a.sell_enabled
-                ? lanes.filter((l) => l.provider === a.provider && l.account_id === a.account_id)
-                : [];
+              // What actually stops this account is the plan's 5h rolling
+              // window, so that is the bar: today's tokens against a
+              // daily-equivalent that no upstream enforces only ever read as a
+              // limit that isn't there. A metered key has no window at all —
+              // its bar is the operator's own daily cap, or nothing.
+              const windowed = !a.key_based && a.window_cap > 0;
+              const used = windowed ? a.used_window : a.used_today;
+              const denom = windowed ? a.window_cap : limit;
+              const pct = denom > 0 ? (used / denom) * 100 : 0;
+              const capPct = a.daily_cap > 0 && limit > 0 && !a.key_based
+                ? Math.round((limit / a.daily_cap) * 100)
+                : 0;
+              // Every lane of this account, switched on or not: the ranking
+              // chart below doubles as this subscription's price board, and
+              // "what would I be selling, and at what discount" is a question
+              // worth being able to answer *before* flipping the switch.
+              const own = lanes.filter((l) => l.provider === a.provider && l.account_id === a.account_id);
+              const band: [number, number] = [a.sell_min_ratio ?? FULL_BAND[0], a.sell_max_ratio ?? FULL_BAND[1]];
+              // The daily cap is spent: `rebuild_pool` has already clamped this
+              // account's quota to zero, so every one of its models is off the
+              // market until the UTC rollover. That is a whole-subscription
+              // stop, and it earns a line of its own rather than being left to
+              // be inferred from an `exhausted` pill.
+              const capSpent = limit > 0 && a.used_today >= limit;
               return (
                 <div key={k} className={`acct ${a.sell_enabled ? "selling" : ""}`}>
                   <div className="acct-head">
@@ -466,13 +721,26 @@ export function Publish() {
                     </div>
                   </div>
 
-                  {/* Today's throughput first — it is the number this whole
-                      page exists to move. */}
+                  {a.status === "expired" && (
+                    <div className="callout warn compact">
+                      <IconInfo /><span>{t("publish.expiredHint")}</span>
+                    </div>
+                  )}
+
+                  {capSpent && (
+                    <div className="callout warn compact">
+                      <IconInfo /><span>{t("publish.limitReached", { limit: fmtTokens(limit) })}</span>
+                    </div>
+                  )}
+
+                  {/* Throughput first — it is the number this whole page exists
+                      to move. Against the 5h window for a subscription, against
+                      the operator's daily cap for a key. */}
                   <div className="acct-usage">
                     <div className="au-head">
-                      <span>{t("publish.limitUsedToday")}</span>
+                      <span>{windowed ? t("publish.windowUsed") : t("publish.limitUsedToday")}</span>
                       <span className="mono tabular">
-                        {fmtTokens(a.used_today)}
+                        {fmtTokens(used)}
                         {denom > 0 && <span className="faint"> / {fmtTokens(denom)}</span>}
                         {denom > 0 && <span className="au-pct"> · {Math.round(Math.min(100, pct))}%</span>}
                       </span>
@@ -504,6 +772,7 @@ export function Publish() {
                             }}
                             placeholder="0"
                           />
+                          <span className="unit">{t("publish.unitTokensDay")}</span>
                           <button className="btn sm" onClick={() => saveLimit(a)} disabled={!inTauri || !!pending[k]}>
                             {t("publish.limitSave")}
                           </button>
@@ -513,9 +782,14 @@ export function Publish() {
                         </div>
                       ) : (
                         <div className="value-row">
+                          {/* The unit rides on the number itself. "500K" next
+                              to a percentage band is a quantity with no
+                              dimension, and tokens-vs-dollars is exactly the
+                              guess a seller must not have to make. */}
                           <span className="value-strong mono tabular">
                             {limit > 0 ? fmtTokens(limit) : t("publish.limitNoCap")}
                           </span>
+                          {limit > 0 && <span className="unit">{t("publish.unitTokensDay")}</span>}
                           <button
                             className="icon-btn sm"
                             onClick={() => editLimit(a)}
@@ -528,63 +802,152 @@ export function Publish() {
                           {limitSaved === k && <span className="value-note ok">{t("publish.limitSaved")}</span>}
                         </div>
                       )}
+                      {/* The unit now rides on the value itself, so the hint
+                          carries the thing the number alone cannot say: how
+                          much of the plan a cap that size actually is. */}
                       <div className="hint">
                         {limit > 0
-                          ? <>{t("publish.limitTokensPerDay")}{capPct > 0 && <> · {capPct}% {t("publish.ofSubscription")}</>}</>
-                          : t("publish.limitUnlimited")}
+                          ? (capPct > 0
+                              ? <>{capPct}% {t("publish.ofSubscription")}</>
+                              : t("publish.limitTokensPerDay"))
+                          : a.key_based ? t("publish.limitUnlimitedKey") : t("publish.limitUnlimited")}
+                      </div>
+
+                      {/* The price floor, on the same pattern: the fraction of
+                          list price this subscription is willing to trade at.
+                          A model the market has pushed below it leaves the
+                          market until it comes back — see the chart below. */}
+                      <label className="acct-sub-label after">{t("publish.bandLabel")}</label>
+                      {bandEditing === k ? (
+                        <div className="band-edit">
+                          <div className="input-row">
+                            <span className="band-cap">{t("publish.bandFrom")}</span>
+                            <input
+                              className="input mono band-input"
+                              type="number"
+                              min={FULL_BAND[0]}
+                              max={FULL_BAND[1]}
+                              autoFocus
+                              aria-label={t("publish.bandMin")}
+                              value={bandDraft[k]?.[0] ?? ""}
+                              onChange={(e) => setBandDraft((d) => ({ ...d, [k]: [e.target.value, d[k]?.[1] ?? ""] }))}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") saveBand(a);
+                                if (e.key === "Escape") setBandEditing("");
+                              }}
+                              placeholder={String(FULL_BAND[0])}
+                            />
+                            <span className="unit">%</span>
+                            <span className="band-cap">{t("publish.bandTo")}</span>
+                            <input
+                              className="input mono band-input"
+                              type="number"
+                              min={FULL_BAND[0]}
+                              max={FULL_BAND[1]}
+                              aria-label={t("publish.bandMax")}
+                              value={bandDraft[k]?.[1] ?? ""}
+                              onChange={(e) => setBandDraft((d) => ({ ...d, [k]: [d[k]?.[0] ?? "", e.target.value] }))}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") saveBand(a);
+                                if (e.key === "Escape") setBandEditing("");
+                              }}
+                              placeholder={String(FULL_BAND[1])}
+                            />
+                            <span className="unit">%</span>
+                          </div>
+                          {/* A floor is what a seller actually decides, so one
+                              click sets one — typing two numbers to express
+                              "not below 70%" is the tedious part. */}
+                          <div className="band-presets">
+                            <span className="band-cap">{t("publish.bandQuick")}</span>
+                            {BAND_PRESETS.map((floor) => (
+                              <button
+                                key={floor}
+                                className={`chip${Number(bandDraft[k]?.[0]) === floor
+                                  && Number(bandDraft[k]?.[1]) === FULL_BAND[1] ? " on" : ""}`}
+                                onClick={() => setBandDraft((d) => ({ ...d, [k]: [String(floor), String(FULL_BAND[1])] }))}
+                              >
+                                {floor <= FULL_BAND[0] ? t("publish.bandNone") : `≥ ${floor}%`}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="input-row">
+                            <button className="btn sm" onClick={() => saveBand(a)} disabled={!inTauri || !!pending[k]}>
+                              {t("publish.limitSave")}
+                            </button>
+                            <button className="btn sm ghost" onClick={() => setBandEditing("")}>
+                              {t("publish.limitCancel")}
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="value-row">
+                          <span className="value-strong mono tabular">
+                            {isFullBand(band[0], band[1])
+                              ? t("publish.bandNone")
+                              : band[1] >= FULL_BAND[1]
+                                ? `≥ ${band[0]}%`
+                                : `${band[0]}% – ${band[1]}%`}
+                          </span>
+                          {!isFullBand(band[0], band[1]) && (
+                            <span className="unit">{t("publish.unitOfList")}</span>
+                          )}
+                          <button
+                            className="icon-btn sm"
+                            onClick={() => editBand(a)}
+                            disabled={!inTauri || !!pending[k]}
+                            title={t("publish.bandEdit")}
+                            aria-label={t("publish.bandEdit")}
+                          >
+                            <IconPencil />
+                          </button>
+                          {bandSaved === k && <span className="value-note ok">{t("publish.limitSaved")}</span>}
+                        </div>
+                      )}
+                      {/* Say what the setting *does*, in the same words the
+                          chart below uses, rather than restating its units. */}
+                      <div className="hint">
+                        {isFullBand(band[0], band[1])
+                          ? t("publish.bandHintOff")
+                          : band[1] >= FULL_BAND[1]
+                            ? t("publish.bandHintFloor", { lo: band[0] })
+                            : t("publish.bandHint", { lo: band[0], hi: band[1] })}
                       </div>
                     </div>
 
+                    {/* No expiry here: the only timestamp we hold is the access
+                        token's, which the daemon refreshes on its own — showing
+                        it reads as "this subscription dies tonight". A
+                        credential that really is dead says so in the status
+                        pill and the note above. */}
                     <div className="fact-grid tight">
                       <div className="fact">
-                        <span className="fact-k">{t("publish.quotaLeft")}</span>
-                        <span className="fact-v mono">{fmtTokens(a.quota_remaining)}</span>
+                        <span className="fact-k">{t("publish.usedTodayFact")}</span>
+                        <span className="fact-v mono">{fmtTokens(a.used_today)}</span>
                       </div>
-                      <div className="fact">
-                        <span className="fact-k">{t("publish.expires")}</span>
-                        <span className="fact-v">{fmtTime(a.expires_at)}</span>
-                      </div>
+                      {windowed && (
+                        <div className="fact">
+                          <span className="fact-k">{t("publish.quotaLeft")}</span>
+                          <span className="fact-v mono">{fmtTokens(a.quota_remaining)}</span>
+                        </div>
+                      )}
                     </div>
                   </div>
 
-                  {/* Per-model state + where the credential came from. Both are
-                      diagnostics, so they sit below a hairline: needed when
-                      something is wrong, quiet the rest of the time. */}
+                  {/* Per-model price and state, then where the credential came
+                      from. Both sit below a hairline: the chart answers "which
+                      of my models is the market paying for" when that is the
+                      question, and stays quiet the rest of the time. */}
                   {(own.length > 0 || a.sources.length > 0) && (
                     <div className="acct-detail">
                       {own.length > 0 && (
-                        <div className="ad-row">
-                          <span className="meta-k">{t("publish.lanes")}</span>
-                          <div className="ad-chips">
-                            {own.map((l) => {
-                              const lk = `${l.provider}:${l.account_id}:${l.model}`;
-                              const back = countdown(Math.max(l.resume_at, l.cooldown_until ?? 0), now);
-                              const cls = l.status === "selling" ? "on" : l.requires_user ? "err" : "warn";
-                              const why = l.paused_reason
-                                ? t(`publish.lanePause.${l.paused_reason}`, { defaultValue: l.paused_reason })
-                                : t(`publish.laneStatus.${l.status}`, { defaultValue: l.status });
-                              return (
-                                <span key={lk} className="lane" title={l.last_error || why}>
-                                  <span className={`pill mono ${cls}`}>
-                                    <span>{l.model}</span>
-                                    {l.status !== "selling" && <span className="lane-why"> · {why}</span>}
-                                    {back && <span className="lane-why"> · {back}</span>}
-                                  </span>
-                                  {l.requires_user && (
-                                    <button
-                                      className="lane-resume"
-                                      onClick={() => resume(l)}
-                                      disabled={!inTauri || !!resuming[lk]}
-                                      title={t("publish.laneResumeHint")}
-                                    >
-                                      {t("publish.laneResume")}
-                                    </button>
-                                  )}
-                                </span>
-                              );
-                            })}
-                          </div>
-                        </div>
+                        <DiscountRank
+                          lanes={own}
+                          band={band}
+                          now={now}
+                          onResume={resume}
+                          resuming={resuming}
+                        />
                       )}
                       {a.sources.length > 0 && (
                         <div className="ad-row">

@@ -202,7 +202,7 @@ async fn selling_intent_follows_the_account_switches() {
 
     // Switching the first account on is the whole gesture: nothing else has to
     // be armed for this device to want to be selling.
-    commands::set_account_sell(&state, "claude".into(), "a@x.com".into(), true, None).await.unwrap();
+    commands::set_account_sell(&state, "claude".into(), "a@x.com".into(), true, None, None, None).await.unwrap();
     assert!(commands::publish_wanted(&state).await);
     assert_eq!(commands::proxy_status(&state).await.unwrap()["publish_wanted"], true);
     assert_eq!(
@@ -212,7 +212,7 @@ async fn selling_intent_follows_the_account_switches() {
 
     // Switching the last one off takes the device back off the market, session
     // included — a device with nothing to sell must not hold a live session.
-    commands::set_account_sell(&state, "claude".into(), "a@x.com".into(), false, None).await.unwrap();
+    commands::set_account_sell(&state, "claude".into(), "a@x.com".into(), false, None, None, None).await.unwrap();
     assert!(!commands::publish_wanted(&state).await);
     assert_eq!(commands::client_status(&state).await.unwrap()["publish_state"], "offline");
 }
@@ -245,10 +245,10 @@ async fn selling_is_per_account_and_isolated_from_the_local_cli() {
     );
 
     // Switch on exactly one, with its own daily cap; leave the other off.
-    commands::set_account_sell(&state, "claude".into(), "owned@x.com".into(), true, Some(500_000))
+    commands::set_account_sell(&state, "claude".into(), "owned@x.com".into(), true, Some(500_000), None, None)
         .await
         .unwrap();
-    commands::set_account_sell(&state, "claude".into(), "shared@x.com".into(), false, None)
+    commands::set_account_sell(&state, "claude".into(), "shared@x.com".into(), false, None, None, None)
         .await
         .unwrap();
 
@@ -477,7 +477,7 @@ async fn a_tool_that_is_buying_is_not_a_source_of_sellable_accounts() {
 
     let r = commands::import_from_cli(&state, "claude".into()).await.expect("import");
     assert_eq!(r["accounts"].as_array().unwrap().len(), 1);
-    commands::set_account_sell(&state, "claude".into(), "me@x.com".into(), true, Some(500_000))
+    commands::set_account_sell(&state, "claude".into(), "me@x.com".into(), true, Some(500_000), None, None)
         .await
         .unwrap();
 
@@ -547,7 +547,7 @@ async fn daily_cap_stops_only_the_account_that_hit_it() {
             .await
             .unwrap();
         state.store.set_setting(&format!("plan:claude:{account}"), "max_20x").await.unwrap();
-        commands::set_account_sell(&state, "claude".into(), account.into(), true, Some(1_000)).await.unwrap();
+        commands::set_account_sell(&state, "claude".into(), account.into(), true, Some(1_000), None, None).await.unwrap();
     }
 
     // Account "a" blows through its 1k daily cap.
@@ -622,7 +622,7 @@ async fn invalid_input_is_rejected_before_touching_anything() {
     assert!(commands::set_buy_tool(&state, "claude".into(), true, None).await.is_err());
     assert!(!path.exists(), "a refused buy-on never creates a config file");
     // Unknown account.
-    assert!(commands::set_account_sell(&state, "claude".into(), "nobody@x".into(), true, None)
+    assert!(commands::set_account_sell(&state, "claude".into(), "nobody@x".into(), true, None, None, None)
         .await
         .is_err());
 
@@ -647,7 +647,7 @@ async fn a_broken_model_stops_selling_and_waits_for_the_operator() {
         .await
         .unwrap();
     state.store.set_setting(&format!("plan:claude:{account}"), "max_20x").await.unwrap();
-    commands::set_account_sell(&state, "claude".into(), account.into(), true, None).await.unwrap();
+    commands::set_account_sell(&state, "claude".into(), account.into(), true, None, None, None).await.unwrap();
 
     let opus = "claude-opus-5";
     let haiku = "claude-haiku-4-5";
@@ -794,4 +794,95 @@ async fn regenerating_the_key_rewrites_every_buying_tool() {
     // writing — the re-key must not have overwritten the switch-on backup.
     commands::set_buy_tool(&state, "claude".into(), false, None).await.unwrap();
     assert_eq!(std::fs::read_to_string(&claude_cfg).unwrap(), original);
+}
+
+/// A model the market prices outside the account's band leaves the market, and
+/// says why — while the account's other models keep selling.
+///
+/// This is the sell-side price floor: the seller declares what fraction of list
+/// price they are willing to trade at, and the device stops advertising the
+/// lanes the market has moved past. Getting the declaration right matters as
+/// much as getting the local decision right — a lane that is withheld locally
+/// but still indexed on the gateway is a lane that will be dispatched work at
+/// exactly the price its operator refused.
+#[tokio::test(flavor = "current_thread")]
+async fn a_model_priced_outside_the_band_leaves_the_market() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let _sb = Sandbox::new("band");
+    let state = signed_in_state().await;
+
+    let account = "a@x.com";
+    let opus = "claude-opus-5";
+    let haiku = "claude-haiku-4-5";
+    keychain::set(&keychain::token_ref("claude", account), "tok").unwrap();
+    state
+        .store
+        .upsert_tool("claude", account, &keychain::token_ref("claude", account), &["test"], "oauth")
+        .await
+        .unwrap();
+    state.store.set_setting(&format!("plan:claude:{account}"), "max_20x").await.unwrap();
+
+    // The market: Opus trades at 38% of list, Haiku at 85%. Written straight
+    // into the cache the publisher pulls into, so the test needs no server —
+    // stamped *now*, because a stale cache is exactly what makes the publisher
+    // go and fetch the real one, and this assertion is about the band, not
+    // about whatever the live market happens to be paying today.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    state
+        .store
+        .set_setting(
+            "sellable_catalog",
+            &serde_json::json!({
+                "fetched_at": now,
+                "priced_at": now,
+                "by_provider": {"claude": [opus, haiku]},
+                "ratios": {opus: 38, haiku: 85},
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+    // Sell, but never below 60% of list price.
+    commands::set_account_sell(&state, "claude".into(), account.into(), true, None, Some(60), Some(100))
+        .await
+        .unwrap();
+
+    let items = asale_daemon::publisher::build_supply_items(&state.store, &state.pool).await;
+    let items = items.as_array().cloned().unwrap();
+    let of = |model: &str| {
+        items
+            .iter()
+            .find(|i| i["model"] == model)
+            .cloned()
+            .unwrap_or_else(|| panic!("{model} missing from the declaration"))
+    };
+    assert_eq!(of(opus)["available"], false, "38% of list is under this account's floor");
+    assert_eq!(of(opus)["paused_reason"], "price");
+    assert_eq!(of(haiku)["available"], true, "85% of list is inside the band");
+
+    let lanes = commands::list_lanes(&state).await.unwrap();
+    let lane = |model: &str| {
+        lanes["lanes"].as_array().unwrap().iter().find(|l| l["model"] == model).cloned().unwrap()
+    };
+    assert_eq!(lane(opus)["status"], "withheld");
+    assert_eq!(lane(opus)["ratio"], 38, "the sell page ranks models by this");
+    assert_eq!(
+        lane(opus)["requires_user"],
+        false,
+        "a price the operator set is not something they have to come back and fix"
+    );
+    assert_eq!(lane(haiku)["status"], "selling");
+
+    // Widening the band puts it straight back on: raising your own floor is a
+    // decision, not a market move, so it does not wait out the re-entry dwell.
+    commands::set_account_sell(&state, "claude".into(), account.into(), true, None, Some(20), Some(100))
+        .await
+        .unwrap();
+    let items = asale_daemon::publisher::build_supply_items(&state.store, &state.pool).await;
+    let opus_item = items.as_array().unwrap().iter().find(|i| i["model"] == opus).cloned().unwrap();
+    assert_eq!(opus_item["available"], true, "a widened band sells again at once");
 }

@@ -128,7 +128,11 @@ export function Dashboard({ onNavigate }: { onNavigate: (t: Tab) => void }) {
         ) : (
           <div className="entity-list">
             {accounts.map((a) => {
-              const denom = a.sell_daily_limit > 0 ? a.sell_daily_limit : a.daily_cap;
+              // Only the operator's own daily cap is a real denominator here.
+              // The plan's daily *equivalent* (5h cap ×4.8) is arithmetic, not a
+              // limit anyone enforces — as a progress denominator it invents a
+              // ceiling. Without a cap set, today's tokens stand alone.
+              const denom = a.sell_daily_limit;
               const pct = denom > 0 ? Math.min(100, (a.used_today / denom) * 100) : 0;
               return (
                 <div key={keyOf(a)} className={`entity ${a.sell_enabled ? "is-on" : "is-off"}`}>

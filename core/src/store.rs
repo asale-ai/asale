@@ -59,6 +59,38 @@ pub struct ToolRow {
     pub sell_enabled: bool,
     /// Per-account daily sell cap in tokens; 0 = unlimited.
     pub sell_daily_limit: i64,
+    /// The price band this account will sell inside, as whole percent **of the
+    /// vendor's list price** — 100 is list price, 60 is "six-tenths off list".
+    /// A model the market currently prices outside `[min, max]` is withheld
+    /// until it comes back.
+    ///
+    /// This is the ratio, not the discount off it, because that is the number
+    /// the seller is actually deciding about ("I will not sell below 60% of
+    /// list") and because it shares its range with the server's own
+    /// `mkt_ratio`, which is clamped to `[0.10, 1.00]`.
+    pub sell_min_ratio: i64,
+    pub sell_max_ratio: i64,
+}
+
+/// The band's legal range, and the widest one there is: the server clamps
+/// `mkt_ratio` to `[0.10, 1.00]`, so `10..=100` covers every price a model can
+/// ever have and therefore can never withhold anything. It is also the default,
+/// which is what keeps a fresh account — and an upgraded database — selling
+/// exactly as it did before the band existed.
+pub const RATIO_BAND_FULL: (i64, i64) = (10, 100);
+
+/// Clamp a price band into the legal range and put its ends the right way
+/// round. A value from before the band existed (0) lands on the floor, i.e. on
+/// "no floor at all" — an upgrade must not take a subscription off the market.
+pub fn normalise_band(min_ratio: i64, max_ratio: i64) -> (i64, i64) {
+    let (floor, ceiling) = RATIO_BAND_FULL;
+    let lo = min_ratio.clamp(floor, ceiling);
+    let hi = max_ratio.clamp(floor, ceiling);
+    if lo > hi {
+        (hi, lo)
+    } else {
+        (lo, hi)
+    }
 }
 
 /// Base schema for a fresh database. Tables only — no index may reference a
@@ -78,6 +110,8 @@ CREATE TABLE IF NOT EXISTS tools (
   origin TEXT,
   sell_enabled INTEGER NOT NULL DEFAULT 0,
   sell_daily_limit INTEGER NOT NULL DEFAULT 0,
+  sell_min_ratio INTEGER NOT NULL DEFAULT 10,
+  sell_max_ratio INTEGER NOT NULL DEFAULT 100,
   UNIQUE(provider, account_id)
 );
 CREATE TABLE IF NOT EXISTS publish_config (
@@ -153,6 +187,12 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE tools ADD COLUMN origin TEXT",
     "ALTER TABLE tools ADD COLUMN sell_enabled INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE tools ADD COLUMN sell_daily_limit INTEGER NOT NULL DEFAULT 0",
+    // The price band the account sells inside, as percent of list price.
+    // Defaulting to the full `[10, 100]` — the whole range the server's
+    // `mkt_ratio` can occupy — is what keeps an upgraded database selling
+    // exactly as it did.
+    "ALTER TABLE tools ADD COLUMN sell_min_ratio INTEGER NOT NULL DEFAULT 10",
+    "ALTER TABLE tools ADD COLUMN sell_max_ratio INTEGER NOT NULL DEFAULT 100",
     // JSON array of every local store holding this account's token.
     "ALTER TABLE tools ADD COLUMN sources TEXT",
     "ALTER TABLE provider_records ADD COLUMN provider TEXT NOT NULL DEFAULT ''",
@@ -337,9 +377,10 @@ impl LocalStore {
     /// List imported tool accounts (keychain refs only; no plaintext).
     pub async fn list_tools(&self) -> anyhow::Result<Vec<ToolRow>> {
         #[allow(clippy::type_complexity)]
-        let rows: Vec<(String, String, String, Option<String>, Option<String>, Option<String>, Option<String>, i64, i64)> =
+        let rows: Vec<(String, String, String, Option<String>, Option<String>, Option<String>, Option<String>, i64, i64, i64, i64)> =
             sqlx::query_as(
-                "SELECT provider, account_id, keychain_ref, plan, origin, source, sources, sell_enabled, sell_daily_limit
+                "SELECT provider, account_id, keychain_ref, plan, origin, source, sources, sell_enabled, sell_daily_limit,
+                        sell_min_ratio, sell_max_ratio
                  FROM tools ORDER BY provider, account_id",
             )
             .fetch_all(&self.pool)
@@ -347,7 +388,8 @@ impl LocalStore {
         Ok(rows
             .into_iter()
             .map(
-                |(provider, account_id, keychain_ref, plan, origin, source, sources, sell_enabled, sell_daily_limit)| {
+                |(provider, account_id, keychain_ref, plan, origin, source, sources, sell_enabled, sell_daily_limit,
+                  sell_min_ratio, sell_max_ratio)| {
                     // Rows written before the `sources` column existed carry
                     // only the single `source`; present that as a one-element
                     // list so callers never special-case the old shape.
@@ -365,6 +407,11 @@ impl LocalStore {
                         sources,
                         sell_enabled: sell_enabled != 0,
                         sell_daily_limit,
+                        // A row written before the band existed reads as the
+                        // full range, never as an empty one: an upgrade must
+                        // not silently take a subscription off the market.
+                        sell_min_ratio,
+                        sell_max_ratio,
                     }
                 },
             )
@@ -383,6 +430,32 @@ impl LocalStore {
         let res = sqlx::query("UPDATE tools SET sell_enabled=?, sell_daily_limit=? WHERE provider=? AND account_id=?")
             .bind(i64::from(enabled))
             .bind(daily_limit.max(0))
+            .bind(provider)
+            .bind(account_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Set one account's price band, in whole percent of list price.
+    ///
+    /// Stored as a separate statement from `set_tool_sell` because it answers a
+    /// different question — *at what price* this subscription is for sale, not
+    /// *whether* it is — and the two are edited independently in the UI.
+    /// Nonsense input is normalised rather than rejected: the band is clamped
+    /// to `RATIO_BAND_FULL` and an inverted pair is swapped, so a half-typed
+    /// number can never leave an account with a band nothing can satisfy.
+    pub async fn set_tool_ratio_band(
+        &self,
+        provider: &str,
+        account_id: &str,
+        min_ratio: i64,
+        max_ratio: i64,
+    ) -> anyhow::Result<bool> {
+        let (lo, hi) = normalise_band(min_ratio, max_ratio);
+        let res = sqlx::query("UPDATE tools SET sell_min_ratio=?, sell_max_ratio=? WHERE provider=? AND account_id=?")
+            .bind(lo)
+            .bind(hi)
             .bind(provider)
             .bind(account_id)
             .execute(&self.pool)

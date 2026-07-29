@@ -406,8 +406,9 @@ export interface Lane {
   provider: string;
   account_id: string;
   model: string;
-  status: "selling" | "cooldown" | "paused" | "off" | "expired" | "exhausted";
-  /** `rate_limit` | `quota` | `auth` | `breaker` | `manual` when paused. */
+  status: "selling" | "cooldown" | "paused" | "withheld" | "off" | "expired" | "exhausted";
+  /** `rate_limit` | `quota` | `auth` | `breaker` | `manual` when paused,
+   *  `price` when the market moved outside the account's price band. */
   paused_reason: string | null;
   /** True when the operator has to fix something and press resume. */
   requires_user: boolean;
@@ -418,6 +419,15 @@ export interface Lane {
   last_error: string;
   sell_enabled: boolean;
   quota_remaining: number;
+  /** What the market currently pays for this model, as whole percent *of* the
+   *  vendor's list price (100 = list price). `null` when this device has not
+   *  read a price for it yet, which is not a price of zero and must not be
+   *  drawn as one. */
+  ratio: number | null;
+  /** The account's own band, carried on the lane so the chart can draw the
+   *  threshold next to the bar it explains. */
+  min_ratio: number;
+  max_ratio: number;
 }
 
 export interface AccountStatus {
@@ -432,12 +442,22 @@ export interface AccountStatus {
   sell_enabled: boolean;
   /** This account's daily sell cap in tokens; 0 = unlimited. */
   sell_daily_limit: number;
+  /** The price band this account sells inside, in whole percent *of* list
+   *  price. A model the market prices outside it is withheld until it comes
+   *  back. `10..100` — the default and the whole legal range — never withholds
+   *  anything. */
+  sell_min_ratio: number;
+  sell_max_ratio: number;
   /** Tokens this account served today / in the current 5h window. */
   used_today: number;
   used_window: number;
   /** Its plan's 5h cap and the daily equivalent (×24/5), for "% of plan". */
   window_cap: number;
   daily_cap: number;
+  /** A metered platform key rather than a plan subscription: billed against a
+   *  balance, so it has no rolling window and the two caps above are guesses
+   *  that do not apply to it. The UI hides window figures for these. */
+  key_based: boolean;
   /** `oauth` = asale owns this login outright; `import` = copied from a local CLI. */
   origin: string | null;
   /** Where the credential in use came from (keychain service or file path). */

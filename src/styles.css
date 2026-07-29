@@ -800,6 +800,112 @@ select.input {
 .lane-resume:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent); }
 .lane-resume:disabled { opacity: 0.45; cursor: not-allowed; }
 
+/* ── Discount ranking ───────────────────────────────────────────────────────
+   One subscription's models ranked by how far below list price the market has
+   pushed them, against the band the operator will sell inside.
+
+   The bars carry *state*, not identity, so they wear the status colours rather
+   than a categorical set — and every one of them says its state in words in
+   the same row, because a colour on its own is not an answer. The scale is
+   fixed at 0–100%: the band markers only mean something against an axis that
+   does not move when the prices do. */
+.disc-rank { display: flex; flex-direction: column; gap: 6px; }
+.dr-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s3); }
+.dr-title { font-size: var(--fs-meta); color: var(--fg-2); font-weight: 500; }
+.dr-count { font-size: var(--fs-micro); color: var(--fg-3); }
+.dr-rows { display: flex; flex-direction: column; gap: 5px; }
+.dr-row {
+  display: grid;
+  grid-template-columns: minmax(88px, 160px) minmax(60px, 1fr) 46px minmax(64px, auto) auto;
+  align-items: center; gap: var(--s2);
+  font-size: var(--fs-micro);
+}
+.dr-model { color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dr-row.selling .dr-model { color: var(--fg); }
+.dr-track { position: relative; height: 8px; border-radius: 999px; background: var(--bg-2); overflow: hidden; }
+/* The window the operator said they would sell in. The tint alone is too quiet
+   to be a threshold, so the edge that matters — where selling stops — is drawn
+   as a line, and a bar crossing it is the whole point of the chart. */
+.dr-band {
+  position: absolute; top: 0; bottom: 0;
+  background: var(--success-soft);
+  border-left: 2px solid var(--accent-line);
+}
+/* A band that reaches list price has no upper edge to draw — no price is too
+   good to accept — so only the floor gets a line. */
+.dr-band.to-top { border-right: none; }
+.dr-band:not(.to-top) { border-right: 2px solid var(--accent-line); }
+.dr-fill {
+  position: absolute; top: 0; bottom: 0; left: 0;
+  /* Rounded only at the data end; the zero end stays square on the baseline. */
+  border-radius: 0 4px 4px 0;
+  transition: width var(--t-slow) var(--ease);
+}
+.dr-row.selling .dr-fill { background: var(--success); }
+/* Held on price is a decision, not a fault, so it wears the accent rather than
+   a warning colour — and a 45° texture, so the state survives a colourblind
+   reader, a greyscale print and forced-colours mode. */
+.dr-row.price .dr-fill {
+  background: repeating-linear-gradient(
+    45deg, var(--accent) 0 3px, var(--accent-hover) 3px 6px
+  );
+}
+.dr-row.blocked .dr-fill { background: var(--warning); }
+.dr-row.blocked.attention .dr-fill { background: var(--danger); }
+.dr-row.off .dr-fill { background: var(--fg-3); }
+.dr-val { text-align: right; color: var(--fg); font-weight: 500; }
+.dr-row.off .dr-val { color: var(--fg-2); }
+.dr-state { color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dr-row.price .dr-state { color: var(--accent); }
+.dr-row.blocked .dr-state { color: var(--warning); }
+.dr-row.blocked.attention .dr-state { color: var(--danger); }
+.dr-back { color: var(--fg-3); }
+.dr-more { align-self: flex-start; }
+.dr-foot {
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--s3);
+  font-size: var(--fs-micro); color: var(--fg-3); margin-top: 2px;
+}
+.dr-key { display: inline-flex; align-items: center; gap: 5px; }
+.dr-swatch { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+.dr-swatch.selling { background: var(--success); }
+.dr-swatch.price { background: repeating-linear-gradient(45deg, var(--accent) 0 3px, var(--accent-hover) 3px 6px); }
+.dr-swatch.blocked { background: var(--warning); }
+.dr-scale { margin-left: auto; }
+.dr-nodata { font-size: var(--fs-micro); color: var(--fg-3); }
+
+/* ── Price band editor ──────────────────────────────────────────────────────
+   Two numbers and a unit, plus one-click floors: what a seller decides is
+   almost always "not below X", and making them type two numbers to say it is
+   the part that turns a setting into a chore. */
+.band-edit { display: flex; flex-direction: column; gap: var(--s2); }
+.band-input { max-width: 68px; }
+.band-cap { font-size: var(--fs-meta); color: var(--fg-3); white-space: nowrap; }
+.band-presets { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+/* The unit that rides beside a value or an input — never inside it, so the
+   number stays selectable and the field stays a plain number field. */
+.unit { font-size: var(--fs-meta); color: var(--fg-3); white-space: nowrap; }
+.chip {
+  border: 1px solid var(--line-2); background: transparent; color: var(--fg-2);
+  border-radius: 999px; padding: 3px 10px; font-size: var(--fs-micro); font-weight: 500;
+  cursor: pointer; white-space: nowrap;
+  transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+              border-color var(--t-fast) var(--ease);
+}
+.chip:hover { background: var(--surface-3); color: var(--fg); }
+.chip.on { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); }
+
+/* Narrow windows stack the row rather than dropping a column. The state stays:
+   it is the half of the encoding that is not colour, so hiding it would leave
+   the bars distinguishable only by hue. */
+@media (max-width: 720px) {
+  .dr-row { grid-template-columns: 1fr auto; row-gap: 4px; }
+  .dr-model { grid-area: 1 / 1; }
+  .dr-val { grid-area: 1 / 2; }
+  .dr-track { grid-area: 2 / 1 / 3 / 3; }
+  .dr-state { grid-area: 3 / 1 / 4 / 3; }
+  .dr-row .lane-resume { grid-area: 4 / 1; justify-self: start; }
+}
+
 /* ── Fact strip ─────────────────────────────────────────────────────────────
    The rules or constants of whatever sits next to it. Cells are separated by
    space, not by gridlines. */
@@ -1377,7 +1483,12 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .pay-done-mark svg { width: 24px; height: 24px; }
 .pay-done-mark.ok { background: var(--success-soft); color: var(--success); }
 .pay-done-title { font-weight: 600; margin: 0; }
+/* The credited figure — deliberately the only large number here, so what
+   reaches the balance is what gets read. */
 .pay-done-amount { font-size: 22px; font-weight: 600; margin: 0; }
+/* Where the difference went. Subordinate to the figure above but still legible:
+   this is the line that answers "why is it not the number I sent?". */
+.pay-done-split { font-size: var(--fs-meta); color: var(--fg-3); margin: -2px 0 0; font-variant-numeric: tabular-nums; }
 .pay-done-desc { font-size: var(--fs-sub); color: var(--fg-3); max-width: 300px; line-height: 1.6; margin: 0; }
 
 /* ── Amount picker ──────────────────────────────────────────────────────────

@@ -186,6 +186,12 @@ pub async fn start(bind: SocketAddr) -> anyhow::Result<StartedDaemon> {
     if let Err(e) = publisher::refresh_sellable_catalog(&app_state.store, &app_state.cfg.server_api_base).await {
         tracing::warn!("sellable catalog refresh failed at startup: {e}");
     }
+    // And what the market pays for those models, before the first rebuild: the
+    // recovery loop would get to it within a minute, but that minute is the one
+    // the user spends looking at a Sell page whose prices are all blank.
+    if let Err(e) = publisher::refresh_market_prices(&app_state.store, &app_state.cfg.server_api_base).await {
+        tracing::warn!("market price refresh failed at startup: {e}");
+    }
     publisher::rebuild_pool(&app_state.store, &app_state.pool).await;
 
     // Token-refresh loop runs for the daemon lifetime so subscription tokens

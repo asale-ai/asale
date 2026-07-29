@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "asale"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "asale-daemon",
  "reqwest 0.12.28",
@@ -95,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "asale-client-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "asale-protocol",
@@ -118,7 +118,7 @@ dependencies = [
 
 [[package]]
 name = "asale-daemon"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "asale-client-core",
@@ -146,7 +146,7 @@ dependencies = [
 
 [[package]]
 name = "asale-protocol"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde",
  "serde_json",
