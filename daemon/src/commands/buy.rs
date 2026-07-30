@@ -87,8 +87,12 @@ pub async fn buy_tools(state: &AppState) -> R<Value> {
     let mut out = Vec::new();
     for tool in tool_config::TOOLS {
         let t = tool.to_string();
-        let (installed, current_base) = tokio::task::spawn_blocking(move || {
-            (tool_config::installed(&t), tool_config::current_base_url(&t))
+        let (installed, current_base, points_at_proxy) = tokio::task::spawn_blocking(move || {
+            (
+                tool_config::installed(&t),
+                tool_config::current_base_url(&t),
+                tool_config::points_at_proxy(&t),
+            )
         })
         .await
         .map_err(err)?;
@@ -105,10 +109,12 @@ pub async fn buy_tools(state: &AppState) -> R<Value> {
         // since" date come back together instead of as three separate lookups.
         let buy = state.store.buy_tool(tool).await.map_err(err)?;
         // "In effect" iff the tool's live config really points at our proxy.
-        // Codex addresses the proxy's /v1 root, the others its origin.
-        let in_effect = current_base
-            .as_deref()
-            .is_some_and(|b| b == proxy_base || b == format!("{proxy_base}/v1"));
+        // Each tool addresses it differently — origin, `/v1` root, or its own
+        // `/{tool}/v1` prefix — so ask `points_at_proxy`, which owns that per-tool
+        // knowledge, rather than restating a subset of it here. Restating it is
+        // what made OpenClaw and Hermes report "not in effect" while their configs
+        // were in fact pointed at the proxy.
+        let in_effect = points_at_proxy;
 
         out.push(json!({
             "id": tool,
