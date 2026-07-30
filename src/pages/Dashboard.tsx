@@ -2,26 +2,27 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   invoke, inTauri, fmtUsdt, fmtTokens,
-  type ProxyStatus, type Wallet,
+  type ProxyStatus, type Wallet, type UsageSummary,
   type AccountStatus, type BuyTool, type BuyTools,
 } from "../lib";
-import { Card, SkeletonRows, StatTile, PageHead, Empty, Mark } from "../ui";
-import {
-  IconWallet, IconPublish, IconConsume, IconArrowRight,
-  IconChip, IconCheck, IconServer,
-} from "../icons";
+import { StatTile, PageHead, Mark } from "../ui";
+import { WorldMap } from "../components/WorldMap";
+import { IconWallet, IconPublish, IconConsume, IconArrowRight, IconServer } from "../icons";
 
 type Tab = "dashboard" | "publish" | "consume" | "usage" | "limits" | "wallet" | "records" | "account" | "settings";
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const keyOf = (a: { provider: string; account_id: string }) => `${a.provider}:${a.account_id}`;
 
-export function Dashboard({ onNavigate }: { onNavigate: (t: Tab) => void }) {
+/** `region` is the signed-in user's declared country ("" when signed out or
+ *  never set); the map calls it out on the world. */
+export function Dashboard({ onNavigate, region = "" }: { onNavigate: (t: Tab) => void; region?: string }) {
   const { t } = useTranslation();
   const [status, setStatus] = useState<ProxyStatus | null>(null);
   const [wallet, setWallet] = useState<Wallet | null>(null);
   const [accounts, setAccounts] = useState<AccountStatus[]>([]);
   const [tools, setTools] = useState<BuyTool[]>([]);
+  const [earned, setEarned] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [daemonDown, setDaemonDown] = useState(false);
 
@@ -34,6 +35,12 @@ export function Dashboard({ onNavigate }: { onNavigate: (t: Tab) => void }) {
       invoke<ProxyStatus>("proxy_status")
         .then((s) => { fails = 0; setStatus(s); setDaemonDown(false); })
         .catch(() => { if (++fails >= 3) setDaemonDown(true); });
+    // What this device earned today, in USDT. It comes from the settled ledger
+    // rather than from `used_today × price`: the amount on a provider record is
+    // the server's own `provider_income` (fee already taken), so it is the money
+    // and not an estimate of it.
+    const sold = () =>
+      invoke<UsageSummary>("usage_summary", { period: "day" }).then((s) => setEarned(s.sold.amount_usdt));
     const poll = () => {
       proxy();
       invoke<AccountStatus[]>("list_accounts").then(setAccounts).catch(() => {});
@@ -41,6 +48,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (t: Tab) => void }) {
       // The balance moves on its own as requests settle, and a failure at boot
       // must not leave the headline number blank until the next page visit.
       invoke<Wallet>("wallet_overview").then(setWallet).catch(() => {});
+      sold().catch(() => {});
     };
     // Initial data load — shimmer until the first batch settles (polling below
     // refreshes silently and does not re-trigger the skeleton). `proxy_status`
@@ -51,6 +59,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (t: Tab) => void }) {
       invoke<Wallet>("wallet_overview").then(setWallet),
       invoke<AccountStatus[]>("list_accounts").then(setAccounts),
       invoke<BuyTools>("buy_tools").then((r) => setTools(r.tools || [])),
+      sold(),
     ]).finally(() => setLoading(false));
     const id = setInterval(poll, 4000);
     return () => clearInterval(id);
@@ -64,13 +73,25 @@ export function Dashboard({ onNavigate }: { onNavigate: (t: Tab) => void }) {
   const selling = accounts.filter((a) => a.sell_enabled);
   const buying = tools.filter((x) => x.enabled);
 
-  const statusPill = (s: AccountStatus["status"]) => {
-    const cls = s === "available" ? "on" : s === "cooldown" || s === "exhausted" ? "warn" : "off";
-    return <span className={`pill ${cls}`}>{t(`publish.status${cap(s)}`)}</span>;
-  };
-
   const goto = (tab: Tab, label: string) => (
     <button className="btn sm ghost" onClick={() => onNavigate(tab)}>{label}<IconArrowRight /></button>
+  );
+
+  /** On or off, for the tile's corner: the dot carries the state, the word
+   *  names it. */
+  const state = (dot: string, label: string) => (
+    <span className="pill plain"><span className={`dot ${dot}`} />{label}</span>
+  );
+
+  /** One mark per connected thing — the overview's answer to "what is there,
+   *  and is it on". Identity is the mark, state is the dot on it, and the full
+   *  rows this replaces are one click away on the page the tile links to. The
+   *  title carries the detail for the one item the reader is pointing at. */
+  const chip = (key: string, id: string, on: boolean, dim: boolean, dot: string, title: string) => (
+    <span key={key} className={`mark-chip${on ? " is-on" : ""}${dim ? " is-off" : ""}`} title={title}>
+      <Mark id={id} size="sm" />
+      <span className={`mc-dot dot ${dot}`} />
+    </span>
   );
 
   return (
@@ -83,7 +104,10 @@ export function Dashboard({ onNavigate }: { onNavigate: (t: Tab) => void }) {
         </div>
       )}
 
-      {/* Key numbers */}
+      {/* Three tiles, and that is the whole state of the account: what the
+          wallet holds, what is selling, what is buying. Each used to be a tile
+          here *and* a card below repeating it; each pair is now one tile — on or
+          off in the corner, what is connected in the middle. */}
       <div className="stat-grid">
         <StatTile
           primary
@@ -91,121 +115,86 @@ export function Dashboard({ onNavigate }: { onNavigate: (t: Tab) => void }) {
           icon={<IconWallet />}
           label={t("dashboard.walletBalance")}
           value={<span className="mono tabular">{wallet ? fmtUsdt(wallet.balance) : "—"}<span className="st-unit"> USDT</span></span>}
-          sub={t("dashboard.walletSub")}
+          // What today added to that balance, under the balance itself. Before a
+          // first sale there is nothing to report, and a permanent "+0.00" would
+          // read as a broken counter to everyone who only buys.
+          sub={earned && earned > 0
+            ? t("dashboard.earnedToday", { amount: fmtUsdt(earned) })
+            : t("dashboard.walletSub")}
+          foot={goto("wallet", t("dashboard.goWallet"))}
         />
+
+        {/* Sell — link state, and one mark per connected subscription account */}
         <StatTile
           loading={loading}
           icon={<IconPublish />}
           label={t("dashboard.publishing")}
-          value={<><span className={`dot ${online ? "on" : connecting ? "warn pulse" : "off"}`} />{sellLabel}</>}
-          sub={t("dashboard.sellAccountsCount", { on: selling.length, total: accounts.length })}
+          state={state(online ? "on" : connecting ? "warn pulse" : "off", sellLabel)}
+          value={accounts.length === 0 ? <span className="faint">—</span> : (
+            <div className="mark-row">
+              {accounts.map((a) =>
+                chip(
+                  keyOf(a),
+                  a.provider,
+                  a.sell_enabled,
+                  !a.sell_enabled,
+                  // An account that is selling still has a state of its own —
+                  // cooling down or out of quota is not the same as serving.
+                  a.sell_enabled ? (a.status === "available" ? "on" : "warn") : "off",
+                  [
+                    a.account_id + (a.plan ? ` · ${a.plan}` : ""),
+                    a.sell_enabled ? t(`publish.status${cap(a.status)}`) : t("dashboard.sellOff"),
+                    `${t("dashboard.usedToday")} ${fmtTokens(a.used_today)}`,
+                  ].join(" — "),
+                )
+              )}
+            </div>
+          )}
+          sub={accounts.length === 0
+            ? t("dashboard.noSellAccounts")
+            : t("dashboard.sellAccountsCount", { on: selling.length, total: accounts.length })}
+          foot={accounts.length === 0
+            ? goto("publish", t("dashboard.goConnect"))
+            : goto("publish", t("dashboard.goPublish"))}
         />
+
+        {/* Buy — one mark per CLI that can route through Asale */}
         <StatTile
           loading={loading}
           icon={<IconConsume />}
           label={t("dashboard.buyState")}
-          value={<><span className={`dot ${buying.length > 0 ? "on" : "off"}`} />{buying.length > 0 ? t("dashboard.buyingOn") : t("dashboard.buyingOff")}</>}
+          state={state(
+            buying.length > 0 ? "on" : "off",
+            buying.length > 0 ? t("dashboard.buyingOn") : t("dashboard.buyingOff"),
+          )}
+          value={
+            <div className="mark-row">
+              {tools.map((tool) =>
+                chip(
+                  tool.id,
+                  tool.id,
+                  tool.enabled,
+                  !tool.installed,
+                  // On but not in effect means the config has not been rewritten
+                  // yet — the switch says yes and the CLI has not been told.
+                  tool.enabled ? (tool.in_effect ? "on" : "warn") : "off",
+                  [
+                    tool.label,
+                    tool.enabled ? (tool.in_effect ? t("dashboard.inEffect") : t("dashboard.buyOn")) : t("dashboard.buyOff"),
+                    tool.installed ? (tool.account ?? t("dashboard.toolInstalled")) : t("dashboard.toolNotFound"),
+                    `${t("dashboard.buyModels")}: ${tool.models.length > 0 ? tool.models.join(", ") : t("dashboard.anyModel")}`,
+                  ].join(" — "),
+                )
+              )}
+            </div>
+          }
           sub={buying.length > 0 ? buying.map((x) => x.label).join(", ") : t("dashboard.buySubHint")}
+          foot={goto("consume", t("dashboard.goConsume"))}
         />
       </div>
 
-      {/* Sell — per-account switches and today's progress */}
-      <Card
-        icon={<IconPublish />}
-        title={t("dashboard.sellTitle")}
-        desc={t("dashboard.sellDesc")}
-        right={goto("publish", t("dashboard.goPublish"))}
-      >
-        {loading ? (
-          <SkeletonRows rows={2} />
-        ) : accounts.length === 0 ? (
-          <Empty
-            icon={<IconChip />}
-            title={t("dashboard.noSellAccountsTitle")}
-            desc={t("dashboard.noSellAccounts")}
-            action={<button className="btn sm" onClick={() => onNavigate("publish")}>{t("dashboard.goConnect")}<IconArrowRight /></button>}
-          />
-        ) : (
-          <div className="entity-list">
-            {accounts.map((a) => {
-              // Only the operator's own daily cap is a real denominator here.
-              // The plan's daily *equivalent* (5h cap ×4.8) is arithmetic, not a
-              // limit anyone enforces — as a progress denominator it invents a
-              // ceiling. Without a cap set, today's tokens stand alone.
-              const denom = a.sell_daily_limit;
-              const pct = denom > 0 ? Math.min(100, (a.used_today / denom) * 100) : 0;
-              return (
-                <div key={keyOf(a)} className={`entity ${a.sell_enabled ? "is-on" : "is-off"}`}>
-                  <span className="e-badge"><Mark id={a.provider} /></span>
-                  <div className="e-body">
-                    <div className="e-title">
-                      {a.account_id}
-                      {a.plan && <span className="muted"> · {a.plan}</span>}
-                    </div>
-                    <div className="e-meta">
-                      <span className="mono">{a.provider}</span>
-                      <span className={`pill ${a.sell_enabled ? "on" : "off"}`}>
-                        {a.sell_enabled ? t("dashboard.sellOn") : t("dashboard.sellOff")}
-                      </span>
-                      {a.sell_enabled && statusPill(a.status)}
-                    </div>
-                  </div>
-                  <div className="e-num">
-                    <span className="n-k">{t("dashboard.usedToday")}</span>
-                    <span className="n-v mono tabular">
-                      {fmtTokens(a.used_today)}{denom > 0 && <span className="faint"> / {fmtTokens(denom)}</span>}
-                    </span>
-                  </div>
-                  {a.sell_enabled && denom > 0 && (
-                    <div className="e-bar">
-                      <div className="bar"><span style={{ width: `${pct}%`, minWidth: pct > 0 ? 3 : 0 }} /></div>
-                      <span className="b-pct">{Math.round(pct)}%</span>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </Card>
-
-      {/* Buy — per-tool switches and model selections */}
-      <Card
-        icon={<IconConsume />}
-        title={t("dashboard.buyTitle")}
-        desc={t("dashboard.buyDesc")}
-        right={goto("consume", t("dashboard.goConsume"))}
-      >
-        {loading ? (
-          <SkeletonRows rows={2} />
-        ) : (
-          <div className="entity-list">
-            {tools.map((tool) => (
-              <div key={tool.id} className={`entity ${tool.enabled ? "is-on" : tool.installed ? "" : "is-off"}`}>
-                <span className="e-badge"><Mark id={tool.id} /></span>
-                <div className="e-body">
-                  <div className="e-title">{tool.label}</div>
-                  <div className="e-meta">
-                    <span className={`pill ${tool.enabled ? "on" : "off"}`}>
-                      {tool.enabled ? t("dashboard.buyOn") : t("dashboard.buyOff")}
-                    </span>
-                    {tool.enabled && tool.in_effect && (
-                      <span className="pill on plain"><IconCheck /> {t("dashboard.inEffect")}</span>
-                    )}
-                    <span>{tool.installed ? (tool.account ?? t("dashboard.toolInstalled")) : t("dashboard.toolNotFound")}</span>
-                  </div>
-                </div>
-                <div className="e-num wrap">
-                  <span className="n-k">{t("dashboard.buyModels")}</span>
-                  <span className="n-v mono">
-                    {tool.models.length > 0 ? tool.models.join(", ") : t("dashboard.anyModel")}
-                  </span>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </Card>
+      {/* Where the network is — and, once signed in, where the reader is in it */}
+      <WorldMap region={region} />
     </div>
   );
 }

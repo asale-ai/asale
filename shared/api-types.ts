@@ -99,6 +99,37 @@ export interface PricePoint {
 /** Chart granularities `GET /api/v1/market/price-history` accepts. */
 export type PriceGranularity = "minute" | "hour" | "day" | "month";
 
+/** One country on the world map (`GET /api/v1/market/globe`, `regions`).
+ *
+ *  Country-level only: the endpoint aggregates `users.region` and never
+ *  identifies an account. `"ZZ"` is every user who declared no country. */
+export interface GlobeRegion {
+  /** ISO 3166-1 alpha-2, or `ZZ` for "not set". */
+  region: string;
+  users: number;
+  providers: number;
+  consumers: number;
+  tokens: number;
+  amount_usdt: number;
+  tasks: number;
+}
+
+/** Tokens that moved from a seller's country to a buyer's country. */
+export interface GlobeFlow {
+  from: string;
+  to: string;
+  tokens: number;
+  tasks: number;
+  amount_usdt: number;
+}
+
+/** Response of `GET /api/v1/market/globe`. */
+export interface Globe {
+  minutes: number;
+  regions: GlobeRegion[];
+  flows: GlobeFlow[];
+}
+
 /** How far a scan-to-pay session has got (server: `session_status_name`).
  *
  *  `matched` means a transfer was seen on chain; `credited` means it also

@@ -51,18 +51,22 @@ const shortSource = (s: string) =>
     : s.startsWith("keychain:") ? s.slice("keychain:".length)
     : s.split("/").filter(Boolean).slice(-2).join("/");
 
-/** The band's legal range, which is also the widest one there is: the server
- *  clamps the market ratio to [0.10, 1.00], so 10–100 percent *of* list price
- *  covers every price a model can have and can only ever mean "sell at whatever
- *  the market pays". */
-const FULL_BAND: [number, number] = [10, 100];
-const isFullBand = (lo: number, hi: number) => lo <= FULL_BAND[0] && hi >= FULL_BAND[1];
-const clampRatio = (n: number) => Math.min(FULL_BAND[1], Math.max(FULL_BAND[0], n));
+/** The legal range for a price ratio: the server clamps the market ratio to
+ *  [0.10, 1.00], so a floor of 10 percent *of* list price is below every price a
+ *  model can have and therefore means "sell at whatever the market pays".
+ *
+ *  A seller's decision is only ever "not below X" — there is no such thing as a
+ *  price too good to accept — so the setting is that one number and nothing
+ *  else. */
+const RATIO_MIN = 10;
+const RATIO_MAX = 100;
+const noFloor = (lo: number) => lo <= RATIO_MIN;
+const clampRatio = (n: number) => Math.min(RATIO_MAX, Math.max(RATIO_MIN, n));
+/** The floor in force for an account, with "unset" reading as "any price". */
+const floorOf = (a: { sell_min_ratio?: number | null }) => clampRatio(a.sell_min_ratio ?? RATIO_MIN);
 
-/** Floors worth one click. A seller's decision is almost always "not below X",
- *  so the presets set the floor and leave the ceiling at list price — typing
- *  two numbers to express one intent is the part that makes this tedious. */
-const BAND_PRESETS = [FULL_BAND[0], 50, 60, 70, 80];
+/** Floors worth one click. */
+const BAND_PRESETS = [RATIO_MIN, 50, 60, 70, 80];
 
 /** Why a lane is or is not on the market, collapsed to the four cases the
  *  ranking chart draws differently.
@@ -79,7 +83,7 @@ const laneTone = (l: Lane): LaneTone =>
     : "blocked";
 
 /** How many models a chart shows before it needs asking. Enough that the whole
- *  band question is answerable at a glance for every provider we sell, without
+ *  price question is answerable at a glance for every provider we sell, without
  *  a hundred-row catalog burying the account below it. */
 const RANK_VISIBLE = 8;
 
@@ -87,31 +91,30 @@ const RANK_VISIBLE = 8;
  *  them, and split into what is selling and what is not.
  *
  *  The bar is the price as a fraction of the vendor's list price, so a longer
- *  bar is more money, and the account's band is drawn on the same scale as the
+ *  bar is more money, and the account's floor is drawn on the same scale as the
  *  zone those bars have to land in. That is the whole question this chart
  *  exists to answer: which of my models has the market pushed below the price I
  *  said I would sell at.
  *
  *  The scale is fixed at 0–100% rather than fitted to the data. Bars need a zero
- *  baseline to be read as lengths at all, and the band markers are only
+ *  baseline to be read as lengths at all, and the floor marker is only
  *  meaningful against an axis that does not move when the prices do.
  */
 function DiscountRank({
-  lanes, band, now, onResume, resuming,
+  lanes, floor, now, onResume, resuming,
 }: {
   lanes: Lane[];
-  band: [number, number];
+  floor: number;
   now: number;
   onResume: (lane: Lane) => void;
   resuming: Record<string, boolean>;
 }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
-  const [lo, hi] = band;
-  const full = isFullBand(lo, hi);
+  const open = noFloor(floor);
 
   // Cheapest first: the models the market has pushed furthest down are the ones
-  // a band is about, so they are the ones worth reading first. A lane with no
+  // a floor is about, so they are the ones worth reading first. A lane with no
   // known price sorts last — it has nothing to rank on.
   const rows = [...lanes].sort((a, b) => {
     const ra = a.ratio ?? 1e9;
@@ -159,15 +162,15 @@ function DiscountRank({
             >
               <span className="dr-model mono">{l.model}</span>
               <div className="dr-track">
-                {/* The zone the operator said they would sell in. Left out when
-                    the band is the full range: a tint over the whole track
-                    would read as a threshold where there is none. A band that
-                    reaches list price has no upper edge to draw — there is no
-                    such thing as a price too good to accept. */}
-                {!full && (
+                {/* The zone the operator said they would sell in: everything at
+                    or above the floor, with no upper edge to draw — there is no
+                    such thing as a price too good to accept. Left out when no
+                    floor is set: a tint over the whole track would read as a
+                    threshold where there is none. */}
+                {!open && (
                   <span
-                    className={`dr-band${hi >= FULL_BAND[1] ? " to-top" : ""}`}
-                    style={{ left: `${lo}%`, width: `${Math.max(hi - lo, 0)}%` }}
+                    className="dr-band to-top"
+                    style={{ left: `${floor}%`, width: `${RATIO_MAX - floor}%` }}
                   />
                 )}
                 {r != null && (
@@ -218,13 +221,7 @@ function DiscountRank({
           <i className="dr-swatch blocked" /> {t("publish.rank.otherwiseOff")}
         </span>
         <span className="dr-scale">
-          {/* A ceiling of 100 is not a ceiling — no price is too good — so a
-              band that reaches list price reads as the floor it really is. */}
-          {full
-            ? t("publish.rank.noBand")
-            : hi >= FULL_BAND[1]
-              ? t("publish.rank.bandFloor", { lo })
-              : t("publish.rank.bandIs", { lo, hi })}
+          {open ? t("publish.rank.noBand") : t("publish.rank.bandFloor", { lo: floor })}
           {priceCount > 0 && ` · ${t("publish.rank.heldCount", { n: priceCount })}`}
         </span>
       </div>
@@ -262,11 +259,10 @@ export function Publish() {
   const [limitSaved, setLimitSaved] = useState("");
   const [limitEditing, setLimitEditing] = useState("");
 
-  // Per-account discount band drafts, edited on the same pencil pattern as the
-  // cap above. Two numbers rather than one because the operator is describing a
-  // window — "sell between 10% and 40% off" — and the pair only means anything
-  // together.
-  const [bandDraft, setBandDraft] = useState<Record<string, [string, string]>>({});
+  // Per-account price-floor drafts, edited on the same pencil pattern as the
+  // cap above. One number: the share of list price at or above which this
+  // subscription sells.
+  const [bandDraft, setBandDraft] = useState<Record<string, string>>({});
   const [bandSaved, setBandSaved] = useState("");
   const [bandEditing, setBandEditing] = useState("");
 
@@ -303,11 +299,7 @@ export function Publish() {
         });
         setBandDraft((d) => {
           const next = { ...d };
-          for (const a of list) {
-            if (next[keyOf(a)] === undefined) {
-              next[keyOf(a)] = [String(a.sell_min_ratio ?? FULL_BAND[0]), String(a.sell_max_ratio ?? FULL_BAND[1])];
-            }
-          }
+          for (const a of list) if (next[keyOf(a)] === undefined) next[keyOf(a)] = String(floorOf(a));
           return next;
         });
       })
@@ -404,32 +396,29 @@ export function Publish() {
     setTimeout(() => setLimitSaved(""), 2000);
   }
 
-  /** Save one account's price band. An empty or unreadable end falls back to
-   *  that end of the full range, so a half-filled form widens the band rather
-   *  than closing it — the failure that costs a sale, not the one that makes
-   *  an unwanted one. */
-  async function saveBand(a: AccountStatus, override?: [number, number]) {
-    const [rawLo, rawHi] = bandDraft[keyOf(a)] ?? ["", ""];
-    const num = (s: string, fallback: number) => {
-      const n = parseInt(s, 10);
-      return Number.isFinite(n) ? clampRatio(n) : fallback;
-    };
-    let [minRatio, maxRatio] = override
-      ? [clampRatio(override[0]), clampRatio(override[1])]
-      : [num(rawLo, FULL_BAND[0]), num(rawHi, FULL_BAND[1])];
-    if (minRatio > maxRatio) [minRatio, maxRatio] = [maxRatio, minRatio];
+  /** Save one account's price floor. An empty or unreadable number falls back to
+   *  the bottom of the range, so a half-typed form means "any price" rather than
+   *  a floor nobody chose — the failure that costs nothing, not the one that
+   *  quietly takes the subscription off the market.
+   *
+   *  The ceiling always goes up with it: the daemon still holds a band, and
+   *  anything less than list price there would withhold models on a rule this
+   *  page no longer offers a way to see or unset. */
+  async function saveBand(a: AccountStatus) {
+    const raw = parseInt(bandDraft[keyOf(a)] ?? "", 10);
+    const minRatio = Number.isFinite(raw) ? clampRatio(raw) : RATIO_MIN;
     setBandEditing("");
-    setBandDraft((d) => ({ ...d, [keyOf(a)]: [String(minRatio), String(maxRatio)] }));
-    await setSell(a, a.sell_enabled, { minRatio, maxRatio });
+    setBandDraft((d) => ({ ...d, [keyOf(a)]: String(minRatio) }));
+    await setSell(a, a.sell_enabled, { minRatio, maxRatio: RATIO_MAX });
     setBandSaved(keyOf(a));
     setTimeout(() => setBandSaved(""), 2000);
   }
 
-  /** Open the band editor on the values currently in force, for the same reason
+  /** Open the floor editor on the value currently in force, for the same reason
    *  `editLimit` does. */
   function editBand(a: AccountStatus) {
     const k = keyOf(a);
-    setBandDraft((d) => ({ ...d, [k]: [String(a.sell_min_ratio ?? FULL_BAND[0]), String(a.sell_max_ratio ?? FULL_BAND[1])] }));
+    setBandDraft((d) => ({ ...d, [k]: String(floorOf(a)) }));
     setBandEditing(k);
   }
 
@@ -639,6 +628,17 @@ export function Publish() {
 
       <Err>{err}</Err>
 
+      {/* Connecting comes first: with no account yet the rest of the page has
+          nothing to show, and the empty state points "above" for OAuth. */}
+      <Card
+        icon={<IconPlus />}
+        title={t("publish.connectTitle")}
+        desc={t("publish.connectDesc")}
+      >
+        {connectGrid}
+        <Ok>{msg}</Ok>
+      </Card>
+
       <Card
         icon={<IconShield />}
         title={t("publish.accountsTitle")}
@@ -681,7 +681,7 @@ export function Publish() {
               // "what would I be selling, and at what discount" is a question
               // worth being able to answer *before* flipping the switch.
               const own = lanes.filter((l) => l.provider === a.provider && l.account_id === a.account_id);
-              const band: [number, number] = [a.sell_min_ratio ?? FULL_BAND[0], a.sell_max_ratio ?? FULL_BAND[1]];
+              const floor = floorOf(a);
               // The daily cap is spent: `rebuild_pool` has already clamped this
               // account's quota to zero, so every one of its models is off the
               // market until the UTC rollover. That is a whole-subscription
@@ -821,53 +821,33 @@ export function Publish() {
                       {bandEditing === k ? (
                         <div className="band-edit">
                           <div className="input-row">
-                            <span className="band-cap">{t("publish.bandFrom")}</span>
+                            <span className="band-cap">≥</span>
                             <input
                               className="input mono band-input"
                               type="number"
-                              min={FULL_BAND[0]}
-                              max={FULL_BAND[1]}
+                              min={RATIO_MIN}
+                              max={RATIO_MAX}
                               autoFocus
                               aria-label={t("publish.bandMin")}
-                              value={bandDraft[k]?.[0] ?? ""}
-                              onChange={(e) => setBandDraft((d) => ({ ...d, [k]: [e.target.value, d[k]?.[1] ?? ""] }))}
+                              value={bandDraft[k] ?? ""}
+                              onChange={(e) => setBandDraft((d) => ({ ...d, [k]: e.target.value }))}
                               onKeyDown={(e) => {
                                 if (e.key === "Enter") saveBand(a);
                                 if (e.key === "Escape") setBandEditing("");
                               }}
-                              placeholder={String(FULL_BAND[0])}
-                            />
-                            <span className="unit">%</span>
-                            <span className="band-cap">{t("publish.bandTo")}</span>
-                            <input
-                              className="input mono band-input"
-                              type="number"
-                              min={FULL_BAND[0]}
-                              max={FULL_BAND[1]}
-                              aria-label={t("publish.bandMax")}
-                              value={bandDraft[k]?.[1] ?? ""}
-                              onChange={(e) => setBandDraft((d) => ({ ...d, [k]: [d[k]?.[0] ?? "", e.target.value] }))}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") saveBand(a);
-                                if (e.key === "Escape") setBandEditing("");
-                              }}
-                              placeholder={String(FULL_BAND[1])}
+                              placeholder={String(RATIO_MIN)}
                             />
                             <span className="unit">%</span>
                           </div>
-                          {/* A floor is what a seller actually decides, so one
-                              click sets one — typing two numbers to express
-                              "not below 70%" is the tedious part. */}
                           <div className="band-presets">
                             <span className="band-cap">{t("publish.bandQuick")}</span>
-                            {BAND_PRESETS.map((floor) => (
+                            {BAND_PRESETS.map((preset) => (
                               <button
-                                key={floor}
-                                className={`chip${Number(bandDraft[k]?.[0]) === floor
-                                  && Number(bandDraft[k]?.[1]) === FULL_BAND[1] ? " on" : ""}`}
-                                onClick={() => setBandDraft((d) => ({ ...d, [k]: [String(floor), String(FULL_BAND[1])] }))}
+                                key={preset}
+                                className={`chip${Number(bandDraft[k]) === preset ? " on" : ""}`}
+                                onClick={() => setBandDraft((d) => ({ ...d, [k]: String(preset) }))}
                               >
-                                {floor <= FULL_BAND[0] ? t("publish.bandNone") : `≥ ${floor}%`}
+                                {noFloor(preset) ? t("publish.bandNone") : `≥ ${preset}%`}
                               </button>
                             ))}
                           </div>
@@ -883,13 +863,9 @@ export function Publish() {
                       ) : (
                         <div className="value-row">
                           <span className="value-strong mono tabular">
-                            {isFullBand(band[0], band[1])
-                              ? t("publish.bandNone")
-                              : band[1] >= FULL_BAND[1]
-                                ? `≥ ${band[0]}%`
-                                : `${band[0]}% – ${band[1]}%`}
+                            {noFloor(floor) ? t("publish.bandNone") : `≥ ${floor}%`}
                           </span>
-                          {!isFullBand(band[0], band[1]) && (
+                          {!noFloor(floor) && (
                             <span className="unit">{t("publish.unitOfList")}</span>
                           )}
                           <button
@@ -907,11 +883,9 @@ export function Publish() {
                       {/* Say what the setting *does*, in the same words the
                           chart below uses, rather than restating its units. */}
                       <div className="hint">
-                        {isFullBand(band[0], band[1])
+                        {noFloor(floor)
                           ? t("publish.bandHintOff")
-                          : band[1] >= FULL_BAND[1]
-                            ? t("publish.bandHintFloor", { lo: band[0] })
-                            : t("publish.bandHint", { lo: band[0], hi: band[1] })}
+                          : t("publish.bandHintFloor", { lo: floor })}
                       </div>
                     </div>
 
@@ -943,7 +917,7 @@ export function Publish() {
                       {own.length > 0 && (
                         <DiscountRank
                           lanes={own}
-                          band={band}
+                          floor={floor}
                           now={now}
                           onResume={resume}
                           resuming={resuming}
@@ -987,15 +961,6 @@ export function Publish() {
         )}
         <Err>{importErr}</Err>
         <Err>{acctErr}</Err>
-      </Card>
-
-      <Card
-        icon={<IconPlus />}
-        title={t("publish.connectTitle")}
-        desc={t("publish.connectDesc")}
-      >
-        {connectGrid}
-        <Ok>{msg}</Ok>
       </Card>
     </div>
   );

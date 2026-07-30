@@ -324,3 +324,22 @@ pub async fn market_models(state: &AppState) -> R<Value> {
         .map_err(err)?;
     resp_json(resp).await
 }
+
+/// The 24h window the world map is drawn from — the same one the landing page
+/// asks for, so both maps show the same network.
+const GLOBE_MINUTES: i64 = 1440;
+
+/// Country membership + seller→buyer token lanes for the overview map (public
+/// endpoint, aggregated country-level; it identifies no account).
+pub async fn market_globe(state: &AppState) -> R<Value> {
+    let http = asale_client_core::http::plain();
+    let resp = http
+        .get(format!(
+            "{}/api/v1/market/globe?minutes={GLOBE_MINUTES}",
+            state.cfg.server_api_base
+        ))
+        .send()
+        .await
+        .map_err(err)?;
+    resp_json(resp).await
+}

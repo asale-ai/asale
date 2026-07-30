@@ -21,6 +21,9 @@ export type {
   DepositSession,
   DepositSessionStatus,
   DepositSessionTx,
+  Globe,
+  GlobeFlow,
+  GlobeRegion,
   MarketModel,
   MarketModelPrice,
   OAuthAccount,
@@ -442,10 +445,13 @@ export interface AccountStatus {
   sell_enabled: boolean;
   /** This account's daily sell cap in tokens; 0 = unlimited. */
   sell_daily_limit: number;
-  /** The price band this account sells inside, in whole percent *of* list
-   *  price. A model the market prices outside it is withheld until it comes
-   *  back. `10..100` — the default and the whole legal range — never withholds
-   *  anything. */
+  /** The price floor this account sells at, in whole percent *of* list price: a
+   *  model the market prices below it is withheld until it comes back. `10` —
+   *  the default, and below every price the server can quote — never withholds
+   *  anything.
+   *
+   *  `sell_max_ratio` is the band's other end, which the UI no longer sets: no
+   *  price is too good to accept, so it stays at list price. */
   sell_min_ratio: number;
   sell_max_ratio: number;
   /** Tokens this account served today / in the current 5h window. */

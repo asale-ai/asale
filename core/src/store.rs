@@ -215,6 +215,12 @@ const MIGRATIONS: &[&str] = &[
        (SELECT CAST(v AS INTEGER) FROM settings WHERE k = 'buy_since:' || tool), since_ts)",
     "DELETE FROM settings WHERE k LIKE 'buy_enabled:%' OR k LIKE 'buy_models:%' \
         OR k LIKE 'buy_backup:%' OR k LIKE 'buy_since:%'",
+    // The selling price is a floor now, not a window: the UI only asks for
+    // "sell at or above X% of list", because no price is too good to accept. A
+    // ceiling left over from when it did ask would withhold models on a rule
+    // the operator can no longer see or lift, so raise every one to list price.
+    // Idempotent — after this there is nothing left to update.
+    "UPDATE tools SET sell_max_ratio = 100 WHERE sell_max_ratio < 100",
 ];
 
 async fn migrate(pool: &SqlitePool) {
