@@ -22,10 +22,14 @@ const CLAUDE_OAUTH_BETA: &str = "oauth-2025-04-20";
 
 /// A leased token: the bearer plus the pool account it came from (empty
 /// account_id when the provider has no pool semantics).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LeasedToken {
     pub token: String,
     pub account_id: String,
+    /// The id the vendor knows this subscription by, when its upstream demands
+    /// that id next to the bearer. Only Codex uses it so far — see the
+    /// `chatgpt-account-id` block in [`execute`].
+    pub upstream_account_id: Option<String>,
 }
 
 /// Outcome of one upstream call, reported back so a pool can release the
@@ -55,7 +59,7 @@ pub trait TokenProvider: Send + Sync {
     /// whose lane for `model` is serving (spec §4); the default wraps
     /// `token_for` with no account identity.
     fn acquire(&self, provider: &str, _model: &str) -> Option<LeasedToken> {
-        self.token_for(provider).map(|token| LeasedToken { token, account_id: String::new() })
+        self.token_for(provider).map(|token| LeasedToken { token, ..Default::default() })
     }
 
     /// Report the outcome of a leased call. Default: no-op.
@@ -161,6 +165,34 @@ pub async fn execute(
     // block above: applied where the credential is, not where the body is built.
     if provider == "kimi" {
         builder = builder.header("x-msh-device-id", kimi_device_id(&lease.account_id));
+    }
+    // Codex's upstream authenticates the *pair*: the ChatGPT bearer and the
+    // account id it was issued for. With the bearer alone it answers 401 — which
+    // reads exactly like a revoked login, so the pool flags the account as
+    // needing a fresh sign-in and takes every one of its lanes off the market.
+    // The id belongs to the account, so like Kimi's device id it can only be
+    // filled in here, next to the token.
+    if provider == "codex" {
+        match lease.upstream_account_id.as_deref().filter(|s| !s.is_empty()) {
+            Some(acct) => builder = builder.header("chatgpt-account-id", acct),
+            // Better to say so than to send a request that can only 401 and be
+            // misread as an expired credential. Re-importing the account (or
+            // signing in through asale) is what fills this in.
+            None => {
+                tokens.report(&provider, &lease.account_id, &model, TaskOutcome::AuthFailed);
+                send_error(
+                    out,
+                    &task_id,
+                    "TOKEN_EXPIRED",
+                    "codex account has no chatgpt-account-id; re-import the account",
+                    false,
+                );
+                if let Some(r) = records {
+                    r.record(&task_id, &provider, &lease.account_id, &model, &Usage::default(), "no_account_id").await;
+                }
+                return;
+            }
+        }
     }
     builder = builder.body(body);
 
@@ -662,7 +694,8 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":500}}\n\n";
             Some("k".into())
         }
         fn acquire(&self, provider: &str, _model: &str) -> Option<LeasedToken> {
-            self.token_for(provider).map(|token| LeasedToken { token, account_id: "acc-1".into() })
+            self.token_for(provider)
+                .map(|token| LeasedToken { token, account_id: "acc-1".into(), ..Default::default() })
         }
         fn report(&self, _provider: &str, account_id: &str, model: &str, outcome: TaskOutcome) {
             assert_eq!(account_id, "acc-1");
@@ -774,6 +807,73 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
         let raw = seen.lock().unwrap().clone();
         assert!(raw.contains(CLAUDE_CODE_SYSTEM), "system preamble missing from the wire: {raw}");
         assert!(raw.to_lowercase().contains("anthropic-beta: oauth-2025-04-20"), "oauth beta flag missing: {raw}");
+    }
+
+    /// A leased Codex token whose account id is known.
+    struct CodexToken(Option<&'static str>);
+    impl TokenProvider for CodexToken {
+        fn token_for(&self, _p: &str) -> Option<String> {
+            Some("k".into())
+        }
+        fn acquire(&self, _p: &str, _m: &str) -> Option<LeasedToken> {
+            Some(LeasedToken {
+                token: "k".into(),
+                account_id: "dev@example.com".into(),
+                upstream_account_id: self.0.map(String::from),
+            })
+        }
+    }
+
+    fn codex_req(url: &str) -> HttpRequestPayload {
+        let mut r = req(url, "gpt-5.1", 0);
+        r.upstream.provider = "codex".into();
+        r
+    }
+
+    /// The ChatGPT backend authenticates the bearer *and* the account id it was
+    /// issued for. Sending only the bearer is a 401, which the pool reads as a
+    /// dead login — so this header is the difference between a Codex account
+    /// that sells and one that looks permanently signed out.
+    #[tokio::test]
+    async fn codex_sends_the_chatgpt_account_id_with_the_bearer() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = seen.clone();
+        let server = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                *sink.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).to_string();
+                let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                let _ = sock.flush().await;
+            }
+        });
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let url = format!("http://127.0.0.1:{port}/");
+        execute(&crate::http::plain(), &CodexToken(Some("acc-1")), codex_req(&url), &tx, None, &test_verifier()).await;
+        let _ = server.await;
+
+        let raw = seen.lock().unwrap().to_lowercase();
+        assert!(raw.contains("chatgpt-account-id: acc-1"), "account id missing from the wire: {raw}");
+        // Claude's OAuth requirements are Claude's; they must not follow along.
+        assert!(!raw.contains("anthropic-beta"), "claude headers leaked onto codex: {raw}");
+    }
+
+    /// Without the id the request can only 401, and a 401 here is indistinguishable
+    /// from a revoked login — so fail with a message that names the actual fix
+    /// instead of letting the pool mislabel the account.
+    #[tokio::test]
+    async fn codex_without_an_account_id_fails_before_the_call() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        // Port 1 would fail loudly if the request were ever sent.
+        execute(&crate::http::plain(), &CodexToken(None), codex_req("http://127.0.0.1:1/"), &tx, None, &test_verifier())
+            .await;
+        let frames = drain(&mut rx);
+        assert_eq!(frames[0].payload["code"], "TOKEN_EXPIRED");
+        assert_eq!(frames[0].payload["retriable"], false);
+        assert!(frames[0].payload["message"].as_str().unwrap().contains("chatgpt-account-id"));
     }
 
     #[tokio::test]

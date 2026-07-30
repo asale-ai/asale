@@ -136,6 +136,24 @@ pub(crate) async fn finish_provider_oauth(
     if let Some(plan) = plan {
         let _ = state.store.set_setting(&format!("plan:{provider}:{account_id}"), plan).await;
     }
+    // Codex's upstream will not accept this bearer without the ChatGPT account
+    // id issued with it, and asale's own login is the only place that id passes
+    // through — the CLI import reads it out of auth.json, this path has to read
+    // it out of the exchange. Missing it means every sale 401s.
+    if let Some(up) = tokens["id_token"]
+        .as_str()
+        .and_then(cli_import::jwt_claims)
+        .as_ref()
+        .and_then(|c| c.get("https://api.openai.com/auth"))
+        .and_then(|a| a.get("chatgpt_account_id"))
+        .and_then(|a| a.as_str())
+        .filter(|a| !a.is_empty())
+    {
+        let _ = state
+            .store
+            .set_setting(&publisher::upstream_acct_key(provider, &account_id), up)
+            .await;
+    }
     accounts_changed(state).await;
 
     Ok(json!({"provider": provider, "account_id": account_id, "keychain_ref": keychain::token_ref(provider, &account_id)}))
@@ -229,6 +247,8 @@ async fn finish_device_login(
                 expires_at: tokens.expires_at,
                 account_hint: None,
                 plan: None,
+                // Device-flow providers (Kimi) carry no vendor-side account id.
+                upstream_account_id: None,
             };
             format!("{provider}-{}", cli_import::token_fingerprint(&cred))
         });

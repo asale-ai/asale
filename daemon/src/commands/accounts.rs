@@ -198,6 +198,16 @@ pub async fn import_from_cli(state: &AppState, provider: String) -> R<Value> {
         if let Some(plan) = &cred.plan {
             let _ = state.store.set_setting(&format!("plan:{provider}:{account_id}"), plan).await;
         }
+        // Codex's upstream refuses the bearer without the account id that goes
+        // with it; carrying it out of auth.json here is what keeps a re-import
+        // (or a first import) from producing an account that 401s on its first
+        // sale and is then marked as needing a fresh login.
+        if let Some(up) = &cred.upstream_account_id {
+            let _ = state
+                .store
+                .set_setting(&publisher::upstream_acct_key(&provider, &account_id), up)
+                .await;
+        }
         // origin=import: this credential is a *copy* of one the locally installed
         // CLI is also using. asale never writes back to the CLI's own store, but
         // the upstream refresh token is shared, so a refresh by either side can
@@ -388,21 +398,33 @@ pub async fn resume_lane(
     account_id: String,
     model: String,
 ) -> R<Value> {
-    {
+    // An auth failure pauses every lane of the account, so resuming one clears
+    // all of them — and the persisted rows and the gateway have to be told about
+    // exactly the same set, or a restart (or the next re-declaration) puts the
+    // lanes the pool has already forgiven back out of service.
+    let cleared = {
         let mut pool = state.pool.lock().map_err(|_| "pool lock poisoned".to_string())?;
         if provider.is_empty() || account_id.is_empty() || model.is_empty() {
             pool.resume_all();
+            Vec::new()
         } else {
-            pool.resume_lane(&provider, &account_id, &model);
+            pool.resume_lane(&provider, &account_id, &model)
         }
+    };
+    if cleared.len() > 1 {
+        // Wildcard on the model column: the whole account came back at once.
+        state.store.clear_lane_pause(&provider, &account_id, "").await.map_err(err)?;
+    } else {
+        state.store.clear_lane_pause(&provider, &account_id, &model).await.map_err(err)?;
     }
-    state
-        .store
-        .clear_lane_pause(&provider, &account_id, &model)
-        .await
-        .map_err(err)?;
     if let Some(h) = state.publisher.read().await.as_ref() {
-        h.resume(&model);
+        if cleared.len() > 1 {
+            for m in &cleared {
+                h.resume(m);
+            }
+        } else {
+            h.resume(&model);
+        }
     }
     Ok(json!({"resumed": true, "provider": provider, "account_id": account_id, "model": model}))
 }

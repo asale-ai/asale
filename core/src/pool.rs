@@ -166,6 +166,11 @@ pub struct AccountRuntime {
     pub account_id: String,
     /// Keychain reference for the access token (never the token itself).
     pub keychain_ref: String,
+    /// The id the vendor knows this subscription by, when its upstream requires
+    /// that id to travel with the bearer (Codex's `chatgpt-account-id`). Not a
+    /// secret, and not the same thing as `account_id` — that one is asale's own
+    /// key for the account, usually an email.
+    pub upstream_account_id: Option<String>,
     pub plan: Option<String>,
     /// Estimated serviceable tokens remaining in the account's window.
     pub quota_remaining: u64,
@@ -199,6 +204,7 @@ impl AccountRuntime {
             provider: provider.to_string(),
             account_id: account_id.to_string(),
             keychain_ref: keychain_ref.to_string(),
+            upstream_account_id: None,
             plan: None,
             quota_remaining: 0,
             expires_at: None,
@@ -272,6 +278,9 @@ pub struct PickedAccount {
     pub provider: String,
     pub account_id: String,
     pub keychain_ref: String,
+    /// See [`AccountRuntime::upstream_account_id`]. Carried on the pick because
+    /// the caller that injects the bearer is the same one that has to send it.
+    pub upstream_account_id: Option<String>,
 }
 
 /// Serializable status view for `list_accounts`.
@@ -435,6 +444,7 @@ impl AccountPool {
             provider: a.provider.clone(),
             account_id: a.account_id.clone(),
             keychain_ref: a.keychain_ref.clone(),
+            upstream_account_id: a.upstream_account_id.clone(),
         })
     }
 
@@ -560,19 +570,38 @@ impl AccountPool {
     }
 
     /// Clear every exclusion on a lane — the operator says it is fixed.
-    /// Also clears the account-level auth flag when the pause was an auth
-    /// failure, since that is what was blocking every other lane too.
-    pub fn resume_lane(&mut self, provider: &str, account_id: &str, model: &str) {
-        if let Some(a) = self.find(provider, account_id) {
-            let was_auth = a.lanes.get(model).and_then(|l| l.paused) == Some(PauseReason::Auth);
-            if was_auth {
-                a.auth_failed = false;
-            }
-            a.cooldown_until = None;
-            if let Some(lane) = a.lanes.get_mut(model) {
-                *lane = LaneState::default();
+    ///
+    /// An auth failure is the account's, not the lane's: `on_error` pauses
+    /// *every* lane of the account for it, so clearing one lane and leaving the
+    /// rest paused would leave the operator clicking "resume" once per model —
+    /// dozens of times for a Codex account — to undo one signed-in-again. So an
+    /// auth pause is cleared account-wide, together with the flag that put it
+    /// there. Other reasons stay per-lane: a broken Opus lane says nothing about
+    /// Sonnet.
+    /// Returns every lane it actually cleared, so the caller can forget the
+    /// matching persisted pauses and re-declare exactly those lanes — clearing
+    /// more in memory than on disk would put them all back on the next restart.
+    pub fn resume_lane(&mut self, provider: &str, account_id: &str, model: &str) -> Vec<String> {
+        let Some(a) = self.find(provider, account_id) else { return Vec::new() };
+        let was_auth = a.lanes.get(model).and_then(|l| l.paused) == Some(PauseReason::Auth);
+        a.cooldown_until = None;
+        let mut cleared = Vec::new();
+        if was_auth {
+            a.auth_failed = false;
+            for (name, lane) in a.lanes.iter_mut() {
+                if lane.paused == Some(PauseReason::Auth) {
+                    *lane = LaneState::default();
+                    cleared.push(name.clone());
+                }
             }
         }
+        if let Some(lane) = a.lanes.get_mut(model) {
+            *lane = LaneState::default();
+            if !cleared.iter().any(|m| m == model) {
+                cleared.push(model.to_string());
+            }
+        }
+        cleared
     }
 
     /// Resume every lane of every account that is out for a reason the operator
@@ -934,6 +963,35 @@ mod tests {
         p.set_accounts(vec![a]);
         assert!(p.pick_for_sale("claude", OPUS, now).is_some());
         assert!(p.lane_views(now).iter().all(|v| v.paused_reason.is_none()));
+    }
+
+    /// One sign-in, one click. `on_error` pauses every lane of the account for
+    /// an auth failure, so resuming one lane has to undo all of them — otherwise
+    /// the operator faces a "resume" button per model (a Codex account sells
+    /// dozens) to clear a single event.
+    #[test]
+    fn resuming_one_lane_clears_the_whole_auth_pause() {
+        let now = 1000;
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        p.set_accounts(vec![sellable("a")]);
+        p.on_error("claude", "a", OPUS, UpstreamErrorKind::AuthFailed, "401", now);
+        p.resume_lane("claude", "a", OPUS);
+        assert!(p.lane_views(now).iter().all(|v| v.paused_reason.is_none()), "every lane comes back");
+        assert!(p.pick_for_sale("claude", HAIKU, now).is_some(), "a lane nobody named still serves");
+        assert_eq!(p.statuses(now)[0].status, "available", "the account-level flag goes too");
+    }
+
+    /// A pause that is genuinely about one lane must not be cleared wholesale by
+    /// resuming a different one.
+    #[test]
+    fn resuming_a_lane_leaves_other_lanes_own_pauses_alone() {
+        let now = 1000;
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        p.set_accounts(vec![sellable("a")]);
+        p.pause_lane("claude", "a", HAIKU, PauseReason::Breaker, 0);
+        p.resume_lane("claude", "a", OPUS);
+        assert!(p.pick_for_sale("claude", HAIKU, now).is_none());
+        assert!(p.pick_for_sale("claude", OPUS, now).is_some());
     }
 
     #[test]

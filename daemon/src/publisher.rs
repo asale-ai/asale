@@ -506,7 +506,11 @@ impl TokenProvider for PoolTokens {
         // `pick_for_sale`, not `pick`.
         let picked = self.pool.lock().ok()?.pick_for_sale(provider, model, now_secs())?;
         match keychain::get(&picked.keychain_ref).ok().flatten() {
-            Some(token) => Some(LeasedToken { token, account_id: picked.account_id }),
+            Some(token) => Some(LeasedToken {
+                token,
+                account_id: picked.account_id,
+                upstream_account_id: picked.upstream_account_id,
+            }),
             None => {
                 // Keychain entry vanished — release the lease and flag the account.
                 let paused = self.pool.lock().ok().and_then(|mut pool| {
@@ -656,6 +660,12 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
         }
         let mut a = AccountRuntime::new(&tool.provider, &tool.account_id, &tool.keychain_ref)
             .with_models(sellable_models(&catalog, &tool.provider));
+        a.upstream_account_id = store
+            .get_setting(&upstream_acct_key(&tool.provider, &tool.account_id))
+            .await
+            .ok()
+            .flatten()
+            .filter(|s| !s.is_empty());
         a.plan = plan;
         a.quota_remaining = quota;
         a.expires_at = expires_at;
@@ -906,6 +916,18 @@ pub async fn persist_refresh(
 
 pub fn exp_key(provider: &str, account_id: &str) -> String {
     format!("tokexp:{provider}:{account_id}")
+}
+
+/// Settings key for the id the *vendor* knows this account by, when its upstream
+/// requires that id to travel alongside the bearer.
+///
+/// Codex is the case that forced it: `chatgpt.com/backend-api/codex` answers a
+/// request with no `chatgpt-account-id` header with 401, which the pool reads as
+/// a dead login and takes the whole account off the market. It is not a secret —
+/// same class of per-account metadata as the token expiry above — so it lives in
+/// `settings` rather than the secret store.
+pub fn upstream_acct_key(provider: &str, account_id: &str) -> String {
+    format!("upacct:{provider}:{account_id}")
 }
 
 fn now_secs() -> i64 {

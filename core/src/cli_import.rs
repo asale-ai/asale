@@ -32,6 +32,15 @@ pub struct CliCred {
     pub account_hint: Option<String>,
     /// Plan hint (Claude `subscriptionType`, Codex `chatgpt_plan_type`).
     pub plan: Option<String>,
+    /// The id the *vendor* knows this subscription by, when it has to travel
+    /// with the token to be accepted.
+    ///
+    /// Only Codex uses it so far: the ChatGPT backend requires a
+    /// `chatgpt-account-id` header alongside the bearer, and a request without
+    /// it is a 401 that looks exactly like a revoked login. It lives here
+    /// because `account_hint` is the *display* identity (an email) and is free
+    /// to change or be absent; this one is a protocol value.
+    pub upstream_account_id: Option<String>,
 }
 
 /// Normalize a timestamp that may be in milliseconds to seconds.
@@ -83,6 +92,7 @@ pub fn parse_claude_credentials(content: &str) -> anyhow::Result<CliCred> {
         expires_at,
         account_hint: None, // the file carries no email; resolved via profile API
         plan,
+        upstream_account_id: None,
     })
 }
 
@@ -109,11 +119,20 @@ pub fn parse_codex_auth(content: &str) -> anyhow::Result<CliCred> {
             .as_ref()
             .and_then(|c| c.get("email").and_then(|e| e.as_str()).map(String::from))
             .or_else(|| tokens.get("account_id").and_then(|a| a.as_str()).map(String::from));
-        let plan = id_claims
-            .as_ref()
-            .and_then(|c| c.get("https://api.openai.com/auth"))
+        let auth_claim = id_claims.as_ref().and_then(|c| c.get("https://api.openai.com/auth"));
+        let plan = auth_claim
             .and_then(|a| a.get("chatgpt_plan_type"))
             .and_then(|p| p.as_str())
+            .map(String::from);
+        // The ChatGPT backend will not serve this token without the account id
+        // that goes with it. It rides in the same claim as the plan, and the
+        // top-level `tokens.account_id` is the CLI's own copy of it — take
+        // whichever is there, because an older auth.json has only the latter.
+        let upstream_account_id = auth_claim
+            .and_then(|a| a.get("chatgpt_account_id"))
+            .and_then(|a| a.as_str())
+            .or_else(|| tokens.get("account_id").and_then(|a| a.as_str()))
+            .filter(|a| !a.is_empty())
             .map(String::from);
         return Ok(CliCred {
             provider: "codex".into(),
@@ -122,6 +141,7 @@ pub fn parse_codex_auth(content: &str) -> anyhow::Result<CliCred> {
             expires_at,
             account_hint: email,
             plan,
+            upstream_account_id,
         });
     }
     let api_key = v
@@ -136,6 +156,7 @@ pub fn parse_codex_auth(content: &str) -> anyhow::Result<CliCred> {
         expires_at: None,
         account_hint: Some("api-key".into()),
         plan: None,
+        upstream_account_id: None,
     })
 }
 
@@ -163,6 +184,7 @@ pub fn parse_gemini_oauth_creds(content: &str) -> anyhow::Result<CliCred> {
             expires_at,
             account_hint: None,
             plan: None,
+            upstream_account_id: None,
         });
     }
     let access = v
@@ -188,6 +210,7 @@ pub fn parse_gemini_oauth_creds(content: &str) -> anyhow::Result<CliCred> {
         expires_at,
         account_hint: email,
         plan: None,
+        upstream_account_id: None,
     })
 }
 
@@ -217,6 +240,7 @@ pub fn api_key_cred(provider: &str, key: &str) -> anyhow::Result<CliCred> {
         expires_at: None,
         account_hint: None,
         plan: None,
+        upstream_account_id: None,
     })
 }
 
@@ -374,6 +398,26 @@ mod tests {
         assert_eq!(c.plan.as_deref(), Some("plus"));
         assert_eq!(c.expires_at, Some(1_760_000_000));
         assert_eq!(c.refresh_token.as_deref(), Some("rt-1"));
+        // Without this the ChatGPT backend 401s every relayed call, which the
+        // pool then reads as "this login is dead" and takes the account off the
+        // market — so it has to survive the import, not just the file.
+        assert_eq!(c.upstream_account_id.as_deref(), Some("acc-1"));
+    }
+
+    /// An auth.json written before the claim existed still carries the id at the
+    /// top level of `tokens`, and that copy is just as usable.
+    #[test]
+    fn codex_account_id_falls_back_to_the_tokens_entry() {
+        let id_token = fake_jwt(serde_json::json!({"email": "dev@example.com"}));
+        let access = fake_jwt(serde_json::json!({"exp": 1_760_000_000i64}));
+        let content = serde_json::json!({
+            "tokens": {"id_token": id_token, "access_token": access, "account_id": "acc-legacy"}
+        })
+        .to_string();
+        assert_eq!(
+            parse_codex_auth(&content).unwrap().upstream_account_id.as_deref(),
+            Some("acc-legacy")
+        );
     }
 
     #[test]
@@ -413,6 +457,7 @@ mod tests {
             expires_at: exp,
             account_hint: None,
             plan: Some("max".into()),
+            upstream_account_id: None,
         }
     }
 
