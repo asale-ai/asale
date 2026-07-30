@@ -38,7 +38,16 @@ pub struct Shell {
     /// because the window-close handler is synchronous and must not block on
     /// the daemon to decide whether to close.
     pub close_to_tray: AtomicBool,
+    /// Where the tray icon was last clicked, in physical screen coordinates.
+    /// The panel sizes itself to its content *after* it is placed, so the
+    /// re-anchoring that follows needs the click long after it happened.
+    pub panel_anchor: std::sync::Mutex<Option<(f64, f64)>>,
 }
+
+/// The panel's width, and the height it opens at before the frontend has
+/// measured itself. Only the height ever changes.
+const PANEL_W: f64 = 340.0;
+const PANEL_H: f64 = 430.0;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -103,6 +112,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             show_main_window,
             hide_tray_panel,
+            resize_panel,
             open_web_ui,
             web_ui_url,
             quit_app,
@@ -129,6 +139,7 @@ pub fn run() {
                 // Hide-on-close is the default; the tray loop corrects this
                 // within a tick if the user has chosen otherwise.
                 close_to_tray: AtomicBool::new(true),
+                panel_anchor: std::sync::Mutex::new(None),
             });
             app.manage(shell.clone());
 
@@ -224,7 +235,10 @@ fn build_panel(app: &AppHandle, script: &str) -> tauri::Result<()> {
     let script = format!("window.__ASALE_VIEW__='panel';{script}");
     tauri::WebviewWindowBuilder::new(app, "panel", tauri::WebviewUrl::App("index.html?view=panel".into()))
         .title("Asale")
-        .inner_size(340.0, 430.0)
+        // A starting height only: the frontend measures its content and calls
+        // `resize_panel`, which it has already done by the first open (the
+        // window is built at startup and stays alive, hidden, between opens).
+        .inner_size(PANEL_W, PANEL_H)
         .resizable(false)
         .decorations(false)
         .always_on_top(true)
@@ -283,6 +297,41 @@ fn show_main_window(app: AppHandle) {
 fn hide_tray_panel(app: AppHandle) {
     if let Some(win) = app.get_webview_window("panel") {
         let _ = win.hide();
+    }
+}
+
+/// Make the panel window as tall as the panel says it needs to be.
+///
+/// The panel is a menu, and what a menu contains decides how tall it is: with
+/// the daemon down it is a heading and three buttons, with three accounts
+/// selling it is twice that. A fixed window makes one of those correct and the
+/// rest a rectangle with a hole in it.
+///
+/// The clamp is not defensive politeness: a measurement taken mid-layout can
+/// come back as a handful of pixels or as the whole document, and either one
+/// applied to an always-on-top window is a mess the user has to hunt down the
+/// tray icon to close.
+#[tauri::command]
+fn resize_panel(app: AppHandle, height: f64) {
+    if !height.is_finite() {
+        return;
+    }
+    let Some(win) = app.get_webview_window("panel") else { return };
+    let want = height.clamp(200.0, 640.0).round();
+
+    // Skip a resize that changes nothing: the frontend re-measures on every
+    // render, and moving the window on each of those would make the panel
+    // twitch while the numbers tick over.
+    if let (Ok(size), Ok(scale)) = (win.inner_size(), win.scale_factor()) {
+        if (size.to_logical::<f64>(scale).height - want).abs() < 1.0 {
+            return;
+        }
+    }
+    if win.set_size(tauri::LogicalSize::new(PANEL_W, want)).is_ok() {
+        // Undecorated, so outer == inner and the physical size is just the
+        // logical one scaled.
+        let scale = win.scale_factor().unwrap_or(1.0);
+        tray::reanchor_panel(&app, (PANEL_W * scale) as i32, (want * scale) as i32);
     }
 }
 

@@ -208,13 +208,6 @@ pub fn setup(app: &AppHandle, shell: Arc<Shell>) -> tauri::Result<()> {
 }
 
 /// Show the overview panel under the tray icon, or hide it if it is already up.
-///
-/// Placement is computed from the *cursor*, not from the icon rectangle: the
-/// rectangle is reported inconsistently across platforms (and not at all on some
-/// Linux desktops), while the click position is always where the user is
-/// looking. Which side of the pointer the panel opens on follows the tray's
-/// position — top half of the screen means a menu bar above (macOS, GNOME),
-/// bottom half means a taskbar below (Windows, KDE).
 fn toggle_panel(app: &AppHandle, at: PhysicalPosition<f64>) {
     let Some(win) = app.get_webview_window("panel") else {
         // No panel window (creation failed at startup) — fall back to the thing
@@ -227,7 +220,45 @@ fn toggle_panel(app: &AppHandle, at: PhysicalPosition<f64>) {
         return;
     }
 
+    // Remember where the icon was clicked. The panel resizes itself to its
+    // content after it renders (`resize_panel`), and a window that grew has to
+    // be re-anchored or it drifts off the icon — which needs this anchor long
+    // after the click that produced it is over.
+    if let Some(shell) = app.try_state::<Arc<Shell>>() {
+        if let Ok(mut a) = shell.panel_anchor.lock() {
+            *a = Some((at.x, at.y));
+        }
+    }
+
     let size = win.outer_size().unwrap_or(tauri::PhysicalSize { width: 340, height: 430 });
+    place(&win, (at.x, at.y), size.width as i32, size.height as i32);
+    let _ = win.show();
+    let _ = win.set_focus();
+}
+
+/// Re-anchor the panel to the last tray click, given the size it has just been
+/// set to.
+///
+/// Called after the panel resizes itself: the anchor is fixed, the height is
+/// not, and on a bottom-of-screen tray the top edge moves with every pixel of
+/// it. The size is passed in rather than read back, because a window queried
+/// immediately after `set_size` may still report the old one.
+pub fn reanchor_panel(app: &AppHandle, w: i32, h: i32) {
+    let Some(shell) = app.try_state::<Arc<Shell>>() else { return };
+    let Some(at) = shell.panel_anchor.lock().ok().and_then(|a| *a) else { return };
+    let Some(win) = app.get_webview_window("panel") else { return };
+    place(&win, at, w, h);
+}
+
+/// Put a window of `w`×`h` physical pixels under the tray icon at `at`.
+///
+/// Placement is computed from the *cursor*, not from the icon rectangle: the
+/// rectangle is reported inconsistently across platforms (and not at all on some
+/// Linux desktops), while the click position is always where the user is
+/// looking. Which side of the pointer the panel opens on follows the tray's
+/// position — top half of the screen means a menu bar above (macOS, GNOME),
+/// bottom half means a taskbar below (Windows, KDE).
+fn place(win: &tauri::WebviewWindow, at: (f64, f64), w: i32, h: i32) {
     let (mx, my, mw, mh) = match win.current_monitor().ok().flatten() {
         Some(m) => {
             let p = m.position();
@@ -236,16 +267,14 @@ fn toggle_panel(app: &AppHandle, at: PhysicalPosition<f64>) {
         }
         None => (0, 0, 1920, 1080),
     };
-    let (w, h) = (size.width as i32, size.height as i32);
+    let (ax, ay) = (at.0 as i32, at.1 as i32);
     let margin = 12;
-    let near_top = (at.y as i32 - my) < mh / 2;
-    let x = (at.x as i32 - w / 2).clamp(mx + margin, (mx + mw - w - margin).max(mx));
-    let y = if near_top { at.y as i32 + margin } else { at.y as i32 - h - margin };
+    let near_top = (ay - my) < mh / 2;
+    let x = (ax - w / 2).clamp(mx + margin, (mx + mw - w - margin).max(mx));
+    let y = if near_top { ay + margin } else { ay - h - margin };
     let y = y.clamp(my + margin, (my + mh - h - margin).max(my));
 
     let _ = win.set_position(PhysicalPosition::new(x, y));
-    let _ = win.show();
-    let _ = win.set_focus();
 }
 
 /// Reflect the live session state — and how many accounts are behind it — into

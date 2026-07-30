@@ -48,4 +48,9 @@ export const shell = {
   setCloseToTray: (value: boolean) => call<void>("set_close_to_tray", { value }),
 
   hidePanel: () => call<void>("hide_tray_panel"),
+
+  /** Make the tray panel window exactly `height` CSS pixels tall and re-anchor
+   *  it to the tray icon. The panel measures itself and calls this; the shell
+   *  clamps, so a broken measurement cannot produce a full-screen popup. */
+  resizePanel: (height: number) => call<void>("resize_panel", { height }),
 };

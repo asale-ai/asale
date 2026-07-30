@@ -860,6 +860,7 @@
     "openWeb": "在浏览器中打开",
     "quit": "完全退出",
     "quitNote": "退出后停止出售；关闭窗口只是收进托盘。",
-    "earnedToday": "今日收入"
+    "earnedToday": "今日收入",
+    "calls": "{{n}} 次请求"
   }
 }

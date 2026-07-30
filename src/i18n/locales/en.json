@@ -860,6 +860,7 @@
     "openWeb": "Open in browser",
     "quit": "Quit Asale",
     "quitNote": "Quitting stops selling. Closing the window only hides it here.",
-    "earnedToday": "Earned today"
+    "earnedToday": "Earned today",
+    "calls": "{{n}} requests"
   }
 }

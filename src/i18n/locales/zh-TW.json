@@ -860,6 +860,7 @@
     "openWeb": "在瀏覽器中開啟",
     "quit": "完全結束",
     "quitNote": "結束後停止出售；關閉視窗只是收進系統列。",
-    "earnedToday": "今日收入"
+    "earnedToday": "今日收入",
+    "calls": "{{n}} 次請求"
   }
 }
