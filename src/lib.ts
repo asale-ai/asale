@@ -33,8 +33,9 @@ export type {
 
 const TOKEN_KEY = "asale.daemon.token";
 
-// Capture `?token=…` into localStorage on first load, then scrub it from the
-// address bar.
+// Capture `#token=…` into localStorage on first load, then scrub it from the
+// address bar. The legacy query form remains readable for old bookmarks, but
+// new links use a fragment so the credential never reaches HTTP logs/Referer.
 //
 // The daemon requires this token on every RPC, loopback included, so a browser
 // always needs it — open the URL `asaled` prints at startup. (The Tauri shell
@@ -42,12 +43,19 @@ const TOKEN_KEY = "asale.daemon.token";
 // script runs, so the desktop app never shows a token in a URL.)
 if (typeof window !== "undefined") {
   const params = new URLSearchParams(window.location.search);
-  const tok = params.get("token");
+  const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  const tok = fragment.get("token") || params.get("token");
   if (tok) {
     localStorage.setItem(TOKEN_KEY, tok);
     params.delete("token");
+    fragment.delete("token");
     const qs = params.toString();
-    window.history.replaceState(null, "", window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash);
+    const hash = fragment.toString();
+    window.history.replaceState(
+      null,
+      "",
+      window.location.pathname + (qs ? `?${qs}` : "") + (hash ? `#${hash}` : "")
+    );
   }
 }
 

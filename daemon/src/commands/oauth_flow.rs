@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use super::sell::{accounts_changed};
 use super::server_client::{finish_auth, resp_json};
-use super::{R, err, err_keyed, now_secs};
+use super::{CmdError, R, err, err_keyed, now_secs};
 use crate::cmd_err;
 
 /// Record a flow result.
@@ -102,11 +102,11 @@ pub(crate) async fn finish_provider_oauth(
     let tokens = oauth::exchange(p, &code).await.map_err(err)?;
     let access = tokens["access_token"].as_str().unwrap_or_default();
     if access.is_empty() {
-        return Err(cmd_err!(
-            "errors.oauth.exchangeFailed",
-            format!("token exchange failed: {tokens}"),
-            detail = tokens.to_string()
-        ));
+        // Provider token responses may still contain a refresh token or an ID
+        // token when they are malformed. Never echo the response into the RPC
+        // error: that error is rendered by the frontend and may be collected by
+        // browser diagnostics.
+        return Err(missing_access_token_error(provider, &tokens));
     }
     let account_id = tokens["account"]["email"]
         .as_str()
@@ -179,6 +179,39 @@ pub(crate) async fn finish_provider_oauth(
     accounts_changed(state).await;
 
     Ok(json!({"provider": provider, "account_id": account_id, "keychain_ref": keychain::token_ref(provider, &account_id)}))
+}
+
+fn missing_access_token_error(provider: &str, tokens: &Value) -> CmdError {
+    let provider_error = tokens["error"]
+        .as_str()
+        .or_else(|| tokens["error"]["code"].as_str())
+        .unwrap_or("missing_access_token");
+    cmd_err!(
+        "errors.oauth.exchangeFailed",
+        format!("token exchange failed ({provider_error})"),
+        provider = provider,
+        reason = provider_error
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_token_response_never_reaches_the_rpc_error() {
+        let response = json!({
+            "error": {"code": "invalid_grant"},
+            "refresh_token": "refresh-secret",
+            "id_token": "identity-secret",
+            "client_secret": "client-secret"
+        });
+        let encoded = missing_access_token_error("codex", &response).to_json().to_string();
+        assert!(encoded.contains("invalid_grant"));
+        for secret in ["refresh-secret", "identity-secret", "client-secret"] {
+            assert!(!encoded.contains(secret));
+        }
+    }
 }
 
 /// Begin a device-code login (Kimi Code, Grok CLI).

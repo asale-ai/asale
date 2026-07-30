@@ -88,7 +88,7 @@ export function Settings() {
     } else {
       const origin = apiBase() || window.location.origin;
       const tok = daemonToken();
-      setWebUrl(tok ? `${origin}/?token=${tok}` : origin);
+      setWebUrl(tok ? `${origin}/#token=${encodeURIComponent(tok)}` : origin);
     }
 
     if (!realTauri) return;

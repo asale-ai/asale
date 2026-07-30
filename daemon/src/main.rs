@@ -33,9 +33,10 @@ fn main() -> anyhow::Result<()> {
         // The token is required on every request, loopback included, so the
         // browser needs it here — there is no untokenized URL that works.
         println!("asaled ready:");
-        println!("  local:   http://127.0.0.1:{}/?token={}", started.addr.port(), started.token);
+        // The fragment never reaches HTTP access logs or Referer headers.
+        println!("  local:   http://127.0.0.1:{}/#token={}", started.addr.port(), started.token);
         if !started.addr.ip().is_loopback() {
-            println!("  remote:  http://<this-host>:{}/?token={}", started.addr.port(), started.token);
+            println!("  remote:  http://<this-host>:{}/#token={}", started.addr.port(), started.token);
         }
         println!("  (the token is also at {}/daemon.token, mode 0600)", asale_daemon::state::data_dir());
         tokio::signal::ctrl_c().await?;

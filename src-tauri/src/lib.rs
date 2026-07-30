@@ -125,7 +125,7 @@ pub fn run() {
             // `~/.asale/daemon.token` and hand it to the webview — done as an
             // *initialization* script rather than a post-load `eval` so the
             // token is in place before the first page script can issue an RPC.
-            // A browser, which cannot read the file, uses the `?token=` URL the
+            // A browser, which cannot read the file, uses the `#token=` URL the
             // daemon prints at startup instead.
             let token = asale_daemon::load_or_create_token()?;
             let script = format!(
@@ -272,7 +272,8 @@ pub fn show_main(app: &AppHandle) {
 /// bare address would load the app and then fail every call it makes.
 fn web_url(app: &AppHandle) -> Result<String, String> {
     let shell = app.try_state::<Arc<Shell>>().ok_or("shell state missing")?;
-    Ok(format!("{}/?token={}", shell.daemon_base, shell.token))
+    // A fragment is not sent in the HTTP request, access log, or Referer.
+    Ok(format!("{}/#token={}", shell.daemon_base, shell.token))
 }
 
 pub fn open_web(app: &AppHandle) -> Result<String, String> {

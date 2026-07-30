@@ -14,7 +14,7 @@
 //!     `~/.asale/daemon.token` (0600, generated on first run) — loopback
 //!     included. See `authorized` for what that does and does not protect.
 //!   - The Tauri shell reads the file and seeds the webview's localStorage in
-//!     an initialization script; browsers use the `?token=` URL the daemon
+//!     an initialization script; browsers use the `#token=` URL the daemon
 //!     prints at startup (the frontend captures it into localStorage on first
 //!     load and scrubs it from the address bar).
 //!   - `/healthz` and the static UI stay open: the first is a liveness probe
@@ -70,6 +70,9 @@ pub fn router(ctx: Ctx) -> Router {
         .route("/rpc/:cmd", post(rpc))
         .route("/healthz", get(healthz))
         .fallback(get(ui))
+        // RPC arguments are small intent objects. State the boundary explicitly
+        // instead of inheriting axum's larger default.
+        .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
         .layer(cors)
         .with_state(ctx)
 }
@@ -90,6 +93,15 @@ async fn ui(uri: Uri) -> Response {
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, mime.as_ref())
+                .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+                .header(header::REFERRER_POLICY, "no-referrer")
+                .header("x-frame-options", "DENY")
+                .header(
+                    header::CONTENT_SECURITY_POLICY,
+                    "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; \
+                     script-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:* \
+                     ws://127.0.0.1:* ws://localhost:*; frame-ancestors 'none'; base-uri 'none'",
+                )
                 .body(Body::from(f.data.into_owned()))
                 .unwrap()
         }
