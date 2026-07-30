@@ -173,18 +173,28 @@ pub async fn execute(
     // The id belongs to the account, so like Kimi's device id it can only be
     // filled in here, next to the token.
     if provider == "codex" {
-        match lease.upstream_account_id.as_deref().filter(|s| !s.is_empty()) {
+        let resolved = lease
+            .upstream_account_id
+            .clone()
+            .filter(|s| !s.is_empty())
+            // Accounts connected before the id was being recorded have nothing
+            // stored, and asking their owner to sign in again to recover a value
+            // the token already carries is a poor trade — so read it back off
+            // the bearer instead. Same claim the CLI reads out of the id_token,
+            // and it is reissued with every refresh, so this keeps working.
+            .or_else(|| chatgpt_account_id(&token));
+        match resolved {
             Some(acct) => builder = builder.header("chatgpt-account-id", acct),
-            // Better to say so than to send a request that can only 401 and be
-            // misread as an expired credential. Re-importing the account (or
-            // signing in through asale) is what fills this in.
+            // Neither source had it: say so, rather than send a request that can
+            // only 401 and then be misread as a revoked credential. Reconnecting
+            // the account through asale's own Codex login fills it in.
             None => {
                 tokens.report(&provider, &lease.account_id, &model, TaskOutcome::AuthFailed);
                 send_error(
                     out,
                     &task_id,
                     "TOKEN_EXPIRED",
-                    "codex account has no chatgpt-account-id; re-import the account",
+                    "codex account has no chatgpt-account-id; reconnect the account",
                     false,
                 );
                 if let Some(r) = records {
@@ -194,6 +204,14 @@ pub async fn execute(
             }
         }
     }
+    // Fingerprint what we are about to send, before the body is moved into the
+    // request. An upstream 4xx names the offending field ("System messages are
+    // not allowed") but never which item carried it, and the body itself must
+    // not be logged — it is the consumer's prompt. The shape is enough to tell a
+    // translator bug from a credential problem, and this is the only place it
+    // can be recorded: the gateway builds this body and never sees the
+    // rejection; this process sees the rejection and never kept the body.
+    let shape = body_shape(&body);
     builder = builder.body(body);
 
     let resp = match builder.send().await {
@@ -227,12 +245,71 @@ pub async fn execute(
         // keep them in the log rather than dropping them on the floor.
         let detail = resp.text().await.unwrap_or_default();
         tracing::warn!(
-            task = %task_id, provider = %provider, model = %model, status,
+            task = %task_id, provider = %provider, model = %model, status, sent = %shape,
             "upstream rejected: {}", detail.chars().take(400).collect::<String>()
         );
         send_error(out, &task_id, code, &format!("upstream {status}"), retriable);
         if let Some(r) = records {
             r.record(&task_id, &provider, &lease.account_id, &model, &Usage::default(), &format!("upstream_{status}")).await;
+        }
+        return;
+    }
+
+    // A request the consumer did not ask to stream was answered by the upstream
+    // with one JSON object, not an SSE stream. Framing it as `stream_chunk`s
+    // handed the gateway bytes it then tried to read as SSE lines: no `data:`
+    // prefix, so no events, so no text and no usage — the consumer got a 200
+    // carrying an empty message and the gateway failed the task for serving
+    // nothing (`relay::finalize`), which cost the publisher a sale it had
+    // actually made. `http_response` is the frame that exists for this.
+    //
+    // Which of the two arrived is the upstream's decision, not the consumer's.
+    // The gateway forces `stream: true` for Codex, whose ChatGPT backend rejects
+    // a buffered Responses call outright, while the relay envelope still carries
+    // the consumer's own `stream: false`. Branching on `req.stream` alone
+    // therefore buffered an SSE stream into `http_response`, where the gateway
+    // read it as JSON, found none, and settled every non-streaming Codex sale as
+    // an empty answer worth zero tokens.
+    let upstream_is_sse = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.trim_start().starts_with("text/event-stream"));
+
+    if !req.stream && !upstream_is_sse {
+        let body = match resp.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                tokens.report(&provider, &lease.account_id, &model, TaskOutcome::ServerError);
+                send_error(out, &task_id, "UPSTREAM_5XX", &format!("body: {e}"), true);
+                if let Some(r) = records {
+                    r.record(&task_id, &provider, &lease.account_id, &model, &Usage::default(), "upstream_error").await;
+                }
+                return;
+            }
+        };
+        let usage = usage_from_body(&body);
+        let _ = out.send(Envelope::with_id(
+            &task_id,
+            protocol::T_HTTP_RESPONSE,
+            json!({
+                "task_id": task_id,
+                "status": status,
+                "body_b64": B64.encode(&body),
+                "usage": {
+                    "input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens,
+                    "cache_read_tokens": usage.cache_read_tokens, "cache_write_tokens": usage.cache_write_tokens
+                }
+            }),
+        ));
+        tokens.report(
+            &provider,
+            &lease.account_id,
+            &model,
+            TaskOutcome::Success { tokens_used: (usage.input_tokens + usage.output_tokens).max(0) as u64 },
+        );
+        if let Some(r) = records {
+            r.record(&task_id, &provider, &lease.account_id, &model, &usage, "ok").await;
         }
         return;
     }
@@ -244,10 +321,12 @@ pub async fn execute(
         json!({"task_id": task_id, "status": status, "headers": {}}),
     ));
 
-    // Stream body chunks; parse usage from SSE where possible.
+    // Stream body chunks; parse usage from SSE where possible. The scanner holds
+    // a line that a chunk boundary cut in half — without it the Responses
+    // dialect's usage frame is lost and the sale settles as zero tokens.
     let mut stream = resp.bytes_stream();
     let mut seq: u64 = 0;
-    let mut usage = Usage::default();
+    let mut scan = UsageScanner::new();
     let mut budget_hit = false;
 
     while let Some(chunk) = stream.next().await {
@@ -257,14 +336,15 @@ pub async fn execute(
                 tokens.report(&provider, &lease.account_id, &model, TaskOutcome::ServerError);
                 send_error(out, &task_id, "UPSTREAM_5XX", &format!("stream: {e}"), true);
                 if let Some(r) = records {
+                    let usage = scan.flush();
                     r.record(&task_id, &provider, &lease.account_id, &model, &usage, "stream_error").await;
                 }
                 return;
             }
         };
-        accumulate_usage(&mut usage, &bytes);
+        scan.push(&bytes);
         // Budget guard: interrupt if output exceeds the granted budget.
-        if usage.output_tokens > req.budget_tokens && req.budget_tokens > 0 {
+        if scan.usage().output_tokens > req.budget_tokens && req.budget_tokens > 0 {
             budget_hit = true;
         }
         let _ = out.send(Envelope::with_id(
@@ -279,7 +359,9 @@ pub async fn execute(
         }
     }
 
-    // stream_end with the best usage we have.
+    // stream_end with the best usage we have — including a final frame that
+    // arrived without a trailing newline.
+    let usage = scan.flush();
     let _ = out.send(Envelope::with_id(
         &task_id,
         protocol::T_STREAM_END,
@@ -327,6 +409,25 @@ fn is_claude(provider: &str) -> bool {
 #[cfg(test)]
 pub(crate) fn kimi_device_id_for_test(account_id: &str) -> String {
     kimi_device_id(account_id)
+}
+
+/// Read the ChatGPT account id out of a Codex bearer's own claims.
+///
+/// A ChatGPT OAuth access token is a JWT, and the `https://api.openai.com/auth`
+/// claim inside it names the account it was issued for — the same value the
+/// Codex CLI keeps in `auth.json`. Deriving it here is what lets an account that
+/// was connected before asale recorded the id keep selling without its owner
+/// having to sign in again.
+///
+/// Best-effort by design: a token that is not a JWT, or a JWT without the claim,
+/// simply yields `None` and the caller falls back to saying what is missing.
+pub fn chatgpt_account_id(bearer: &str) -> Option<String> {
+    crate::cli_import::jwt_claims(bearer)?
+        .get("https://api.openai.com/auth")?
+        .get("chatgpt_account_id")?
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(String::from)
 }
 
 fn kimi_device_id(account_id: &str) -> String {
@@ -398,9 +499,129 @@ pub fn extract_model(body_b64: &str) -> Option<String> {
     v.get("model").and_then(|m| m.as_str()).map(String::from)
 }
 
+/// A privacy-safe fingerprint of an upstream request body.
+///
+/// Records only *shape*: which top-level keys the body carries, the
+/// `type:role` sequence of its `input`/`messages` items, how many tools, and the
+/// size — never any text. That is deliberately the one thing missing when an
+/// upstream 4xx has to be diagnosed from a publisher's log: the rejection names
+/// a field it dislikes, and the request that carried it is the buyer's prompt,
+/// which this process must not write to disk. A role sequence answers the
+/// question the message text cannot — whether the gateway's translator emitted
+/// an item this upstream refuses to accept at all.
+fn body_shape(body: &[u8]) -> String {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return format!("non-json {}B", body.len());
+    };
+    let Some(o) = v.as_object() else {
+        return format!("json non-object {}B", body.len());
+    };
+    let mut keys: Vec<&str> = o.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    let mut parts = vec![format!("{}B keys=[{}]", body.len(), keys.join(","))];
+    // The two spellings of "the instruction block", by dialect. Length only: the
+    // interesting failures are an empty one and a missing one.
+    for field in ["instructions", "system"] {
+        if let Some(val) = o.get(field) {
+            let n = val.as_str().map(str::len).unwrap_or_else(|| val.to_string().len());
+            parts.push(format!("{field}={n}B"));
+        }
+    }
+    for field in ["input", "messages"] {
+        if let Some(items) = o.get(field).and_then(|v| v.as_array()) {
+            let seq: Vec<String> = items
+                .iter()
+                .map(|it| {
+                    let t = it.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    let r = it.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                    match (t, r) {
+                        ("", "") => "?".to_string(),
+                        ("", r) => r.to_string(),
+                        (t, "") => t.to_string(),
+                        (t, r) => format!("{t}:{r}"),
+                    }
+                })
+                .collect();
+            parts.push(format!("{field}=[{}]", seq.join(" ")));
+        }
+    }
+    if let Some(n) = o.get("tools").and_then(|v| v.as_array()).map(Vec::len) {
+        parts.push(format!("tools={n}"));
+    }
+    parts.join(" ")
+}
+
+/// Reads usage out of an SSE stream as its transport chunks arrive.
+///
+/// [`accumulate_usage`] can only see the bytes handed to it, and a chunk
+/// boundary falls wherever the network puts it — mid-line as often as not. The
+/// Claude dialect got away with being fed raw chunks because its usage frame
+/// (`message_delta`) is around a hundred bytes and so is effectively never
+/// split. The Responses API keeps usage in `response.completed`, whose payload
+/// carries the whole response object — 1.4 KB even for a two-word answer — and
+/// is therefore split almost every time. Both halves parse as nothing, so every
+/// Codex sale reported zero tokens; the gateway reads zero usage as "nothing was
+/// served" (`relay::finalize`) and turns a perfectly good sale into a failed
+/// task, an unpaid publisher and a penalized lane. Ten of those and the
+/// publisher's reputation is under the matching floor and it is off the market.
+///
+/// The fix is the one thing a per-chunk call cannot have: the tail of the
+/// previous chunk. Feed every chunk to [`push`](Self::push) and take the total
+/// from [`flush`](Self::flush) when the stream ends.
+#[derive(Debug, Default)]
+pub struct UsageScanner {
+    usage: Usage,
+    /// Bytes after the last newline seen — an SSE line still being delivered.
+    partial: Vec<u8>,
+}
+
+/// Cap on the held fragment. SSE is newline-framed, so a line this long means
+/// the peer is not speaking SSE at all; dropping the fragment keeps a long-lived
+/// stream from growing a buffer without bound.
+const MAX_PARTIAL_LINE: usize = 1 << 20;
+
+impl UsageScanner {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed one transport chunk: every complete line in it is parsed, and the
+    /// trailing fragment is held until the rest of it arrives.
+    pub fn push(&mut self, bytes: &[u8]) {
+        self.partial.extend_from_slice(bytes);
+        match self.partial.iter().rposition(|b| *b == b'\n') {
+            Some(cut) => {
+                let complete: Vec<u8> = self.partial.drain(..=cut).collect();
+                accumulate_usage(&mut self.usage, &complete);
+            }
+            // No line has ended yet. Keep waiting — unless what we are holding
+            // has stopped being plausibly one SSE line.
+            None if self.partial.len() > MAX_PARTIAL_LINE => self.partial.clear(),
+            None => {}
+        }
+    }
+
+    /// Usage seen so far. The budget guard reads this mid-stream, so it must not
+    /// consume the scanner.
+    pub fn usage(&self) -> Usage {
+        self.usage
+    }
+
+    /// Parse whatever fragment is still held and return the total. For a stream
+    /// whose last line carries no trailing newline; call it once the stream is
+    /// over (or on the error path out of it).
+    pub fn flush(&mut self) -> Usage {
+        if !self.partial.is_empty() {
+            let tail = std::mem::take(&mut self.partial);
+            accumulate_usage(&mut self.usage, &tail);
+        }
+        self.usage
+    }
+}
+
 /// Extract usage from provider SSE bodies (Claude/OpenAI/Responses/Gemini
-/// shapes). Public so the consumer proxy can meter market/direct streams the
-/// same way.
+/// shapes). Takes a whole body — for a chunked stream use [`UsageScanner`],
+/// which carries a split line across the boundary.
 pub fn accumulate_usage(usage: &mut Usage, bytes: &[u8]) {
     let text = String::from_utf8_lossy(bytes);
     for line in text.split('\n') {
@@ -413,42 +634,61 @@ pub fn accumulate_usage(usage: &mut Usage, bytes: &[u8]) {
             continue;
         }
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
-            // Claude message_delta.usage / message_start.message.usage
-            if let Some(u) = v.get("usage") {
-                if let Some(i) = u.get("input_tokens").and_then(|x| x.as_i64()) {
-                    usage.input_tokens = i;
-                }
-                if let Some(o) = u.get("output_tokens").and_then(|x| x.as_i64()) {
-                    usage.output_tokens = o;
-                }
-            }
-            if let Some(m) = v.get("message").and_then(|m| m.get("usage")) {
-                if let Some(i) = m.get("input_tokens").and_then(|x| x.as_i64()) {
-                    usage.input_tokens = i;
-                }
-            }
-            // OpenAI usage
-            if let Some(u) = v.get("usage").filter(|u| u.get("prompt_tokens").is_some()) {
-                usage.input_tokens = u.get("prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(usage.input_tokens);
-                usage.output_tokens = u.get("completion_tokens").and_then(|x| x.as_i64()).unwrap_or(usage.output_tokens);
-            }
-            // Responses API: the only usage frame is response.completed, which
-            // nests it one level down. Without this, every codex stream would
-            // settle as zero tokens.
-            if let Some(u) = v.get("response").and_then(|r| r.get("usage")).filter(|u| !u.is_null()) {
-                if let Some(i) = u.get("input_tokens").and_then(|x| x.as_i64()) {
-                    usage.input_tokens = i;
-                }
-                if let Some(o) = u.get("output_tokens").and_then(|x| x.as_i64()) {
-                    usage.output_tokens = o;
-                }
-            }
-            // Gemini usageMetadata
-            if let Some(u) = v.get("usageMetadata") {
-                usage.input_tokens = u.get("promptTokenCount").and_then(|x| x.as_i64()).unwrap_or(usage.input_tokens);
-                usage.output_tokens = u.get("candidatesTokenCount").and_then(|x| x.as_i64()).unwrap_or(usage.output_tokens);
-            }
+            merge_usage(usage, &v);
         }
+    }
+}
+
+/// Usage from a non-streaming response body: the same dialect shapes, without
+/// the SSE framing around them.
+pub fn usage_from_body(bytes: &[u8]) -> Usage {
+    let mut usage = Usage::default();
+    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) {
+        merge_usage(&mut usage, &v);
+    }
+    usage
+}
+
+/// Read whichever dialect's usage shape this JSON object carries. Shared by the
+/// SSE scanner and the non-streaming body reader — a `message_delta` frame and a
+/// buffered Claude response report usage identically, so the shapes are listed
+/// once.
+fn merge_usage(usage: &mut Usage, v: &serde_json::Value) {
+    // Claude message_delta.usage / message_start.message.usage, and the same
+    // object at the top level of a buffered response.
+    if let Some(u) = v.get("usage") {
+        if let Some(i) = u.get("input_tokens").and_then(|x| x.as_i64()) {
+            usage.input_tokens = i;
+        }
+        if let Some(o) = u.get("output_tokens").and_then(|x| x.as_i64()) {
+            usage.output_tokens = o;
+        }
+    }
+    if let Some(m) = v.get("message").and_then(|m| m.get("usage")) {
+        if let Some(i) = m.get("input_tokens").and_then(|x| x.as_i64()) {
+            usage.input_tokens = i;
+        }
+    }
+    // OpenAI usage
+    if let Some(u) = v.get("usage").filter(|u| u.get("prompt_tokens").is_some()) {
+        usage.input_tokens = u.get("prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(usage.input_tokens);
+        usage.output_tokens = u.get("completion_tokens").and_then(|x| x.as_i64()).unwrap_or(usage.output_tokens);
+    }
+    // Responses API: streaming reports usage only in response.completed, which
+    // nests it one level down. Without this, every codex stream would settle as
+    // zero tokens.
+    if let Some(u) = v.get("response").and_then(|r| r.get("usage")).filter(|u| !u.is_null()) {
+        if let Some(i) = u.get("input_tokens").and_then(|x| x.as_i64()) {
+            usage.input_tokens = i;
+        }
+        if let Some(o) = u.get("output_tokens").and_then(|x| x.as_i64()) {
+            usage.output_tokens = o;
+        }
+    }
+    // Gemini usageMetadata
+    if let Some(u) = v.get("usageMetadata") {
+        usage.input_tokens = u.get("promptTokenCount").and_then(|x| x.as_i64()).unwrap_or(usage.input_tokens);
+        usage.output_tokens = u.get("candidatesTokenCount").and_then(|x| x.as_i64()).unwrap_or(usage.output_tokens);
     }
 }
 
@@ -507,6 +747,58 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":13,"outpu
             accumulate_usage(&mut usage, frame.as_bytes());
             assert_eq!((usage.input_tokens, usage.output_tokens), (input, output), "frame: {frame}");
         }
+    }
+
+    /// The real shape of the failure: a Codex `response.completed` frame is
+    /// ~1.4 KB, so the network cuts it in half and neither half is JSON. Fed the
+    /// raw chunks, the parser reports nothing — which the gateway settles as a
+    /// failed, unpaid sale.
+    #[test]
+    fn a_usage_frame_split_across_chunks_still_counts() {
+        let stream = format!(
+            "event: response.output_text.delta\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+            r#"{"type":"response.output_text.delta","delta":"hello codex"}"#,
+            r#"{"type":"response.completed","response":{"usage":{"input_tokens":23,"output_tokens":7}}}"#
+        );
+        let bytes = stream.as_bytes();
+
+        // Cut at every byte: whatever the boundary, the total must come out.
+        for cut in 1..bytes.len() {
+            let mut scan = UsageScanner::new();
+            scan.push(&bytes[..cut]);
+            scan.push(&bytes[cut..]);
+            let usage = scan.flush();
+            assert_eq!(
+                (usage.input_tokens, usage.output_tokens),
+                (23, 7),
+                "usage lost when the stream is cut at byte {cut}"
+            );
+        }
+
+        // And the bug itself, so this stays a statement about chunking rather
+        // than about parsing: cut inside the usage frame and the per-chunk call
+        // sees nothing at all.
+        let cut = stream.find("\"input_tokens\"").expect("usage frame");
+        let mut old = Usage::default();
+        accumulate_usage(&mut old, &bytes[..cut]);
+        accumulate_usage(&mut old, &bytes[cut..]);
+        assert_eq!((old.input_tokens, old.output_tokens), (0, 0));
+    }
+
+    /// A last frame with no trailing newline is still counted, and a peer that
+    /// never sends one cannot grow the buffer without bound.
+    #[test]
+    fn the_scanner_flushes_a_trailing_frame_and_caps_a_runaway_line() {
+        let mut scan = UsageScanner::new();
+        scan.push(br#"data: {"type":"message_delta","usage":{"output_tokens":4}}"#);
+        assert_eq!(scan.usage().output_tokens, 0, "held until the line ends or is flushed");
+        assert_eq!(scan.flush().output_tokens, 4);
+
+        let mut scan = UsageScanner::new();
+        for _ in 0..3 {
+            scan.push(&vec![b'x'; MAX_PARTIAL_LINE]);
+        }
+        assert!(scan.partial.len() <= MAX_PARTIAL_LINE, "fragment is bounded");
     }
 
     /// The gateway key the tests pretend is pinned into the build.
@@ -830,6 +1122,103 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
         r
     }
 
+    /// A bearer shaped like a real ChatGPT access token: `header.claims.sig`,
+    /// url-safe base64, no padding.
+    fn chatgpt_jwt(account: &str) -> String {
+        let claims = json!({"https://api.openai.com/auth": {"chatgpt_account_id": account}});
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&claims).unwrap());
+        format!("h.{b64}.s")
+    }
+
+    /// A leased Codex token with nothing stored alongside it — the state every
+    /// account connected before asale started recording the id is in.
+    struct CodexTokenNoStoredId(String);
+    impl TokenProvider for CodexTokenNoStoredId {
+        fn token_for(&self, _p: &str) -> Option<String> {
+            Some(self.0.clone())
+        }
+        fn acquire(&self, _p: &str, _m: &str) -> Option<LeasedToken> {
+            Some(LeasedToken {
+                token: self.0.clone(),
+                account_id: "dev@example.com".into(),
+                upstream_account_id: None,
+            })
+        }
+    }
+
+    /// The bearer names its own account, so an already-connected Codex account
+    /// must not need a fresh sign-in just to recover a value it is already
+    /// carrying on every request.
+    #[tokio::test]
+    async fn codex_falls_back_to_the_account_id_inside_the_bearer() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = seen.clone();
+        let server = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                *sink.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).to_string();
+                let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                let _ = sock.flush().await;
+            }
+        });
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let url = format!("http://127.0.0.1:{port}/");
+        let tokens = CodexTokenNoStoredId(chatgpt_jwt("acc-from-jwt"));
+        execute(&crate::http::plain(), &tokens, codex_req(&url), &tx, None, &test_verifier()).await;
+        let _ = server.await;
+
+        let raw = seen.lock().unwrap().to_lowercase();
+        assert!(raw.contains("chatgpt-account-id: acc-from-jwt"), "id not recovered from the bearer: {raw}");
+    }
+
+    /// The stored value is the authoritative one: it comes from the id_token the
+    /// vendor issued for this account, so it wins over anything inferred.
+    #[tokio::test]
+    async fn a_stored_account_id_beats_the_one_in_the_bearer() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = seen.clone();
+        let server = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                *sink.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).to_string();
+                let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                let _ = sock.flush().await;
+            }
+        });
+
+        struct Both(String);
+        impl TokenProvider for Both {
+            fn token_for(&self, _p: &str) -> Option<String> {
+                Some(self.0.clone())
+            }
+            fn acquire(&self, _p: &str, _m: &str) -> Option<LeasedToken> {
+                Some(LeasedToken {
+                    token: self.0.clone(),
+                    account_id: "dev@example.com".into(),
+                    upstream_account_id: Some("acc-stored".into()),
+                })
+            }
+        }
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let url = format!("http://127.0.0.1:{port}/");
+        execute(&crate::http::plain(), &Both(chatgpt_jwt("acc-from-jwt")), codex_req(&url), &tx, None, &test_verifier())
+            .await;
+        let _ = server.await;
+
+        let raw = seen.lock().unwrap().to_lowercase();
+        assert!(raw.contains("chatgpt-account-id: acc-stored"), "stored id must win: {raw}");
+        assert!(!raw.contains("acc-from-jwt"));
+    }
+
     /// The ChatGPT backend authenticates the bearer *and* the account id it was
     /// issued for. Sending only the bearer is a 401, which the pool reads as a
     /// dead login — so this header is the difference between a Codex account
@@ -859,6 +1248,43 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
         assert!(raw.contains("chatgpt-account-id: acc-1"), "account id missing from the wire: {raw}");
         // Claude's OAuth requirements are Claude's; they must not follow along.
         assert!(!raw.contains("anthropic-beta"), "claude headers leaked onto codex: {raw}");
+    }
+
+    /// The shape has to name the roles and carry no prompt text — that pairing is
+    /// the whole point of logging it. The body here is the one that draws
+    /// `400 {"detail":"System messages are not allowed"}` out of the ChatGPT
+    /// backend, and the fingerprint has to make the offending item visible.
+    #[test]
+    fn body_shape_names_the_roles_without_the_text() {
+        let shape = body_shape(
+            json!({
+                "model": "gpt-5.6-terra",
+                "instructions": "You are Codex.",
+                "input": [
+                    {"type": "message", "role": "system", "content": [{"type": "input_text", "text": "SECRET PROMPT"}]},
+                    {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "SECRET ASK"}]},
+                    {"type": "function_call_output", "call_id": "c1", "output": "SECRET RESULT"}
+                ],
+                "tools": [{"type": "function", "name": "grep"}],
+                "stream": true
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert!(shape.contains("input=[message:system message:user function_call_output]"), "{shape}");
+        assert!(shape.contains("instructions=14B"), "{shape}");
+        assert!(shape.contains("tools=1"), "{shape}");
+        assert!(shape.contains("keys=[input,instructions,model,stream,tools]"), "{shape}");
+        for secret in ["SECRET PROMPT", "SECRET ASK", "SECRET RESULT", "You are Codex"] {
+            assert!(!shape.contains(secret), "prompt text leaked into the log: {shape}");
+        }
+    }
+
+    /// A body the upstream refused *and* could not parse still has to say
+    /// something — a publisher whose gateway sent garbage sees only this line.
+    #[test]
+    fn body_shape_survives_a_non_json_body() {
+        assert_eq!(body_shape(b"not json at all"), "non-json 15B");
     }
 
     /// Without the id the request can only 401, and a 401 here is indistinguishable

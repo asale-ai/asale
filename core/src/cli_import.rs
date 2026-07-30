@@ -214,6 +214,121 @@ pub fn parse_gemini_oauth_creds(content: &str) -> anyhow::Result<CliCred> {
     })
 }
 
+// ── Writing a refreshed token back into the CLI's own file ──────────────────
+//
+// An `origin = "import"` account is not a copy of the CLI's login, it is the
+// same login: one OAuth identity, one refresh token. Anthropic and OpenAI both
+// rotate that token on use — the old one dies the moment either side redeems
+// it. So a refresh performed by asale silently invalidates what is sitting in
+// `~/.claude/.credentials.json`, and the next time the user opens their own
+// Claude Code it is logged out, with nothing on screen connecting that to the
+// marketplace app they left running.
+//
+// Hence these: after refreshing a shared credential, put the new one back where
+// the CLI will look for it. Pure string→string so the shapes stay beside the
+// parsers that read them; the caller does the (atomic) file write.
+
+/// A freshly refreshed token set, on its way back into a vendor CLI's file.
+#[derive(Debug, Clone, Copy)]
+pub struct RefreshedCred<'a> {
+    pub access_token: &'a str,
+    /// `None` when the provider does not rotate refresh tokens (Google).
+    pub refresh_token: Option<&'a str>,
+    /// Absolute unix seconds, when the provider says so.
+    pub expires_at: Option<i64>,
+    /// Now, in unix seconds — Codex records when it last refreshed.
+    pub now_secs: i64,
+}
+
+/// Rewrite `raw` (the CLI's own credential file) with `cred`, leaving every
+/// other field exactly as it was.
+///
+/// Errors when the file is not the shape this provider's CLI writes, which is
+/// the case worth refusing: a half-understood file is one asale should hand
+/// back untouched rather than overwrite with a guess.
+pub fn patch_cli_credentials(provider: &str, raw: &str, cred: RefreshedCred<'_>) -> anyhow::Result<String> {
+    let mut v: Value = serde_json::from_str(raw.trim())?;
+    match provider {
+        "claude" => {
+            // The legacy key spelling is accepted on read, so it has to be
+            // accepted on write too — rewriting under the modern name would
+            // leave the CLI reading the old, now-dead entry.
+            let key = ["claudeAiOauth", "claude.ai_oauth"]
+                .into_iter()
+                .find(|k| v.get(*k).is_some())
+                .ok_or_else(|| anyhow::anyhow!("no claudeAiOauth entry to update"))?;
+            let entry = v
+                .get_mut(key)
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| anyhow::anyhow!("{key} is not an object"))?;
+            entry.insert("accessToken".into(), Value::String(cred.access_token.into()));
+            if let Some(r) = cred.refresh_token {
+                entry.insert("refreshToken".into(), Value::String(r.into()));
+            }
+            if let Some(e) = cred.expires_at {
+                entry.insert("expiresAt".into(), Value::from(e * 1000));
+            }
+        }
+        "codex" => {
+            let tokens = v
+                .get_mut("tokens")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| anyhow::anyhow!("auth.json has no OAuth token set to update"))?;
+            tokens.insert("access_token".into(), Value::String(cred.access_token.into()));
+            if let Some(r) = cred.refresh_token {
+                tokens.insert("refresh_token".into(), Value::String(r.into()));
+            }
+            // Codex decides whether to refresh from this timestamp. Left at the
+            // old value it would refresh on its own next launch and rotate
+            // *asale* out — the same bug pointed the other way.
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("last_refresh".into(), Value::String(rfc3339_utc(cred.now_secs)));
+            }
+        }
+        "gemini" => {
+            // Keytar nesting vs. the flat file; both are shapes we read.
+            if let Some(token) = v.get_mut("token").and_then(Value::as_object_mut) {
+                token.insert("accessToken".into(), Value::String(cred.access_token.into()));
+                if let Some(r) = cred.refresh_token {
+                    token.insert("refreshToken".into(), Value::String(r.into()));
+                }
+                if let Some(e) = cred.expires_at {
+                    token.insert("expiresAt".into(), Value::from(e * 1000));
+                }
+            } else {
+                let obj = v.as_object_mut().ok_or_else(|| anyhow::anyhow!("oauth_creds.json is not an object"))?;
+                obj.insert("access_token".into(), Value::String(cred.access_token.into()));
+                if let Some(r) = cred.refresh_token {
+                    obj.insert("refresh_token".into(), Value::String(r.into()));
+                }
+                if let Some(e) = cred.expires_at {
+                    obj.insert("expiry_date".into(), Value::from(e * 1000));
+                }
+            }
+        }
+        other => anyhow::bail!("no credential file shape known for {other}"),
+    }
+    Ok(serde_json::to_string_pretty(&v)?)
+}
+
+/// `2026-07-30T05:30:08Z` from unix seconds. Codex writes `last_refresh` in
+/// this form and there is no date crate in this dependency tree for one field.
+fn rfc3339_utc(secs: i64) -> String {
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    // days since 1970-01-01 → civil date (Howard Hinnant's `civil_from_days`).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
+}
+
 /// Build a credential from a raw API key (Moonshot / xAI).
 ///
 /// There is no file to parse and no OAuth exchange to run: the key the user
@@ -551,5 +666,77 @@ mod tests {
         assert_eq!(c, vec!["ANTHROPIC_API_KEY".to_string()]);
         assert!(env_conflicts("codex", |_| None).is_empty());
         assert!(env_conflicts("unknown", |_| Some("x".into())).is_empty());
+    }
+
+    // ── write-back ──────────────────────────────────────────────────────
+
+    fn fresh<'a>(access: &'a str, refresh: Option<&'a str>) -> RefreshedCred<'a> {
+        RefreshedCred { access_token: access, refresh_token: refresh, expires_at: Some(1_785_403_714), now_secs: 1_785_392_054 }
+    }
+
+    #[test]
+    fn claude_write_back_replaces_the_tokens_and_keeps_the_rest() {
+        let original = r#"{"claudeAiOauth":{"accessToken":"old-a","refreshToken":"old-r","expiresAt":1000,"subscriptionType":"max","scopes":["user:inference"]}}"#;
+        let out = patch_cli_credentials("claude", original, fresh("new-a", Some("new-r"))).unwrap();
+
+        // The CLI must be able to read back exactly what asale now holds —
+        // that is the whole point of writing at all.
+        let c = parse_claude_credentials(&out).unwrap();
+        assert_eq!(c.access_token, "new-a");
+        assert_eq!(c.refresh_token.as_deref(), Some("new-r"));
+        assert_eq!(c.expires_at, Some(1_785_403_714), "expiresAt round-trips through milliseconds");
+        assert_eq!(c.plan.as_deref(), Some("max"), "untouched fields survive");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["claudeAiOauth"]["scopes"][0], "user:inference");
+    }
+
+    #[test]
+    fn claude_write_back_keeps_the_legacy_key_spelling() {
+        let original = r#"{"claude.ai_oauth":{"accessToken":"old-a","refreshToken":"old-r"}}"#;
+        let out = patch_cli_credentials("claude", original, fresh("new-a", Some("new-r"))).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["claude.ai_oauth"]["accessToken"], "new-a");
+        assert!(v.get("claudeAiOauth").is_none(), "writing under the modern name would leave the CLI on the dead entry");
+    }
+
+    #[test]
+    fn codex_write_back_updates_tokens_and_the_refresh_stamp() {
+        let original = r#"{"OPENAI_API_KEY":null,"tokens":{"id_token":"idt","access_token":"old-a","refresh_token":"old-r","account_id":"acc-1"},"last_refresh":"2026-07-01T00:00:00Z"}"#;
+        let out = patch_cli_credentials("codex", original, fresh("new-a", Some("new-r"))).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["tokens"]["access_token"], "new-a");
+        assert_eq!(v["tokens"]["refresh_token"], "new-r");
+        assert_eq!(v["tokens"]["account_id"], "acc-1", "the id the backend requires is not ours to drop");
+        assert_eq!(v["last_refresh"], "2026-07-30T06:14:14Z", "left stale, codex refreshes on its own and rotates us out");
+    }
+
+    #[test]
+    fn gemini_write_back_handles_both_shapes() {
+        let flat = r#"{"access_token":"old-a","refresh_token":"old-r","expiry_date":1000,"id_token":"idt"}"#;
+        let out = patch_cli_credentials("gemini", flat, fresh("new-a", Some("new-r"))).unwrap();
+        let c = parse_gemini_oauth_creds(&out).unwrap();
+        assert_eq!(c.access_token, "new-a");
+        assert_eq!(c.expires_at, Some(1_785_403_714));
+
+        let nested = r#"{"token":{"accessToken":"old-a","refreshToken":"old-r","expiresAt":1000}}"#;
+        let out = patch_cli_credentials("gemini", nested, fresh("new-a", None)).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["token"]["accessToken"], "new-a");
+        assert_eq!(v["token"]["refreshToken"], "old-r", "a provider that does not rotate keeps its refresh token");
+    }
+
+    #[test]
+    fn write_back_refuses_a_file_it_does_not_recognize() {
+        assert!(patch_cli_credentials("claude", r#"{"something":"else"}"#, fresh("a", None)).is_err());
+        assert!(patch_cli_credentials("codex", r#"{"OPENAI_API_KEY":"sk-x"}"#, fresh("a", None)).is_err(), "api-key mode has no token set");
+        assert!(patch_cli_credentials("claude", "not json", fresh("a", None)).is_err());
+        assert!(patch_cli_credentials("kimi", "{}", fresh("a", None)).is_err());
+    }
+
+    #[test]
+    fn rfc3339_matches_the_calendar() {
+        assert_eq!(rfc3339_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_utc(1_785_392_054), "2026-07-30T06:14:14Z");
+        assert_eq!(rfc3339_utc(1_709_164_800), "2024-02-29T00:00:00Z", "leap day");
     }
 }

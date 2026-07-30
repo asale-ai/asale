@@ -81,8 +81,25 @@ pub struct UpstreamSpec {
 // the *ceiling* for the local-usage subtraction below. When the plan is
 // unknown we assume the lowest paid tier so we never over-declare supply.
 
+/// Testing override for the window cap below, in tokens. Unset (or 0) keeps the
+/// plan estimate.
+///
+/// The caps here are guesses, and a deliberately low-balled one: an account that
+/// has served its estimated 5h allowance declares `quota_remaining = 0` and its
+/// lanes leave the market, whatever the real upstream would still accept. On a
+/// development machine that is the normal state within an afternoon of testing,
+/// and the only way back is to wait out the rolling window — which makes the buy
+/// path untestable for hours at a time, for a number nobody measured.
+///
+/// Not a production knob: over-declaring supply means matching sends work to a
+/// lane the upstream then refuses, which costs the publisher reputation.
+const WINDOW_CAP_OVERRIDE_ENV: &str = "ASALE_PLAN_WINDOW_CAP";
+
 /// Estimated serviceable tokens for a provider+plan over its rate window.
 pub fn plan_window_cap(provider: Provider, plan: Option<&str>) -> u64 {
+    if let Some(cap) = std::env::var(WINDOW_CAP_OVERRIDE_ENV).ok().and_then(|v| v.trim().parse::<u64>().ok()).filter(|c| *c > 0) {
+        return cap;
+    }
     let p = plan.unwrap_or("").to_ascii_lowercase();
     match provider {
         Provider::Claude | Provider::ClaudeWork => {
@@ -339,6 +356,70 @@ impl ToolAdapter for CodexAdapter {
             default_headers: vec![("user-agent".into(), "codex-cli".into())],
         }
     }
+}
+
+/// The Codex CLI version the model list is asked for.
+///
+/// `/backend-api/codex/models` answers per calling version: every entry carries
+/// a `minimal_client_version`, and a request naming an older one is answered
+/// with an empty list rather than an error (`client_version=0.50.0` returns
+/// `{"models":[]}` while `0.146.0` returns six models). Keep this in step with
+/// the user-agent the relay sends upstream — `translator::responses::CODEX_UA`
+/// on the server — or this device would advertise a model the relay then
+/// addresses as a client too old to be given it.
+pub const CODEX_CLIENT_VERSION: &str = "0.146.0";
+
+/// The model slugs a ChatGPT account's Codex surface will actually serve.
+///
+/// A Codex subscription is not entitled to OpenAI's platform model list. The
+/// backend serves a per-account, per-plan set that moves with each release and
+/// refuses every other slug — including plain `gpt-5.1`, `gpt-5-codex` and
+/// `gpt-5.1-codex` — with the same answer regardless of the rest of the body:
+///
+/// ```text
+/// 400 {"detail":"The 'gpt-5.1' model is not supported when using Codex with a ChatGPT account."}
+/// ```
+///
+/// So a lane advertising a model from the catalog alone fails at the upstream
+/// call, *after* the request was matched, preauthorized and routed — the
+/// publisher wears a failure that was never its fault. The entitled set is only
+/// knowable by asking, which is what this does.
+///
+/// Every returned slug counts, `visibility` included: that field decides what
+/// the ChatGPT app's own picker offers, not what the account may ask for.
+/// An empty list is a real answer — "this account may not use this surface" —
+/// and not an error.
+pub async fn codex_servable_models(token: &str, chatgpt_account_id: &str) -> anyhow::Result<Vec<String>> {
+    let mut req = crate::http::upstream()
+        .get(format!(
+            "https://chatgpt.com/backend-api/codex/models?client_version={CODEX_CLIENT_VERSION}"
+        ))
+        .header("authorization", format!("Bearer {token}"))
+        .header("originator", "codex_cli_rs")
+        .header("user-agent", format!("codex_cli_rs/{CODEX_CLIENT_VERSION}"))
+        .timeout(Duration::from_secs(20));
+    // Known for an account asale logged in itself; absent on older rows, where
+    // the bearer's own claim is the fallback (same as the executor's).
+    if !chatgpt_account_id.is_empty() {
+        req = req.header("chatgpt-account-id", chatgpt_account_id);
+    }
+    let resp = req.send().await?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    if !status.is_success() {
+        anyhow::bail!("codex models {status}: {body}");
+    }
+    Ok(body
+        .get("models")
+        .and_then(|m| m.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("slug").and_then(|s| s.as_str()))
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 // ── Gemini adapter ──────────────────────────────────────────────────────────

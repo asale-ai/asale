@@ -76,7 +76,11 @@ struct SellableCatalog {
 fn fallback_models(provider: &str) -> &'static [&'static str] {
     match provider {
         "claude" | "claude_work" => &["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
-        "codex" => &["gpt-5-codex"],
+        // Not `gpt-5-codex`: the ChatGPT backend a Codex subscription is served
+        // by refuses that slug outright (see `codex_entitlement`). These are the
+        // ones it does serve, and entitlement discovery narrows them to whatever
+        // the account is actually granted as soon as it answers.
+        "codex" => &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
         "gemini" => &["gemini-2.5-pro", "gemini-2.5-flash"],
         "kimi" | "kimi_api" => &["kimi-k2.7-code", "kimi-k2-thinking", "kimi-k3"],
         "xai" | "xai_api" => &["grok-4.5", "grok-4.3", "grok-build-0.1"],
@@ -151,14 +155,98 @@ fn produces_text(modality: &str) -> bool {
 /// A cached answer is used even when it is empty: "the platform trades nothing
 /// this subscription can serve" is a real answer, and falling back to the
 /// built-in list there would re-create the very mismatch this replaces.
-fn sellable_models(catalog: &Option<SellableCatalog>, provider: &str) -> Vec<String> {
+/// `entitled` narrows the list to what one *account* may ask its upstream for,
+/// where that is narrower still than what the vendor's API serves in general
+/// (Codex, see [`codex_entitlement`]). `None` means no such limit applies;
+/// `Some(&[])` means the account is granted nothing and must advertise nothing —
+/// which is why the caller, not this function, decides what an unknown
+/// entitlement means.
+fn sellable_models(catalog: &Option<SellableCatalog>, provider: &str, entitled: Option<&[String]>) -> Vec<String> {
     let listed: Vec<String> = match catalog {
         Some(c) => c.by_provider.get(provider).cloned().unwrap_or_default(),
         None => fallback_models(provider).iter().map(|s| s.to_string()).collect(),
     };
+    let listed: Vec<String> = match entitled {
+        Some(granted) => listed.into_iter().filter(|m| granted.contains(m)).collect(),
+        None => listed,
+    };
     match native_models(provider) {
         Some(native) => listed.into_iter().filter(|m| native.contains(&m.as_str())).collect(),
         None => listed,
+    }
+}
+
+/// Settings key holding one Codex account's entitled slugs.
+fn codex_entitlement_key(account_id: &str) -> String {
+    format!("codexmodels:{account_id}")
+}
+
+/// How stale a cached entitlement may get. The set changes when OpenAI ships a
+/// Codex release or the owner's plan changes, so an hour is soon enough — and
+/// it keeps this off the hot path of the periodic pool rebuild.
+const CODEX_ENTITLEMENT_TTL: i64 = 3600;
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct CodexEntitlement {
+    fetched_at: i64,
+    models: Vec<String>,
+}
+
+/// The slugs this Codex account may ask its upstream for.
+///
+/// A ChatGPT subscription is entitled to a per-account, per-plan slice of
+/// OpenAI's models, and the Codex backend refuses everything outside it with
+/// `400 … "is not supported when using Codex with a ChatGPT account"` — so the
+/// catalog alone is not enough to know what this account can sell. Asking the
+/// account itself is the only way (`discovery::codex_servable_models`).
+///
+/// An empty answer is returned as such, and the caller advertises nothing for
+/// this account: relaying a slug the upstream will refuse costs the consumer a
+/// failed turn and this device a reputation hit, so silence is the better trade.
+/// A failed *call* is different from an empty answer — the last successful list
+/// is kept however old it is, because a network blip must not take a working
+/// publisher off the market.
+async fn codex_entitlement(store: &LocalStore, tool: &asale_client_core::store::ToolRow) -> Vec<String> {
+    let key = codex_entitlement_key(&tool.account_id);
+    let cached: Option<CodexEntitlement> = store
+        .get_setting(&key)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).ok());
+    if let Some(c) = &cached {
+        if now_secs() - c.fetched_at < CODEX_ENTITLEMENT_TTL {
+            return c.models.clone();
+        }
+    }
+    let stale = || cached.clone().map(|c| c.models).unwrap_or_default();
+    let Some(token) = keychain::get(&tool.keychain_ref).ok().flatten() else {
+        tracing::warn!(account = %tool.account_id, "codex entitlement: no token in the secret store");
+        return stale();
+    };
+    let upstream_id = store
+        .get_setting(&upstream_acct_key(&tool.provider, &tool.account_id))
+        .await
+        .ok()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .or_else(|| asale_client_core::executor::chatgpt_account_id(&token))
+        .unwrap_or_default();
+    match asale_client_core::discovery::codex_servable_models(&token, &upstream_id).await {
+        Ok(models) => {
+            let fresh = CodexEntitlement { fetched_at: now_secs(), models };
+            if cached.as_ref().map(|c| &c.models) != Some(&fresh.models) {
+                tracing::info!(account = %tool.account_id, "codex account serves {:?}", fresh.models);
+            }
+            if let Ok(raw) = serde_json::to_string(&fresh) {
+                let _ = store.set_setting(&key, &raw).await;
+            }
+            fresh.models
+        }
+        Err(e) => {
+            tracing::warn!(account = %tool.account_id, "codex entitlement lookup failed: {e}");
+            stale()
+        }
     }
 }
 
@@ -766,8 +854,15 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
         if tool.sell_daily_limit > 0 {
             quota = quota.min((tool.sell_daily_limit as u64).saturating_sub(used_today));
         }
+        // Codex is the one family whose upstream serves a narrower set than the
+        // catalog lists, and the set belongs to the account rather than to the
+        // provider — so it is resolved per account, here.
+        let entitled = match tool.provider.as_str() {
+            "codex" => Some(codex_entitlement(store, tool).await),
+            _ => None,
+        };
         let mut a = AccountRuntime::new(&tool.provider, &tool.account_id, &tool.keychain_ref)
-            .with_models(sellable_models(&catalog, &tool.provider));
+            .with_models(sellable_models(&catalog, &tool.provider, entitled.as_deref()));
         a.upstream_account_id = store
             .get_setting(&upstream_acct_key(&tool.provider, &tool.account_id))
             .await
@@ -1050,11 +1145,84 @@ async fn refresh_due_tokens(store: &LocalStore) -> anyhow::Result<()> {
             _ => continue,
         };
         match adapter.refresh(&refresh_token).await {
-            Ok(t) => persist_refresh(store, &tool.provider, &tool.account_id, &t).await?,
+            Ok(t) => {
+                persist_refresh(store, &tool.provider, &tool.account_id, &t).await?;
+                write_back_shared_credential(&tool, &t, now).await;
+            }
             Err(e) => tracing::warn!(provider = %tool.provider, "refresh failed: {e}"),
         }
     }
     Ok(())
+}
+
+/// Put a refreshed token back into the CLI files an imported account came from.
+///
+/// An `origin = "import"` account is the locally installed CLI's own login, and
+/// both Anthropic and OpenAI rotate the refresh token on redemption: the copy in
+/// `~/.claude/.credentials.json` dies the instant asale refreshes. Storing the
+/// replacement only in asale's own keychain therefore logs the user out of their
+/// own Claude Code some hours after they start the app, with nothing connecting
+/// the two events — so the new token goes back where the CLI reads it.
+///
+/// Best-effort by design: every failure here leaves asale itself working (it has
+/// the token) and is reported rather than propagated, because a credential file
+/// asale does not recognize is one it must not overwrite with a guess.
+///
+/// Accounts asale logged in itself (`origin = "oauth"`) share nothing and are
+/// skipped — writing into a CLI's directory then would be asale reaching into
+/// files that are not its business.
+async fn write_back_shared_credential(
+    tool: &asale_client_core::store::ToolRow,
+    t: &RefreshedToken,
+    now: i64,
+) {
+    if tool.origin.as_deref() != Some("import") {
+        return;
+    }
+    // `sources` lists every store this one account was found in; a
+    // `keychain:<service>` entry is not a path we can write.
+    let paths: Vec<String> = tool
+        .sources
+        .iter()
+        .chain(tool.source.iter())
+        .filter(|s| !s.starts_with("keychain:") && *s != "oauth")
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if paths.is_empty() {
+        tracing::warn!(
+            provider = %tool.provider, account = %tool.account_id,
+            "refreshed a credential shared with the local CLI but found no file to write it back to — \
+             that CLI will be signed out; import it again or sign in to it once more"
+        );
+        return;
+    }
+
+    let (provider, account) = (tool.provider.clone(), tool.account_id.clone());
+    let (access, refresh, expires_at) = (t.access_token.clone(), t.refresh_token.clone(), t.expires_at);
+    let _ = tokio::task::spawn_blocking(move || {
+        for path in paths {
+            let cred = asale_client_core::cli_import::RefreshedCred {
+                access_token: &access,
+                refresh_token: refresh.as_deref(),
+                expires_at,
+                now_secs: now,
+            };
+            let written = std::fs::read_to_string(&path)
+                .map_err(anyhow::Error::from)
+                .and_then(|raw| asale_client_core::cli_import::patch_cli_credentials(&provider, &raw, cred))
+                .and_then(|body| crate::tool_config::write_atomic(std::path::Path::new(&path), &body));
+            match written {
+                Ok(()) => tracing::info!(provider = %provider, account = %account, %path, "wrote the refreshed token back to the CLI"),
+                Err(e) => tracing::warn!(
+                    provider = %provider, account = %account, %path,
+                    "could not write the refreshed token back; that CLI will be signed out: {e}"
+                ),
+            }
+        }
+    })
+    .await;
 }
 
 /// Persist a refreshed token set into the secret store + local store (spec §3.4).
@@ -1146,13 +1314,46 @@ mod tests {
     #[test]
     fn the_built_in_list_is_only_used_before_the_first_pull() {
         let none = None;
-        assert_eq!(sellable_models(&none, "claude"), vec!["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"]);
+        assert_eq!(
+            sellable_models(&none, "claude", None),
+            vec!["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"]
+        );
 
         let mut by_provider = std::collections::BTreeMap::new();
         by_provider.insert("claude".to_string(), vec!["claude-sonnet-5".to_string()]);
         let pulled = Some(SellableCatalog { fetched_at: 1, by_provider, ..Default::default() });
-        assert_eq!(sellable_models(&pulled, "claude"), vec!["claude-sonnet-5"]);
-        assert!(sellable_models(&pulled, "gemini").is_empty(), "the catalog's silence is an answer");
+        assert_eq!(sellable_models(&pulled, "claude", None), vec!["claude-sonnet-5"]);
+        assert!(sellable_models(&pulled, "gemini", None).is_empty(), "the catalog's silence is an answer");
+    }
+
+    /// The ChatGPT backend that serves a Codex subscription is entitled to a
+    /// slice of the platform's models and answers every other slug with
+    /// `400 … "is not supported when using Codex with a ChatGPT account"` —
+    /// after the request has been matched, preauthorized and routed. So the
+    /// catalog is filtered by what the account itself says it may use.
+    #[test]
+    fn codex_only_advertises_what_the_chatgpt_account_is_entitled_to() {
+        let mut by_provider = std::collections::BTreeMap::new();
+        by_provider.insert(
+            "codex".to_string(),
+            vec![
+                "gpt-5.1".to_string(),      // platform-only: refused upstream
+                "gpt-5-codex".to_string(),  // ditto, despite the name
+                "gpt-5.6-sol".to_string(),  // granted
+                "gpt-5.4-mini".to_string(), // granted
+            ],
+        );
+        let pulled = Some(SellableCatalog { fetched_at: 1, by_provider, ..Default::default() });
+        let granted = vec!["gpt-5.6-sol".to_string(), "gpt-5.4-mini".to_string(), "gpt-5.5".to_string()];
+        assert_eq!(
+            sellable_models(&pulled, "codex", Some(&granted)),
+            vec!["gpt-5.6-sol", "gpt-5.4-mini"],
+            "the catalog and the grant have to agree"
+        );
+
+        // Nothing granted (or nothing ever discovered) means nothing advertised:
+        // a lane that can only fail is worse than no lane.
+        assert!(sellable_models(&pulled, "codex", Some(&[])).is_empty());
     }
 
     /// OpenRouter and xAI do not spell every Grok id the same way, and an id
@@ -1174,14 +1375,14 @@ mod tests {
             ],
         );
         let pulled = Some(SellableCatalog { fetched_at: 1, by_provider, ..Default::default() });
-        assert_eq!(sellable_models(&pulled, "xai"), vec!["grok-4.5", "grok-4.3"]);
+        assert_eq!(sellable_models(&pulled, "xai", None), vec!["grok-4.5", "grok-4.3"]);
 
         // Moonshot's ids line up with the catalog, so nothing is filtered.
         assert!(native_models("kimi").is_none());
         let mut by_provider = std::collections::BTreeMap::new();
         by_provider.insert("kimi".to_string(), vec!["kimi-k2.7-code".to_string()]);
         let pulled = Some(SellableCatalog { fetched_at: 1, by_provider, ..Default::default() });
-        assert_eq!(sellable_models(&pulled, "kimi"), vec!["kimi-k2.7-code"]);
+        assert_eq!(sellable_models(&pulled, "kimi", None), vec!["kimi-k2.7-code"]);
     }
 
     /// The offline fallback has to satisfy the same rule as the catalog: it is

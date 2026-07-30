@@ -115,7 +115,29 @@ pub(crate) async fn finish_provider_oauth(
         // Codex returns neither — the identity lives in the id_token claims.
         .or_else(|| oauth::id_token_claim(&tokens, "email"))
         .unwrap_or_else(|| "account".to_string());
-    let plan = tokens["account"]["plan"].as_str().or_else(|| tokens["plan"].as_str());
+    // Codex returns the plan in neither field — like the email above, it lives in
+    // the id_token claims, in the same `https://api.openai.com/auth` block this
+    // function already reads the ChatGPT account id out of. Missing it left every
+    // asale-logged Codex account at `plan: None`, which
+    // `discovery::plan_window_cap` reads as the lowest tier (200k tokens per 5h
+    // window) no matter what the subscription actually allows — so the lanes went
+    // dark after a handful of full-size sales and matching answered `no_supply`.
+    let claim_plan = oauth::id_token_claim(&tokens, "chatgpt_plan_type").or_else(|| {
+        tokens["id_token"]
+            .as_str()
+            .and_then(cli_import::jwt_claims)
+            .as_ref()
+            .and_then(|c| c.get("https://api.openai.com/auth"))
+            .and_then(|a| a.get("chatgpt_plan_type"))
+            .and_then(|p| p.as_str())
+            .map(str::to_string)
+    });
+    let plan = tokens["account"]["plan"]
+        .as_str()
+        .or_else(|| tokens["plan"].as_str())
+        .map(str::to_string)
+        .or(claim_plan)
+        .filter(|p| !p.is_empty());
 
     // Persist tokens in the secret store; the store only holds references (§3.4).
     keychain::set(&keychain::token_ref(provider, &account_id), access).map_err(err)?;
@@ -133,7 +155,7 @@ pub(crate) async fn finish_provider_oauth(
         .upsert_tool(provider, &account_id, &keychain::token_ref(provider, &account_id), &["oauth"], "oauth")
         .await
         .map_err(err)?;
-    if let Some(plan) = plan {
+    if let Some(plan) = &plan {
         let _ = state.store.set_setting(&format!("plan:{provider}:{account_id}"), plan).await;
     }
     // Codex's upstream will not accept this bearer without the ChatGPT account
