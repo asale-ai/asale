@@ -16,6 +16,7 @@ pub mod cli_scan;
 pub mod codex_catalog;
 pub mod commands;
 pub mod keychain;
+pub mod logging;
 pub mod oauth;
 pub mod proxy;
 pub mod publisher;

@@ -10,9 +10,7 @@
 //!   ASALE_DATA_DIR (default ~/.asale)
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
+    asale_daemon::logging::init();
 
     // Minimal arg parsing: --bind <addr>, --help.
     let mut bind_arg: Option<String> = None;

@@ -42,9 +42,9 @@ pub struct Shell {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
+    // stdout *and* `~/.asale/asale.log`: this build's stdout usually goes
+    // nowhere, and the publisher's upstream-rejection lines are only there.
+    asale_daemon::logging::init();
 
     // Where the daemon should be. The shell always talks to it over loopback,
     // even if the daemon binds wider (remote B/S mode).

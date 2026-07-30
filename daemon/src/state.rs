@@ -128,13 +128,31 @@ fn load_or_create_identity() -> anyhow::Result<DeviceIdentity> {
 
 /// The app data dir — `$ASALE_DATA_DIR` if set, else `~/.asale` (matches the
 /// keychain module and the SQLite store).
+///
+/// `$HOME` is not the only spelling of "home": Windows sets `USERPROFILE` and
+/// leaves `HOME` unset in PowerShell, cmd, and anything launched from Explorer
+/// or a shortcut. Falling straight through to a *relative* `.asale` meant the
+/// same installation silently kept two states — the real one under the user's
+/// profile, and an empty one beside whatever directory the app happened to be
+/// launched from, with its own device id, its own `daemon.token` and no
+/// accounts. That reads exactly like data loss. The relative path stays as the
+/// last resort, for a platform that offers neither variable.
 pub fn data_dir() -> String {
     if let Ok(d) = std::env::var("ASALE_DATA_DIR") {
         return d;
     }
-    if let Ok(home) = std::env::var("HOME") {
-        format!("{home}/.asale")
-    } else {
-        ".asale".to_string()
+    for var in ["HOME", "USERPROFILE"] {
+        match std::env::var(var) {
+            Ok(home) if !home.trim().is_empty() => return format!("{home}/.asale"),
+            _ => continue,
+        }
     }
+    // Windows also splits the profile path across two variables; join them
+    // rather than writing state next to the executable.
+    if let (Ok(drive), Ok(path)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
+        if !drive.trim().is_empty() && !path.trim().is_empty() {
+            return format!("{drive}{path}/.asale");
+        }
+    }
+    ".asale".to_string()
 }
