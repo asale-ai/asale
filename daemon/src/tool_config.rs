@@ -27,7 +27,7 @@ use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
 /// The tools a buy switch can be turned on for.
-pub const TOOLS: &[&str] = &["claude", "codex", "gemini"];
+pub const TOOLS: &[&str] = &["claude", "codex", "gemini", "openclaw", "hermes"];
 
 /// Display name for a tool id.
 pub fn label(tool: &str) -> &'static str {
@@ -35,6 +35,8 @@ pub fn label(tool: &str) -> &'static str {
         "claude" => "Claude Code",
         "codex" => "Codex",
         "gemini" => "Gemini CLI",
+        "openclaw" => "OpenClaw",
+        "hermes" => "Hermes",
         _ => "unknown",
     }
 }
@@ -44,13 +46,26 @@ pub fn known(tool: &str) -> bool {
     TOOLS.contains(&tool)
 }
 
-/// Which locally installed CLI a proxied request came from, inferred from the
-/// dialect its path speaks. `None` for paths no tool owns (e.g. `/healthz`).
+/// Which locally installed CLI a proxied request came from.
+///
+/// Two ways, in priority order:
+///
+///   1. An explicit `/{tool}/…` prefix in the path. This is the only thing that
+///      can tell two tools apart at all, and it exists because the dialect
+///      cannot: OpenClaw speaks whichever wire format it is configured for, so
+///      an OpenClaw request is byte-identical to a Claude Code or Codex one.
+///      Inferring the tool from the dialect would gate OpenClaw on *Codex's*
+///      switch and hand it Codex's model selection.
+///   2. Failing that, the dialect — which is what the three tools that predate
+///      the prefix are still addressed by, so their configs keep working.
 ///
 /// Lives here, beside [`TOOLS`], because it is the same knowledge: adding a
-/// fourth tool means adding it to both, and having them in one file is what
-/// makes that obvious.
+/// tool means adding it to both, and having them in one file is what makes that
+/// obvious.
 pub fn for_request_path(path: &str) -> Option<&'static str> {
+    if let Some(tool) = tool_prefix_of(path) {
+        return Some(tool);
+    }
     if path.starts_with("/v1/messages") {
         Some("claude")
     } else if path.starts_with("/v1beta/") {
@@ -62,6 +77,28 @@ pub fn for_request_path(path: &str) -> Option<&'static str> {
         Some("codex")
     } else {
         None
+    }
+}
+
+/// The tool named by a leading `/{tool}/` path segment, if it names one.
+fn tool_prefix_of(path: &str) -> Option<&'static str> {
+    let (first, _) = path.trim_start_matches('/').split_once('/')?;
+    TOOLS.iter().find(|t| **t == first).copied()
+}
+
+/// The path without its `/{tool}` addressing prefix — what the gateway (or a
+/// vendor upstream) is actually asked for.
+///
+/// The prefix is how the request reached the right buy switch; past that point
+/// it is noise, and forwarding it would turn `/openclaw/v1/chat/completions`
+/// into a 404 at the other end.
+pub fn strip_tool_prefix(path: &str) -> &str {
+    match tool_prefix_of(path) {
+        // `tool_prefix_of` matched the *first* segment and required a `/` after
+        // it, so the prefix is exactly an optional leading slash plus the name,
+        // and what remains always starts with `/`.
+        Some(tool) => &path.strip_prefix('/').unwrap_or(path)[tool.len()..],
+        None => path,
     }
 }
 
@@ -91,6 +128,40 @@ const CODEX_MODEL: &str = "model";
 /// Path to the model list Codex's picker offers (see `codex_catalog`).
 const CODEX_CATALOG: &str = "model_catalog_json";
 
+// ── OpenClaw keys ──────────────────────────────────────────────────────────
+//
+// Shapes taken from a real `~/.openclaw/openclaw.json`, not from the docs: a
+// working provider entry there carries `baseUrl` / `api` / `models[]`, and the
+// agent picks one with `agents.defaults.model.primary = "<provider>/<model>"`.
+/// The `models.providers.<id>` entry asale owns, named so a restore can find
+/// exactly what we added.
+const OPENCLAW_PROVIDER_ID: &str = "asale";
+/// `merge` keeps OpenClaw's built-in providers alongside ours; without it a
+/// custom block can replace the whole set.
+const OPENCLAW_MODELS_MODE: &str = "merge";
+/// The wire format we ask OpenClaw to speak. `openai-completions` is the one
+/// this machine's own provider entry is already using, so it is the shape
+/// proven to work rather than the one only documented.
+const OPENCLAW_API: &str = "openai-completions";
+
+// ── Hermes keys ────────────────────────────────────────────────────────────
+//
+// Shapes read from the repo's own `cli-config.yaml.example`, not the docs —
+// which describe `auxiliary.compression.base_url`, a different (and wrong)
+// section for this. Everything the primary model client needs lives under one
+// top-level `model:` block.
+/// The block the four keys below live in.
+const HERMES_SECTION: &str = "model";
+/// `custom` is Hermes' name for "any other OpenAI-compatible endpoint, see
+/// base_url" — which is exactly what the local proxy is.
+const HERMES_PROVIDER: &str = "provider";
+const HERMES_PROVIDER_CUSTOM: &str = "custom";
+const HERMES_BASE_URL: &str = "base_url";
+const HERMES_API_KEY: &str = "api_key";
+/// The model Hermes starts on. `default` and `model` are both accepted names;
+/// we write the documented one.
+const HERMES_MODEL: &str = "default";
+
 fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
 }
@@ -101,6 +172,19 @@ pub fn tool_dir(tool: &str) -> PathBuf {
         "claude" => home().join(".claude"),
         "codex" => home().join(".codex"),
         "gemini" => home().join(".gemini"),
+        "openclaw" => home().join(".openclaw"),
+        // Hermes is the one tool that does not live under a dot-directory in
+        // `$HOME`. Its installer writes `HERMES_HOME` as a user environment
+        // variable — `%LOCALAPPDATA%\hermes` on Windows — and the agent reads
+        // its config from there; `~/.hermes` is only the fallback when that
+        // variable is unset. Assuming the fallback pointed asale at a directory
+        // that does not exist on a normal Windows install, so the switch wrote
+        // a config Hermes would never read.
+        "hermes" => std::env::var("HERMES_HOME")
+            .ok()
+            .map(|h| PathBuf::from(h.trim()))
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| home().join(".hermes")),
         _ => home().join(".asale-unknown"),
     }
 }
@@ -112,6 +196,8 @@ pub fn config_paths(tool: &str) -> Vec<PathBuf> {
         "claude" => vec![d.join("settings.json")],
         "codex" => vec![d.join("config.toml"), d.join("auth.json")],
         "gemini" => vec![d.join(".env")],
+        "openclaw" => vec![d.join("openclaw.json")],
+        "hermes" => vec![d.join("config.yaml")],
         _ => vec![],
     }
 }
@@ -131,6 +217,8 @@ pub fn installed(tool: &str) -> bool {
         "claude" => "claude",
         "codex" => "codex",
         "gemini" => "gemini",
+        "openclaw" => "openclaw",
+        "hermes" => "hermes",
         _ => return false,
     })
 }
@@ -162,7 +250,37 @@ pub fn current_base_url(tool: &str) -> Option<String> {
                 .as_str()
                 .map(String::from)
         }
+        "hermes" => yaml_block_get(&read_raw(&primary_config_path(tool))?, HERMES_SECTION, HERMES_BASE_URL),
+        "openclaw" => {
+            let v = read_json(&primary_config_path(tool));
+            // Same rule as Codex: only the provider the agent actually starts
+            // on counts, so a leftover inactive block cannot make the UI claim
+            // the switch is in effect. `primary` is "<provider>/<model>".
+            let primary = v.get("agents")?.get("defaults")?.get("model")?.get("primary")?.as_str()?;
+            let active = primary.split_once('/').map(|(p, _)| p).unwrap_or(primary);
+            v.get("models")?
+                .get("providers")?
+                .get(active)?
+                .get("baseUrl")?
+                .as_str()
+                .map(String::from)
+        }
         _ => None,
+    }
+}
+
+/// The exact base URL `tool`'s config should hold while it is buying.
+///
+/// Each tool addresses the proxy differently: Claude Code and Gemini CLI take
+/// its origin, Codex the `/v1` root under it, and anything added since is
+/// addressed under its own `/{tool}` prefix — which is what lets the proxy tell
+/// tools apart when their dialects cannot (see [`for_request_path`]).
+pub fn proxy_base_for(tool: &str) -> String {
+    let base = proxy_base();
+    match tool {
+        "codex" => format!("{base}/v1"),
+        "openclaw" | "hermes" => format!("{base}/{tool}/v1"),
+        _ => base,
     }
 }
 
@@ -179,7 +297,8 @@ pub fn proxy_base() -> String {
 /// addresses the proxy's `/v1` root, the others its origin.
 pub fn points_at_proxy(tool: &str) -> bool {
     let base = proxy_base();
-    current_base_url(tool).is_some_and(|b| b == base || b == format!("{base}/v1"))
+    let expected = proxy_base_for(tool);
+    current_base_url(tool).is_some_and(|b| b == expected || b == base || b == format!("{base}/v1"))
 }
 
 /// Is this tool buying right now?
@@ -267,7 +386,10 @@ fn read_json(path: &Path) -> Value {
 }
 
 /// Atomically write `body` to `path` (tmp + rename), creating the parent dir.
-fn write_atomic(path: &Path, body: &str) -> Result<()> {
+///
+/// Also used by the refresh loop, which writes a rotated token back into the
+/// CLI's own credential file — same requirement, same permissions.
+pub(crate) fn write_atomic(path: &Path, body: &str) -> Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("config");
@@ -321,6 +443,8 @@ pub fn apply(tool: &str, base_url: &str, token: &str, models: &[String]) -> Resu
         "claude" => apply_claude(base_url, token)?,
         "codex" => apply_codex(base_url, token, models)?,
         "gemini" => apply_gemini(base_url, token)?,
+        "openclaw" => apply_openclaw(token, models)?,
+        "hermes" => apply_hermes(token, models)?,
         _ => unreachable!("known() checked above"),
     }
     Ok(backup)
@@ -456,6 +580,342 @@ fn drop_our_catalog(doc: &mut toml_edit::DocumentMut, also_model: bool) {
     crate::codex_catalog::remove();
 }
 
+// ── OpenClaw ───────────────────────────────────────────────────────────────
+
+/// Point OpenClaw at the proxy by adding a provider block it can select.
+///
+/// Unlike Codex, OpenClaw takes the model list from the config, so the bought
+/// models travel under their own market ids — no carrier slugs, no alias table.
+/// That is why there is no `codex_catalog` equivalent here.
+///
+/// `base_url` is not a parameter: OpenClaw is addressed under its own `/{tool}`
+/// prefix, which [`proxy_base_for`] owns.
+fn apply_openclaw(token: &str, models: &[String]) -> Result<()> {
+    let path = primary_config_path("openclaw");
+    let mut root = read_json(&path).as_object().cloned().unwrap_or_default();
+
+    let mut provider = Map::new();
+    provider.insert("baseUrl".into(), Value::String(proxy_base_for("openclaw")));
+    provider.insert("apiKey".into(), Value::String(token.to_string()));
+    provider.insert("api".into(), Value::String(OPENCLAW_API.to_string()));
+    provider.insert(
+        "models".into(),
+        Value::Array(models.iter().map(|id| openclaw_model_entry(id)).collect()),
+    );
+
+    let models_obj = obj_entry(&mut root, "models");
+    models_obj.insert("mode".into(), Value::String(OPENCLAW_MODELS_MODE.to_string()));
+    let providers = obj_entry(models_obj, "providers");
+    providers.insert(OPENCLAW_PROVIDER_ID.into(), Value::Object(provider));
+
+    // Start on the first bought model. With no selection ("any model") there is
+    // nothing specific to point at, so OpenClaw keeps whatever it was on — the
+    // provider is still there to be picked from its own model list.
+    if let Some(first) = models.first() {
+        let defaults = obj_entry(obj_entry(&mut root, "agents"), "defaults");
+        obj_entry(defaults, "model")
+            .insert("primary".into(), Value::String(format!("{OPENCLAW_PROVIDER_ID}/{first}")));
+    }
+    write_atomic(&path, &serde_json::to_string_pretty(&Value::Object(root))?)
+}
+
+/// One `models[]` entry, in the shape OpenClaw's own provider blocks use.
+///
+/// The costs are zeroes because the market, not OpenClaw, does the billing —
+/// these fields drive its local display only.
+fn openclaw_model_entry(id: &str) -> Value {
+    serde_json::json!({
+        "id": id,
+        "name": id,
+        "input": ["text"],
+        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+    })
+}
+
+/// The object at `parent[key]`, created (or replaced, if it is not an object)
+/// so a config with a surprising value there cannot fail the whole switch.
+fn obj_entry<'a>(parent: &'a mut Map<String, Value>, key: &str) -> &'a mut Map<String, Value> {
+    let slot = parent.entry(key.to_string()).or_insert_with(|| Value::Object(Map::new()));
+    if !slot.is_object() {
+        *slot = Value::Object(Map::new());
+    }
+    slot.as_object_mut().expect("just ensured object")
+}
+
+/// Drop the provider block asale added, and — if it still selects us — the
+/// model the agent starts on. Everything else the user configured stays.
+fn strip_openclaw(raw: &str) -> Option<String> {
+    let mut root = serde_json::from_str::<Value>(raw).ok()?.as_object()?.clone();
+
+    if let Some(Value::Object(models)) = root.get_mut("models") {
+        if let Some(Value::Object(providers)) = models.get_mut("providers") {
+            providers.remove(OPENCLAW_PROVIDER_ID);
+            if providers.is_empty() {
+                models.remove("providers");
+            }
+        }
+        // `mode` is ours to remove only when nothing of ours is left to merge.
+        if !models.contains_key("providers") {
+            models.remove("mode");
+        }
+        if models.is_empty() {
+            root.remove("models");
+        }
+    }
+
+    // Only when it still names our provider — a model the user picked
+    // themselves since is theirs to keep.
+    let ours = root
+        .get("agents")
+        .and_then(|a| a.get("defaults"))
+        .and_then(|d| d.get("model"))
+        .and_then(|m| m.get("primary"))
+        .and_then(Value::as_str)
+        .is_some_and(|p| p.split_once('/').map(|(prov, _)| prov) == Some(OPENCLAW_PROVIDER_ID));
+    if ours {
+        // Prune the husk the removal leaves behind. `agents.defaults.model: {}`
+        // is not something the user configured, and leaving it keeps the
+        // document non-empty — which would make a file asale created itself
+        // survive the restore that is supposed to remove it.
+        if let Some(Value::Object(agents)) = root.get_mut("agents") {
+            if let Some(Value::Object(defaults)) = agents.get_mut("defaults") {
+                if let Some(Value::Object(model)) = defaults.get_mut("model") {
+                    model.remove("primary");
+                    if model.is_empty() {
+                        defaults.remove("model");
+                    }
+                }
+                if defaults.is_empty() {
+                    agents.remove("defaults");
+                }
+            }
+            if agents.is_empty() {
+                root.remove("agents");
+            }
+        }
+    }
+
+    if root.is_empty() {
+        return None;
+    }
+    serde_json::to_string_pretty(&Value::Object(root)).ok()
+}
+
+// ── Hermes ─────────────────────────────────────────────────────────────────
+
+/// Point Hermes at the proxy: four scalar keys inside its `model:` block.
+///
+/// `base_url` is not a parameter — Hermes is addressed under its own `/{tool}`
+/// prefix, which [`proxy_base_for`] owns.
+fn apply_hermes(token: &str, models: &[String]) -> Result<()> {
+    let path = primary_config_path("hermes");
+    let raw = read_raw(&path).unwrap_or_default();
+    let mut pairs = vec![
+        (HERMES_PROVIDER, HERMES_PROVIDER_CUSTOM.to_string()),
+        (HERMES_BASE_URL, proxy_base_for("hermes")),
+        (HERMES_API_KEY, token.to_string()),
+    ];
+    // With no selection ("any model") Hermes keeps whatever it was on — there
+    // is nothing specific to point it at.
+    if let Some(first) = models.first() {
+        pairs.push((HERMES_MODEL, first.clone()));
+    }
+    let refs: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    write_atomic(&path, &yaml_block_set(&raw, HERMES_SECTION, &refs))
+}
+
+/// Remove the keys asale wrote — but only while `base_url` still names our
+/// proxy. Past that the user has repointed Hermes themselves, and the values
+/// are theirs rather than ours to delete.
+fn strip_hermes(raw: &str) -> Option<String> {
+    let ours =
+        yaml_block_get(raw, HERMES_SECTION, HERMES_BASE_URL).is_some_and(|b| b == proxy_base_for("hermes"));
+    if !ours {
+        return Some(raw.to_string());
+    }
+    let out = yaml_block_remove(
+        raw,
+        HERMES_SECTION,
+        &[HERMES_PROVIDER, HERMES_BASE_URL, HERMES_API_KEY, HERMES_MODEL],
+    );
+    // A bare `model:` with nothing under it is the husk our own keys left
+    // behind, and it keeps the document non-empty — which would leave a file
+    // asale created itself sitting on disk after the switch is turned off.
+    let out = yaml_drop_empty_block(&out, HERMES_SECTION);
+    if out.trim().is_empty() {
+        return None;
+    }
+    Some(out)
+}
+
+// ── Minimal YAML block editing (comment- and order-preserving) ─────────────
+//
+// Hermes' config is a 1600-line commented template, and Rust has no
+// format-preserving YAML editor the way `toml_edit` is for TOML — a serde
+// round-trip would hand the file back stripped of every comment the user
+// configures by. So the four keys asale owns are edited in place, line by
+// line, exactly as the Gemini dotenv helpers below do for their format.
+//
+// Scope matters: `base_url` also appears under `auxiliary.compression`, so an
+// edit not confined to one top-level block would repoint a section nobody
+// asked about. Everything here works on one named block only.
+
+/// A top-level `section:` block: its header line index, and the `[start, end)`
+/// range of its body. `None` when the section is not there.
+fn yaml_block(raw: &str, section: &str) -> Option<(usize, usize, usize)> {
+    let lines: Vec<&str> = raw.lines().collect();
+    let header = lines
+        .iter()
+        .position(|l| l.strip_prefix(section).is_some_and(|r| r.starts_with(':')))?;
+    // The body ends at the next line starting a new top-level key: column 0,
+    // not a comment, not blank.
+    let end = lines[header + 1..]
+        .iter()
+        .position(|l| matches!(l.chars().next(), Some(c) if !c.is_whitespace() && c != '#'))
+        .map(|i| header + 1 + i)
+        .unwrap_or(lines.len());
+    Some((header, header + 1, end))
+}
+
+/// A key's line index and indent inside a block body.
+fn yaml_key_line(lines: &[&str], body: std::ops::Range<usize>, key: &str) -> Option<(usize, String)> {
+    lines[body.clone()].iter().enumerate().find_map(|(i, l)| {
+        let indent: String = l.chars().take_while(|c| c.is_whitespace()).collect();
+        if indent.is_empty() {
+            return None; // column 0 is not inside the block
+        }
+        // `key:` exactly — never a comment, and never a longer name that merely
+        // starts with these characters.
+        l[indent.len()..]
+            .strip_prefix(key)
+            .filter(|r| r.starts_with(':'))
+            .map(|_| (body.start + i, indent))
+    })
+}
+
+/// Read one scalar key out of a block.
+fn yaml_block_get(raw: &str, section: &str, key: &str) -> Option<String> {
+    let (_, body_start, body_end) = yaml_block(raw, section)?;
+    let lines: Vec<&str> = raw.lines().collect();
+    let (idx, indent) = yaml_key_line(&lines, body_start..body_end, key)?;
+    let value = lines[idx][indent.len() + key.len() + 1..].trim();
+    // An inline `#` ends the value only when it is not inside quotes.
+    let value = match value.strip_prefix('"').and_then(|v| v.rfind('"').map(|e| v[..e].to_string())) {
+        Some(quoted) => yaml_unescape(&quoted),
+        None => value.split('#').next().unwrap_or("").trim().to_string(),
+    };
+    (!value.is_empty()).then_some(value)
+}
+
+/// Upsert scalar keys inside `section`, leaving every other line untouched.
+/// The section (and the file) is created when missing.
+fn yaml_block_set(raw: &str, section: &str, pairs: &[(&str, &str)]) -> String {
+    let mut lines: Vec<String> = raw.lines().map(String::from).collect();
+    if yaml_block(raw, section).is_none() {
+        if !lines.is_empty() && !lines.last().is_some_and(|l| l.trim().is_empty()) {
+            lines.push(String::new());
+        }
+        lines.push(format!("{section}:"));
+    }
+    for (key, value) in pairs {
+        let joined = lines.join("\n");
+        let (_, body_start, body_end) = yaml_block(&joined, section).expect("just ensured above");
+        let view: Vec<&str> = lines.iter().map(String::as_str).collect();
+        match yaml_key_line(&view, body_start..body_end, key) {
+            Some((idx, indent)) => lines[idx] = format!("{indent}{key}: {}", yaml_scalar(value)),
+            None => {
+                // Insert after the block's last real content line, so the key
+                // lands inside the block rather than after its trailing
+                // comments — and inherits that line's indent.
+                let last = (body_start..body_end).rev().find(|i| {
+                    let l = &lines[*i];
+                    !l.trim().is_empty() && !l.trim_start().starts_with('#') && l.starts_with(char::is_whitespace)
+                });
+                let (at, indent) = match last {
+                    Some(i) => (i + 1, lines[i].chars().take_while(|c| c.is_whitespace()).collect::<String>()),
+                    None => (body_start, "  ".to_string()),
+                };
+                lines.insert(at, format!("{indent}{key}: {}", yaml_scalar(value)));
+            }
+        }
+    }
+    let mut body = lines.join("\n");
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body
+}
+
+/// Delete keys from a block, leaving everything else — comments included — as
+/// it was.
+fn yaml_block_remove(raw: &str, section: &str, keys: &[&str]) -> String {
+    let mut lines: Vec<String> = raw.lines().map(String::from).collect();
+    for key in keys {
+        let joined = lines.join("\n");
+        let Some((_, body_start, body_end)) = yaml_block(&joined, section) else { break };
+        let view: Vec<&str> = lines.iter().map(String::as_str).collect();
+        if let Some((idx, _)) = yaml_key_line(&view, body_start..body_end, key) {
+            lines.remove(idx);
+        }
+    }
+    let mut body = lines.join("\n");
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body
+}
+
+/// Remove a `section:` header whose body has nothing left in it.
+///
+/// Only when the body is *entirely* blank: a comment under the header is
+/// something the user wrote, and a block that still documents itself is not an
+/// empty one, however few settings it currently holds.
+fn yaml_drop_empty_block(raw: &str, section: &str) -> String {
+    let Some((header, body_start, body_end)) = yaml_block(raw, section) else {
+        return raw.to_string();
+    };
+    let lines: Vec<&str> = raw.lines().collect();
+    if lines[body_start..body_end].iter().any(|l| !l.trim().is_empty()) {
+        return raw.to_string();
+    }
+    let kept: Vec<&str> =
+        lines.iter().enumerate().filter(|(i, _)| *i < header || *i >= body_end).map(|(_, l)| *l).collect();
+    let mut body = kept.join("\n");
+    if !body.trim().is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body
+}
+
+/// A double-quoted YAML scalar. Quoted unconditionally so a value that would
+/// otherwise read as another type (a bare `1.0`, `yes`, `null`) stays the
+/// string it is.
+fn yaml_scalar(v: &str) -> String {
+    let escaped = v.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+/// Inverse of [`yaml_scalar`] for the two escapes it produces.
+///
+/// A reader that cannot undo its own writer is a trap waiting for the first
+/// value with a quote in it. Other escapes YAML defines (`\n`, `\t`, …) are
+/// passed through as written rather than decoded: nothing here emits them, and
+/// guessing at a sequence we did not write would corrupt a value the user set.
+fn yaml_unescape(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    let mut chars = v.chars();
+    while let Some(c) = chars.next() {
+        match (c, chars.clone().next()) {
+            ('\\', Some(next @ ('"' | '\\'))) => {
+                out.push(next);
+                chars.next();
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 // ── Gemini CLI ─────────────────────────────────────────────────────────────
 
 fn apply_gemini(base_url: &str, token: &str) -> Result<()> {
@@ -474,6 +934,8 @@ fn strip_ours(tool: &str, path: &Path) -> Result<()> {
         ("claude", _) => strip_json_env(&raw, &[ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN]),
         ("codex", "config.toml") => strip_codex_config(&raw),
         ("codex", "auth.json") => strip_json_keys(&raw, &[CODEX_API_KEY]),
+        ("openclaw", _) => strip_openclaw(&raw),
+        ("hermes", _) => strip_hermes(&raw),
         ("gemini", _) => strip_dotenv(&raw, &[GEMINI_BASE_URL, GEMINI_API_KEY]),
         _ => Some(raw),
     };
@@ -614,10 +1076,20 @@ mod tests {
         // Never shell out to a real codex during tests: whether one is
         // installed must not change what these assert.
         std::env::set_var("ASALE_CODEX_BIN", tmp.join("codex-stub"));
+        // `$HOME` does not contain Hermes: it resolves its own directory from
+        // `HERMES_HOME`, which its installer sets to `%LOCALAPPDATA%\hermes` on
+        // Windows. Left alone, every test here would read and rewrite the
+        // machine's actual Hermes config.
+        let prev_hermes = std::env::var("HERMES_HOME").ok();
+        std::env::set_var("HERMES_HOME", tmp.join(".hermes"));
         let out = f();
         match prev {
             Some(p) => std::env::set_var("HOME", p),
             None => std::env::remove_var("HOME"),
+        }
+        match prev_hermes {
+            Some(p) => std::env::set_var("HERMES_HOME", p),
+            None => std::env::remove_var("HERMES_HOME"),
         }
         std::env::remove_var("ASALE_CODEX_BIN");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -798,6 +1270,227 @@ mod tests {
             assert!(out.contains("model_catalog_json = \"/home/me/models.json\""));
             assert!(out.contains("model = \"gpt-5.2\""));
         });
+    }
+
+    #[test]
+    fn request_paths_resolve_the_tool_by_prefix_then_by_dialect() {
+        // Prefix wins: this is the case the dialect cannot decide.
+        assert_eq!(for_request_path("/openclaw/v1/chat/completions"), Some("openclaw"));
+        assert_eq!(for_request_path("/openclaw/v1/messages"), Some("openclaw"));
+        // Hermes speaks the same OpenAI wire as OpenClaw and Codex — three
+        // tools, one dialect, told apart only by this prefix.
+        assert_eq!(for_request_path("/hermes/v1/chat/completions"), Some("hermes"));
+        assert_eq!(strip_tool_prefix("/hermes/v1/chat/completions"), "/v1/chat/completions");
+        // Unprefixed keeps the old dialect inference, so existing configs work.
+        assert_eq!(for_request_path("/v1/messages"), Some("claude"));
+        assert_eq!(for_request_path("/v1/chat/completions"), Some("codex"));
+        assert_eq!(for_request_path("/v1beta/models/x"), Some("gemini"));
+        // A prefix we do not know names no tool — the caller refuses it.
+        assert_eq!(for_request_path("/not-a-tool/v1/messages"), None);
+        assert_eq!(for_request_path("/healthz"), None);
+
+        assert_eq!(strip_tool_prefix("/openclaw/v1/chat/completions"), "/v1/chat/completions");
+        assert_eq!(strip_tool_prefix("/openclaw/v1/models?x=1"), "/v1/models?x=1");
+        assert_eq!(strip_tool_prefix("/v1/messages"), "/v1/messages", "nothing to strip");
+        assert_eq!(strip_tool_prefix("/not-a-tool/v1/messages"), "/not-a-tool/v1/messages");
+    }
+
+    #[test]
+    fn openclaw_adds_a_provider_and_restore_is_verbatim() {
+        with_temp_home(|| {
+            let path = primary_config_path("openclaw");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            // Shaped like the real file: a provider of the user's own, and an
+            // agent already pointed at it.
+            let original = r#"{
+  "models": {"mode": "merge", "providers": {"qwen": {"baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1", "api": "openai-completions"}}},
+  "agents": {"defaults": {"workspace": "C:/ws", "model": {"primary": "qwen/qwen3.5-plus"}}},
+  "tools": {"profile": "coding"}
+}"#;
+            std::fs::write(&path, original).unwrap();
+
+            let backup = apply("openclaw", "http://127.0.0.1:9787", "sk-asale-oc", &models(&["claude-fable-5", "claude-opus-5"])).unwrap();
+
+            let v = read_json(&path);
+            let ours = &v["models"]["providers"][OPENCLAW_PROVIDER_ID];
+            assert_eq!(ours["baseUrl"], "http://127.0.0.1:9787/openclaw/v1", "addressed under its own prefix");
+            assert_eq!(ours["apiKey"], "sk-asale-oc");
+            assert_eq!(ours["api"], "openai-completions");
+            let ids: Vec<&str> = ours["models"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+            assert_eq!(ids, ["claude-fable-5", "claude-opus-5"], "market ids travel as themselves — no carrier slugs");
+            assert_eq!(v["agents"]["defaults"]["model"]["primary"], "asale/claude-fable-5", "starts on the first bought model");
+            assert!(v["models"]["providers"]["qwen"].is_object(), "the user's own provider survives");
+            assert_eq!(v["agents"]["defaults"]["workspace"], "C:/ws", "unrelated settings survive");
+            assert_eq!(v["tools"]["profile"], "coding");
+            assert_eq!(current_base_url("openclaw").as_deref(), Some("http://127.0.0.1:9787/openclaw/v1"));
+            assert!(points_at_proxy("openclaw"));
+
+            restore("openclaw", &backup).unwrap();
+            assert_eq!(read_raw(&path).unwrap(), original, "restore is byte-exact");
+        });
+    }
+
+    #[test]
+    fn openclaw_strip_keeps_what_the_user_configured() {
+        let raw = r#"{
+  "models": {"mode": "merge", "providers": {"asale": {"baseUrl": "http://x/openclaw/v1"}, "qwen": {"baseUrl": "https://q"}}},
+  "agents": {"defaults": {"model": {"primary": "asale/claude-fable-5"}}}
+}"#;
+        let out = strip_openclaw(raw).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert!(v["models"]["providers"].get("asale").is_none(), "our block goes");
+        assert!(v["models"]["providers"]["qwen"].is_object(), "theirs stays");
+        assert!(v["agents"]["defaults"]["model"].get("primary").is_none(), "the selection of us goes with it");
+
+        // A model the user picked since is theirs, not ours to remove.
+        let theirs = r#"{"models": {"providers": {"asale": {}}}, "agents": {"defaults": {"model": {"primary": "qwen/qwen3.5-plus"}}}}"#;
+        let v: Value = serde_json::from_str(&strip_openclaw(theirs).unwrap()).unwrap();
+        assert_eq!(v["agents"]["defaults"]["model"]["primary"], "qwen/qwen3.5-plus");
+    }
+
+    #[test]
+    fn openclaw_apply_creates_a_usable_file_and_restore_removes_it() {
+        with_temp_home(|| {
+            let path = primary_config_path("openclaw");
+            let backup = apply("openclaw", "http://127.0.0.1:9787", "sk-1", &models(&["claude-fable-5"])).unwrap();
+            assert!(!backup.had_existing());
+            assert!(read_json(&path)["models"]["providers"]["asale"].is_object());
+            restore("openclaw", &backup).unwrap();
+            assert!(read_raw(&path).is_none(), "file removed since it never existed");
+        });
+    }
+
+    /// Shaped like the real `cli-config.yaml.example`: a commented `model:`
+    /// block, and a *second* `base_url` under another section.
+    const HERMES_YAML: &str = "\
+# Hermes config
+model:
+  # Default model to use
+  default: \"anthropic/claude-opus-4.6\"
+
+  # Inference provider selection
+  provider: \"auto\"
+  base_url: \"https://openrouter.ai/api/v1\"
+
+  # context_length: 131072
+
+auxiliary:
+  compression:
+    model: \"glm-4.7\"
+    base_url: https://api.z.ai/api/coding/paas/v4
+";
+
+    #[test]
+    fn hermes_edits_only_its_own_block_and_keeps_every_comment() {
+        with_temp_home(|| {
+            let path = primary_config_path("hermes");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, HERMES_YAML).unwrap();
+
+            let backup = apply("hermes", "http://127.0.0.1:9787", "sk-asale-h", &models(&["gpt-5.6-terra"])).unwrap();
+            let out = read_raw(&path).unwrap();
+
+            assert_eq!(yaml_block_get(&out, "model", "provider").as_deref(), Some("custom"));
+            assert_eq!(yaml_block_get(&out, "model", "base_url").as_deref(), Some("http://127.0.0.1:9787/hermes/v1"));
+            assert_eq!(yaml_block_get(&out, "model", "api_key").as_deref(), Some("sk-asale-h"));
+            assert_eq!(yaml_block_get(&out, "model", "default").as_deref(), Some("gpt-5.6-terra"));
+            assert!(points_at_proxy("hermes"));
+
+            // The other section's `base_url` is a different setting entirely.
+            assert!(
+                out.contains("base_url: https://api.z.ai/api/coding/paas/v4"),
+                "an edit that is not block-scoped repoints a section nobody asked about"
+            );
+            for comment in ["# Hermes config", "# Default model to use", "# context_length: 131072"] {
+                assert!(out.contains(comment), "lost comment {comment:?}");
+            }
+
+            restore("hermes", &backup).unwrap();
+            assert_eq!(read_raw(&path).unwrap(), HERMES_YAML, "restore is byte-exact");
+        });
+    }
+
+    #[test]
+    fn hermes_strip_only_touches_a_config_still_pointed_at_us() {
+        with_temp_home(|| {
+            let ours = yaml_block_set(
+                HERMES_YAML,
+                "model",
+                &[("base_url", &proxy_base_for("hermes")), ("api_key", "sk-asale-h")],
+            );
+            let out = strip_hermes(&ours).unwrap();
+            assert!(yaml_block_get(&out, "model", "base_url").is_none(), "our endpoint goes");
+            assert!(yaml_block_get(&out, "model", "api_key").is_none(), "and the key with it");
+            assert!(out.contains("# Default model to use"), "comments survive the strip too");
+            assert!(out.contains("base_url: https://api.z.ai/api/coding/paas/v4"), "the other block is untouched");
+
+            // Repointed by the user since: not ours to edit any more.
+            assert_eq!(strip_hermes(HERMES_YAML).as_deref(), Some(HERMES_YAML));
+        });
+    }
+
+    #[test]
+    fn hermes_config_asale_created_is_removed_again() {
+        with_temp_home(|| {
+            let path = primary_config_path("hermes");
+            assert!(read_raw(&path).is_none(), "nothing here to begin with");
+
+            let backup = apply("hermes", "http://127.0.0.1:9787", "sk-1", &models(&["gpt-5.6-terra"])).unwrap();
+            assert!(!backup.had_existing());
+            assert!(points_at_proxy("hermes"), "a config was created and is in effect");
+
+            restore("hermes", &backup).unwrap();
+            assert!(read_raw(&path).is_none(), "the file asale created goes with the switch");
+        });
+    }
+
+    #[test]
+    fn an_empty_block_is_dropped_but_a_documented_one_is_kept() {
+        assert_eq!(yaml_drop_empty_block("model:\n", "model"), "");
+        assert_eq!(yaml_drop_empty_block("other: 1\nmodel:\n\n", "model"), "other: 1\n");
+        // The user's own comment is content — the block stays.
+        let documented = "model:\n  # set provider here\n";
+        assert_eq!(yaml_drop_empty_block(documented, "model"), documented);
+    }
+
+    #[test]
+    fn yaml_block_editing_handles_the_awkward_shapes() {
+        // A key absent from the block is inserted into it, not appended to the
+        // file — where it would belong to whatever section came last.
+        let out = yaml_block_set(HERMES_YAML, "model", &[("api_key", "k")]);
+        let model_block: Vec<&str> = out
+            .lines()
+            .skip_while(|l| !l.starts_with("model:"))
+            .skip(1)
+            .take_while(|l| !l.starts_with("auxiliary:"))
+            .collect();
+        assert!(model_block.iter().any(|l| l.trim() == "api_key: \"k\""), "landed outside its block: {model_block:?}");
+
+        // A name that merely starts with the key is not the key.
+        let raw = "model:\n  base_url_fallback: \"x\"\n";
+        assert_eq!(yaml_block_get(raw, "model", "base_url"), None);
+        let out = yaml_block_set(raw, "model", &[("base_url", "y")]);
+        assert!(out.contains("base_url_fallback: \"x\""), "clobbered a longer name");
+        assert!(out.contains("base_url: \"y\""));
+
+        // A missing section (and an empty file) is created.
+        let out = yaml_block_set("other: 1\n", "model", &[("provider", "custom")]);
+        assert_eq!(yaml_block_get(&out, "model", "provider").as_deref(), Some("custom"));
+        assert!(out.starts_with("other: 1"), "the existing document is kept");
+        assert_eq!(yaml_block_get(&yaml_block_set("", "model", &[("provider", "custom")]), "model", "provider").as_deref(), Some("custom"));
+
+        // Commented-out keys are documentation, not settings.
+        let raw = "model:\n  # provider: \"auto\"\n";
+        assert_eq!(yaml_block_get(raw, "model", "provider"), None);
+        let out = yaml_block_set(raw, "model", &[("provider", "custom")]);
+        assert!(out.contains("# provider: \"auto\""), "the comment is still there");
+        assert_eq!(yaml_block_get(&out, "model", "provider").as_deref(), Some("custom"));
+
+        // Values with characters YAML would otherwise read as syntax.
+        let out = yaml_block_set("", "model", &[("api_key", "a\"b\\c#d")]);
+        assert_eq!(yaml_block_get(&out, "model", "api_key").as_deref(), Some("a\"b\\c#d"));
+        // An unquoted value with a trailing comment reads as the value only.
+        assert_eq!(yaml_block_get("model:\n  provider: auto # why\n", "model", "provider").as_deref(), Some("auto"));
     }
 
     #[test]

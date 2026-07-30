@@ -147,7 +147,10 @@ pub async fn set_buy_tool(
     if !tool_config::known(&tool) {
         return Err(cmd_err!(
             "errors.tool.unknown",
-            format!("unknown tool: {tool} (claude | codex | gemini)"),
+            // Listed from `TOOLS` rather than spelled out: the hardcoded list
+            // went stale the first time a tool was added, and the message then
+            // denies the existence of a tool the app is showing a switch for.
+            format!("unknown tool: {tool} ({})", tool_config::TOOLS.join(" | ")),
             tool = tool.as_str()
         ));
     }

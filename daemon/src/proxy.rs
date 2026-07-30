@@ -12,7 +12,7 @@
 //! Market forwards write a local `consume_records` row (spec §8) with the
 //! usage parsed from the streamed response, for reconciliation.
 
-use asale_client_core::executor::accumulate_usage;
+use asale_client_core::executor::UsageScanner;
 use asale_client_core::protocol::Usage;
 use asale_client_core::store::LocalStore;
 use asale_client_core::{AccountPool, UpstreamErrorKind};
@@ -58,6 +58,18 @@ pub fn router(state: ProxyState) -> Router {
         .route("/v1/messages/count_tokens", post(forward))
         .route("/v1/models", get(forward))
         .route("/v1beta/models/*rest", post(forward))
+        // Per-tool addressing. A tool whose dialect cannot identify it is
+        // pointed at `<proxy>/{tool}` instead of the bare origin, and the
+        // leading segment is what `tool_config::for_request_path` reads. These
+        // never shadow the bare forms above: those are shorter, and a static
+        // segment outranks `:tool` where the two could both match.
+        .route("/:tool/v1/messages", post(forward))
+        .route("/:tool/v1/messages/count_tokens", post(forward))
+        .route("/:tool/v1/chat/completions", post(forward))
+        .route("/:tool/v1/completions", post(forward))
+        .route("/:tool/v1/responses", post(forward))
+        .route("/:tool/v1/models", get(forward))
+        .route("/:tool/v1beta/models/*rest", post(forward))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state)
 }
@@ -123,8 +135,8 @@ enum BuyDecision {
 /// A tool whose switch is off should not be pointing at us at all — its config
 /// was restored — so that case only fires for a stale process still holding the
 /// old endpoint. Refusing beats silently spending the user's balance.
-async fn buy_gate(st: &ProxyState, path: &str, model: &str) -> BuyDecision {
-    let Some(tool) = buy_tool_for_path(path) else { return BuyDecision::Pass };
+async fn buy_gate(st: &ProxyState, tool: Option<&str>, model: &str) -> BuyDecision {
+    let Some(tool) = tool else { return BuyDecision::Pass };
     if !crate::commands::buy_is_enabled(&st.store, tool).await {
         return BuyDecision::Refuse(
             (
@@ -247,8 +259,24 @@ async fn forward(
     _headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let path = uri.path().to_string();
-    let path_and_query = uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
+    // The tool is read from the *raw* path — the `/{tool}` prefix is the only
+    // thing that carries it — and everything downstream sees the path without
+    // it, because that prefix is ours and means nothing to the gateway.
+    let raw_path = uri.path();
+    let tool = buy_tool_for_path(raw_path);
+    // The `/:tool/...` routes match *any* leading segment, so a prefix naming
+    // no tool we know lands here with nothing to gate on — and `buy_gate`
+    // passes a `None` tool through. Refuse it: the alternative is a request
+    // that spends the user's balance without any switch having been turned on.
+    let head = raw_path.trim_start_matches('/').split('/').next().unwrap_or("");
+    if tool.is_none() && !head.starts_with("v1") {
+        return (StatusCode::NOT_FOUND, format!("unknown tool prefix `/{head}`")).into_response();
+    }
+    let path = crate::tool_config::strip_tool_prefix(raw_path).to_string();
+    let path_and_query = uri
+        .path_and_query()
+        .map(|pq| crate::tool_config::strip_tool_prefix(pq.as_str()).to_string())
+        .unwrap_or_else(|| "/".into());
 
     let mut bytes = match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
         Ok(b) => b,
@@ -264,7 +292,7 @@ async fn forward(
     // is a preflight Claude Code issues before the real call; gating it too
     // would surface the refusal at a confusing point, and it costs nothing.
     if !is_count_tokens {
-        match buy_gate(&st, &path, &extract_model_from_bytes(&bytes)).await {
+        match buy_gate(&st, tool, &extract_model_from_bytes(&bytes)).await {
             BuyDecision::Pass => {}
             BuyDecision::Refuse(refusal) => return refusal,
             BuyDecision::Substitute(model) => bytes = relabel_model(&bytes, &model),
@@ -372,7 +400,7 @@ async fn forward_direct(
                 .insert_consume_record(&task_id, &model, 0, 0, 0, &format!("direct_upstream_{}", status.as_u16()))
                 .await;
         }
-        return passthrough(resp);
+        return tag_direct(passthrough(resp), provider, &model);
     }
 
     // Success: stream through, metering usage; release the pool lease with the
@@ -381,8 +409,9 @@ async fn forward_direct(
     let account_id = picked.account_id.clone();
     let store = st.store.clone();
     let lane = model.clone();
+    let tag = model.clone();
     let record = meter.then(|| (format!("d_{}", uuid::Uuid::new_v4().simple()), model, "direct".to_string()));
-    stream_with_metering(resp, move |usage, had_error| {
+    let served = meter_response(resp, move |usage, had_error| {
         let tokens = (usage.input_tokens + usage.output_tokens).max(0) as u64;
         if let Ok(mut p) = pool.lock() {
             if had_error {
@@ -402,6 +431,24 @@ async fn forward_direct(
             }
         }
     })
+    .await;
+    tag_direct(served, provider, &tag)
+}
+
+/// Tag a direct-route answer the same way the gateway tags a market one.
+///
+/// Direct never reaches the gateway, so there are no headers to copy — but a
+/// tool that sees provenance on some answers and none on others learns nothing
+/// from either. `self = 1` is not a judgement here, it is the definition: the
+/// direct route *is* the user's own subscription.
+fn tag_direct(mut resp: Response, provider: &str, model: &str) -> Response {
+    let headers = resp.headers_mut();
+    for (k, v) in [("x-asale-upstream", provider), ("x-asale-source", "direct"), ("x-asale-model", model), ("x-asale-self", "1")] {
+        if let Ok(value) = axum::http::HeaderValue::from_str(v) {
+            headers.insert(k, value);
+        }
+    }
+    resp
 }
 
 /// One market forward. Split out so the 401 self-heal below can replay the
@@ -481,6 +528,7 @@ async fn forward_market(
     }
 
     let status = resp.status();
+    log_provenance(resp.headers());
     if !status.is_success() {
         if meter {
             let task_id = format!("c_{}", uuid::Uuid::new_v4().simple());
@@ -494,7 +542,7 @@ async fn forward_market(
 
     let store = st.store.clone();
     let record = meter.then(|| (format!("c_{}", uuid::Uuid::new_v4().simple()), model));
-    stream_with_metering(resp, move |usage, had_error| {
+    meter_response(resp, move |usage, had_error| {
         let store = store.clone();
         let record = record.clone();
         async move {
@@ -506,6 +554,7 @@ async fn forward_market(
             }
         }
     })
+    .await
 }
 
 /// Rewrite a request body's `model`, so the forward — and the metering row that
@@ -533,6 +582,50 @@ fn extract_model_from_bytes(bytes: &[u8]) -> String {
         .unwrap_or_default()
 }
 
+/// Prefix on the gateway's provenance headers: which vendor actually served a
+/// market request, and whether it was the buyer's own account.
+///
+/// Kept end to end rather than consumed here. The tool on the other side of
+/// this proxy is the one that has to answer "did that go through Codex?", and
+/// nothing else in the response can tell it — the model id is the one it asked
+/// for and the text is in its own dialect.
+const PROVENANCE_PREFIX: &str = "x-asale-";
+
+/// Copy the gateway's provenance headers onto the response we hand the tool.
+fn copy_provenance(from: &reqwest::header::HeaderMap, to: &mut axum::http::HeaderMap) {
+    for (k, v) in from.iter() {
+        if k.as_str().starts_with(PROVENANCE_PREFIX) {
+            if let (Ok(name), Ok(value)) = (
+                axum::http::HeaderName::from_bytes(k.as_str().as_bytes()),
+                axum::http::HeaderValue::from_bytes(v.as_bytes()),
+            ) {
+                to.insert(name, value);
+            }
+        }
+    }
+}
+
+/// One log line naming the upstream a market request landed on, so the answer
+/// to "which subscription served this?" is in `~/.asale/asale.log` without
+/// anyone having to read the SQLite records back.
+fn log_provenance(headers: &reqwest::header::HeaderMap) {
+    let get = |k: &str| headers.get(k).and_then(|v| v.to_str().ok()).unwrap_or("");
+    let upstream = get("x-asale-upstream");
+    if upstream.is_empty() {
+        return; // an older gateway, or not a market response
+    }
+    let own = get("x-asale-self") == "1";
+    tracing::info!(
+        upstream,
+        source = get("x-asale-source"),
+        model = get("x-asale-model"),
+        task = get("x-asale-task"),
+        own_account = own,
+        "market request served{}",
+        if own { " by this account's own lane — it spends your own quota" } else { "" }
+    );
+}
+
 /// Pass a non-streamed upstream response straight through.
 fn passthrough(resp: reqwest::Response) -> Response {
     let status = resp.status();
@@ -542,11 +635,73 @@ fn passthrough(resp: reqwest::Response) -> Response {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/json")
         .to_string();
-    Response::builder()
+    // Taken before `bytes_stream()` consumes the response.
+    let upstream_headers = resp.headers().clone();
+    let mut out = Response::builder()
         .status(status)
         .header("content-type", ct)
         .body(Body::from_stream(resp.bytes_stream()))
-        .unwrap()
+        .unwrap();
+    copy_provenance(&upstream_headers, out.headers_mut());
+    out
+}
+
+/// Meter an upstream answer, whichever shape it arrived in, and hand it to the
+/// caller.
+///
+/// Streaming and non-streaming answers report usage in completely different
+/// places — SSE `data:` frames versus a `usage` object in a plain JSON body —
+/// and [`UsageScanner`] only knows the first. Sending every response through it
+/// meant a non-streaming call was metered as zero tokens on the buy side no
+/// matter what it spent: the same blind spot as the missing `input_tokens`, on
+/// the other half of the routes.
+async fn meter_response<F, Fut>(resp: reqwest::Response, finish: F) -> Response
+where
+    F: FnOnce(Usage, bool) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    let sse = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("event-stream"));
+    if sse {
+        stream_with_metering(resp, finish)
+    } else {
+        buffered_with_metering(resp, finish).await
+    }
+}
+
+/// Meter a non-streamed answer: the whole body is read, its `usage` object is
+/// what settles the call, and the bytes go on to the caller unchanged.
+async fn buffered_with_metering<F, Fut>(resp: reqwest::Response, finish: F) -> Response
+where
+    F: FnOnce(Usage, bool) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    let status = resp.status();
+    let ct = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    let upstream_headers = resp.headers().clone();
+
+    let body = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            // The answer is already lost; still settle, so the call is not
+            // recorded as having served nothing at no cost.
+            finish(Usage::default(), true).await;
+            return (StatusCode::BAD_GATEWAY, format!("upstream error: {e}")).into_response();
+        }
+    };
+    finish(asale_client_core::executor::usage_from_body(&body), false).await;
+
+    let mut out = Response::builder().status(status).header("content-type", ct).body(Body::from(body)).unwrap();
+    copy_provenance(&upstream_headers, out.headers_mut());
+    out
 }
 
 /// Stream the upstream body through while accumulating usage from SSE frames;
@@ -563,16 +718,20 @@ where
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/json")
         .to_string();
+    // Taken before the response is moved into the pump task below.
+    let upstream_headers = resp.headers().clone();
 
     let (tx, rx) = mpsc::unbounded_channel::<Result<axum::body::Bytes, std::io::Error>>();
     tokio::spawn(async move {
-        let mut usage = Usage::default();
+        // Same scanner the publisher side uses: a usage frame split across two
+        // transport chunks would otherwise meter the call as zero tokens.
+        let mut scan = UsageScanner::new();
         let mut had_error = false;
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(b) => {
-                    accumulate_usage(&mut usage, &b);
+                    scan.push(&b);
                     if tx.send(Ok(b)).is_err() {
                         break; // client went away; still finish metering below
                     }
@@ -584,16 +743,18 @@ where
                 }
             }
         }
-        finish(usage, had_error).await;
+        finish(scan.flush(), had_error).await;
     });
 
     let stream = futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|item| (item, rx)) });
-    Response::builder()
+    let mut out = Response::builder()
         .status(status)
         .header("content-type", ct)
         .header("x-accel-buffering", "no")
         .body(Body::from_stream(stream))
-        .unwrap()
+        .unwrap();
+    copy_provenance(&upstream_headers, out.headers_mut());
+    out
 }
 
 #[cfg(test)]
@@ -925,6 +1086,61 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 403);
+    }
+
+    /// POST to an arbitrary path, for the `/{tool}` addressing forms.
+    async fn post_to(port: u16, path: &str, model: &str) -> reqwest::Response {
+        asale_client_core::http::plain()
+            .post(format!("http://127.0.0.1:{port}{path}"))
+            .json(&serde_json::json!({"model": model, "messages": []}))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_prefixed_request_is_gated_by_its_own_tools_switch() {
+        // OpenClaw speaks the same wire format as Codex, so without the prefix
+        // this request would be gated on Codex's switch and handed Codex's
+        // model list. The prefix is the only thing that distinguishes them.
+        let st = state(Some("sk-x")).await;
+        st.store.set_buy_tool("openclaw", Some(false), None, None, None).await.unwrap();
+        let port = serve(st).await;
+
+        let resp = post_to(port, "/openclaw/v1/chat/completions", "claude-fable-5").await;
+        assert_eq!(resp.status(), 403, "openclaw is off, and it is openclaw's switch that decides");
+        assert!(resp.text().await.unwrap().contains("openclaw"), "the refusal names the tool that is off");
+
+        // Codex, still on, is unaffected by its neighbour's switch.
+        let resp = post_to(port, "/v1/chat/completions", "claude-fable-5").await;
+        assert_eq!(resp.status(), 502, "codex passes its own gate and reaches routing");
+    }
+
+    #[tokio::test]
+    async fn a_prefix_naming_no_known_tool_is_refused_rather_than_forwarded() {
+        // These routes match any leading segment. An unrecognized one has no
+        // switch behind it, so serving it would spend the balance ungated.
+        let port = serve(state(Some("sk-x")).await).await;
+        let resp = post_to(port, "/not-a-tool/v1/messages", "claude-fable-5").await;
+        assert_eq!(resp.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn the_prefix_is_not_forwarded_upstream() {
+        let (addr, rx) = capturing_gateway().await;
+        let mut st = state(Some("sk-x")).await;
+        st.server_api_base = format!("http://{addr}");
+        st.store.set_buy_tool("openclaw", Some(true), Some(&[]), None, None).await.unwrap();
+        let port = serve(st).await;
+
+        let resp = post_to(port, "/openclaw/v1/chat/completions", "claude-fable-5").await;
+        assert_eq!(resp.status(), 200);
+        let raw = rx.await.unwrap();
+        let request_line = String::from_utf8_lossy(&raw).lines().next().unwrap_or_default().to_string();
+        assert!(
+            request_line.starts_with("POST /v1/chat/completions"),
+            "the gateway serves the dialect path, not our addressing prefix — got {request_line:?}"
+        );
     }
 
     async fn serve(st: ProxyState) -> u16 {
