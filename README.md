@@ -133,6 +133,18 @@ download section — Windows and Linux bundles have to be produced on the matchi
 2. There is no step two. Bundles are signed with a Developer ID certificate and notarized
    by Apple, so macOS opens them without a warning.
 
+### Installing on Windows
+
+1. Download the `-setup.exe` (or the `.msi`) and run it.
+2. Installers are Authenticode-signed, so the UAC prompt shows the publisher name. A
+   freshly issued certificate has not built up SmartScreen reputation yet, so early
+   releases may still show "Windows protected your PC" — **More info → Run anyway**. You
+   can confirm the download is intact first with
+   `Get-AuthenticodeSignature .\Asale_x.y.z_x64-setup.exe`, which must report `Valid`.
+3. On first run Windows asks about the firewall: the client listens on localhost only (the
+   proxy your CLI talks to), so **Cancel** is fine — allow it only if you intend to run in
+   remote B/S mode.
+
 Once installed the app stays resident in the background (menu bar icon), supports launch
 at login, and updates itself. **Closing the window does not quit it** — Asale keeps selling
 from the tray. Click the tray icon for a small panel with the live figures, a button for

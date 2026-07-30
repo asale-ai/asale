@@ -50,11 +50,24 @@
 #                                          file; this workflow writes it out to the
 #                                          APPLE_API_KEY_PATH that tauri expects.
 #                                          Do not configure both groups — tauri only uses one.
-#     TAURI_WINDOWS_CERT_THUMBPRINT        Not set → the installer trips SmartScreen's
-#                                          "unknown publisher" warning
+#     Windows Authenticode signing, via Azure Artifact Signing (formerly Trusted Signing).
+#     Not configured → the installer trips SmartScreen's "unknown publisher" warning.
+#     All six or none: with a partial set package.ps1 fails the job rather than quietly
+#     shipping an unsigned installer.
+#       AZURE_CLIENT_ID / AZURE_CLIENT_SECRET / AZURE_TENANT_ID
+#                                          App Registration credentials; the registration
+#                                          needs the certificate-profile signer role granted
+#                                          on the signing account, or every sign call 403s.
+#       (plus the three AZURE_ARTIFACT_SIGNING_* variables below — endpoint, account and
+#        certificate profile are not secrets, so they live in Variables)
 #
 #   Variables (optional; left empty, the production defaults from .env.example are used)
 #     ASALE_SERVER_API / ASALE_GATEWAY_API / ASALE_GATEWAY_WS / ASALE_PROXY_PORT
+#     AZURE_ARTIFACT_SIGNING_ENDPOINT      Regional endpoint of the signing account,
+#                                          e.g. https://wus2.codesigning.azure.net
+#     AZURE_ARTIFACT_SIGNING_ACCOUNT       Signing account name
+#     AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE
+#                                          Certificate profile name inside that account
 
 name: release
 
@@ -175,7 +188,14 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
-          TAURI_WINDOWS_CERT_THUMBPRINT: ${{ secrets.TAURI_WINDOWS_CERT_THUMBPRINT }}
+          # Windows Authenticode via Azure Artifact Signing. Only the three credentials are
+          # secrets; endpoint/account/profile are names, kept as Variables.
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          AZURE_ARTIFACT_SIGNING_ACCOUNT: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE: ${{ vars.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
           # Mind the evaluation order: GitHub's && / || return an operand, not a boolean, so
           # `A && inputs.sign || true` swallows sign=false via the `|| true`.
           SIGN: ${{ github.event_name != 'workflow_dispatch' || inputs.sign }}
@@ -231,7 +251,10 @@ jobs:
           # of the "skip signing" we want).
           for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
                       APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID \
-                      APPLE_API_ISSUER APPLE_API_KEY TAURI_WINDOWS_CERT_THUMBPRINT; do
+                      APPLE_API_ISSUER APPLE_API_KEY \
+                      AZURE_CLIENT_ID AZURE_CLIENT_SECRET AZURE_TENANT_ID \
+                      AZURE_ARTIFACT_SIGNING_ENDPOINT AZURE_ARTIFACT_SIGNING_ACCOUNT \
+                      AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE; do
             value="${!name}"
             [[ -n "$value" ]] || continue
             # Heredoc form: for a multi-line base64 certificate, `NAME=value` would corrupt $GITHUB_ENV.
@@ -262,10 +285,52 @@ jobs:
         if: runner.os != 'Windows'
         run: ./scripts/package.sh ${{ (github.event_name == 'workflow_dispatch' && !inputs.sign) && '--no-sign' || '' }}
 
+      # Authenticode signing tooling. Only needed when the Azure credentials are actually
+      # configured — the previous step wrote them to $GITHUB_ENV only if non-empty, so this
+      # `env.` check doubles as "is Windows signing set up at all".
+      #
+      # artifact-signing-cli (the renamed trusted-signing-cli) drives signtool with
+      # Microsoft's signing dlib, which it downloads from NuGet on first run and which needs
+      # a .NET runtime. signtool itself and the Azure CLI are located by package.ps1 — the
+      # tool's built-in defaults hardcode one specific Windows SDK version.
+      #
+      # cargo install compiles from source (~2-3 min, not covered by rust-cache). Version is
+      # pinned so a release build cannot change signing behavior on its own.
+      - name: Windows signing tooling
+        if: runner.os == 'Windows' && env.AZURE_CLIENT_ID != ''
+        shell: pwsh
+        run: |
+          cargo install artifact-signing-cli --version ^0.11 --locked
+
+      # v5 already runs on node24; setup-dotnet is only here for the signing dlib.
+      - uses: actions/setup-dotnet@v5
+        if: runner.os == 'Windows' && env.AZURE_CLIENT_ID != ''
+        with:
+          dotnet-version: "8.0.x"
+
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: pwsh scripts/package.ps1 ${{ (github.event_name == 'workflow_dispatch' && !inputs.sign) && '-NoSign' || '' }}
+
+      # Signing configured but the installers came out unsigned is the one failure mode that
+      # looks green all the way to the download page, so assert it here rather than trusting
+      # that the signCommand ran.
+      # Skipped on a sign=false trial run: package.ps1 treats -NoSign as "sign nothing", so
+      # there would be no signature to verify.
+      - name: Verify Authenticode signature
+        if: runner.os == 'Windows' && env.AZURE_CLIENT_ID != '' && (github.event_name != 'workflow_dispatch' || inputs.sign)
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem "${{ matrix.bundle }}" -Recurse -Include *.msi, *-setup.exe)
+          if (-not $files) { throw "no installers found under ${{ matrix.bundle }}" }
+          $bad = @()
+          foreach ($f in $files) {
+            $sig = Get-AuthenticodeSignature $f.FullName
+            Write-Host ("{0,-12} {1}" -f $sig.Status, $f.Name)
+            if ($sig.Status -ne "Valid") { $bad += "$($f.Name): $($sig.Status) — $($sig.StatusMessage)" }
+          }
+          if ($bad) { throw "Authenticode verification failed:`n$($bad -join "`n")" }
 
       # Artifacts are scattered across bundle/ subdirectories (dmg/, nsis/, deb/…); flatten
       # them into one directory so the download is ready to drop onto the download site.
@@ -330,6 +395,9 @@ jobs:
 
           Before publishing, confirm:
           - the macOS .dmg is signed and notarized (otherwise other machines report it as damaged)
-          - the Windows installer is Authenticode-signed (otherwise SmartScreen warns)
+          - the Windows installer is Authenticode-signed — the build asserts this when the
+            Azure credentials are configured, but on a fresh Windows machine also check that
+            \`Get-AuthenticodeSignature\` reports Valid and that SmartScreen stays quiet
+            (a brand-new certificate has no reputation yet and can still warn for a while)
           - every bundle has a matching .sig next to it (required for auto-update)
           - install once and verify login and going on the market, then publish manually"

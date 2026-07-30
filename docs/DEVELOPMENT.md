@@ -103,8 +103,8 @@ pwsh scripts/package.ps1                      # on Windows → .msi / .exe
 Besides assembling the `pnpm tauri build` invocation, the scripts catch a few things up
 front that would otherwise only surface on a user's machine: endpoints must be https/wss
 (the client also rejects plaintext remote addresses at runtime), the public key must not be
-empty, the Linux webkit2gtk-4.1 dependency, and a warning when the Apple certificate is
-missing on macOS.
+empty, the Linux webkit2gtk-4.1 dependency, and a warning when the code signing credentials
+are missing (the Apple certificate on macOS, the Azure ones on Windows).
 
 Tauri cannot cross-compile bundles: `.dmg` only on macOS, `.msi`/`.exe` only on Windows,
 `.deb`/`.AppImage` only on Linux. Three platforms = three machines — or push a `v*` tag and
@@ -160,6 +160,37 @@ repo's `public/download/`). macOS bundles are signed with a Developer ID certifi
 notarized by Apple, so Gatekeeper lets them through silently — this happens inside
 `tauri build` and needs the `APPLE_*` secrets listed in `.github/workflows/release.yml`.
 Build without those and you get an ad-hoc-signed bundle that only runs on your own machine.
+
+### Code signing
+
+Two entirely separate things, easy to conflate:
+
+- the `.sig` next to every artifact is **minisign**, produced from `asale-updater.key`, and
+  only the auto-updater cares about it;
+- **Authenticode / Developer ID** is what the OS checks when a user double-clicks the
+  installer. Without it Windows shows "unknown publisher" and macOS reports the app as
+  damaged.
+
+`--no-sign` / `-NoSign` means "sign nothing" — on Windows `package.ps1` also skips the
+Authenticode step, so a trial build never needs the Azure credentials.
+
+Windows goes through [Azure Artifact Signing](https://learn.microsoft.com/en-us/azure/trusted-signing/)
+(formerly Trusted Signing): the private key stays in Microsoft's HSM, so the build machine
+only holds an App Registration client secret and there is no `.pfx` to leak. The six
+variables are listed in `.env.example`; `package.ps1` turns them into a
+`bundle.windows.signCommand` that calls [`artifact-signing-cli`](https://github.com/levminer/trusted-signing-cli)
+(`cargo install artifact-signing-cli`, plus .NET 8, the Azure CLI and the Windows SDK's
+signtool). Give all six or none — a partial set fails the build, because the alternative is
+shipping an unsigned installer while believing it was signed.
+
+The signing config is deliberately **not** in `tauri.conf.json`: `certificateThumbprint` or
+`signCommand` sitting there makes every build on a machine without the credentials fail at
+the signing step, which would break local trial builds. It is merged in at build time with
+`tauri build --config` instead. Note that no `TAURI_WINDOWS_*` environment variable exists —
+Tauri reads Windows signing settings from the config only.
+
+New certificates start with no SmartScreen reputation, so the first few releases may still
+warn even when correctly signed; reputation accrues per certificate as downloads add up.
 
 ---
 
