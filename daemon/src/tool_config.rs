@@ -173,20 +173,42 @@ pub fn tool_dir(tool: &str) -> PathBuf {
         "codex" => home().join(".codex"),
         "gemini" => home().join(".gemini"),
         "openclaw" => home().join(".openclaw"),
-        // Hermes is the one tool that does not live under a dot-directory in
-        // `$HOME`. Its installer writes `HERMES_HOME` as a user environment
-        // variable — `%LOCALAPPDATA%\hermes` on Windows — and the agent reads
-        // its config from there; `~/.hermes` is only the fallback when that
-        // variable is unset. Assuming the fallback pointed asale at a directory
-        // that does not exist on a normal Windows install, so the switch wrote
-        // a config Hermes would never read.
-        "hermes" => std::env::var("HERMES_HOME")
-            .ok()
-            .map(|h| PathBuf::from(h.trim()))
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| home().join(".hermes")),
+        "hermes" => hermes_home(),
         _ => home().join(".asale-unknown"),
     }
+}
+
+/// Hermes' own home — the one tool that does not keep its config in a
+/// dot-directory under `$HOME`.
+///
+/// `HERMES_HOME` is the answer when it is set: Hermes' installer writes it as a
+/// *user* environment variable and the agent reads its config from there. But a
+/// process that was already running when Hermes was installed does not have it
+/// — the installer says as much ("restart your terminal") — and the
+/// `~/.hermes` fallback in Hermes' own source is the POSIX default, not the
+/// Windows one, where the installer's default is `%LOCALAPPDATA%\hermes`.
+///
+/// Taking the fallback literally is what made the buy switch write a config to
+/// a directory Hermes would never look at, on the machine it was tested on.
+/// So an existing config decides it before the default does.
+fn hermes_home() -> PathBuf {
+    if let Some(h) = std::env::var("HERMES_HOME")
+        .ok()
+        .map(|h| PathBuf::from(h.trim()))
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        return h;
+    }
+    let dotted = home().join(".hermes");
+    let local = std::env::var_os("LOCALAPPDATA").map(|l| PathBuf::from(l).join("hermes"));
+    for candidate in [Some(dotted.clone()), local].into_iter().flatten() {
+        if candidate.join("config.yaml").is_file() {
+            return candidate;
+        }
+    }
+    // Nothing installed yet: the portable default, which is also where a
+    // POSIX install puts it.
+    dotted
 }
 
 /// Every file `apply` may rewrite, in write order.
