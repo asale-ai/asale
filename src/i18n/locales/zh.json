@@ -28,12 +28,9 @@
     "walletBalance": "钱包余额",
     "sellAccountsCount": "{{total}} 个账号中 {{on}} 个在卖",
     "buyState": "买入",
-    "sellTitle": "卖出",
-    "sellDesc": "各账号的卖出开关与今日用量。",
     "noSellAccounts": "还没有连接出售账号。",
+    "goWallet": "前往钱包",
     "goPublish": "前往卖出",
-    "buyTitle": "买入",
-    "buyDesc": "哪些本机工具走 Asale，以及各自可买的模型。",
     "goConsume": "前往买入",
     "toolInstalled": "已安装",
     "toolNotFound": "未检测到",
@@ -41,7 +38,6 @@
     "buySubHint": "没有工具在买入",
     "buyingOn": "开启",
     "buyingOff": "关闭",
-    "sellOn": "卖出中",
     "sellOff": "未卖出",
     "usedToday": "今日已卖",
     "buyOn": "买入中",
@@ -50,8 +46,25 @@
     "buyModels": "模型",
     "anyModel": "不限",
     "walletSub": "可用于买入",
-    "noSellAccountsTitle": "还没有连接订阅账号",
-    "goConnect": "去连接账号"
+    "earnedToday": "今日卖出 +{{amount}} USDT",
+    "goConnect": "去连接账号",
+    "map": {
+      "title": "你所在的网络",
+      "desc": "颜色越深表示用户越多，线条越亮表示流转的 token 越多。国家来自每位用户自己填写的资料 — 这里不读取任何 IP 地址。",
+      "legendUsers": "用户",
+      "legendFlow": "Token 流向",
+      "legendYou": "你在这里",
+      "legendLess": "较少",
+      "legendMore": "较多",
+      "statCountries": "国家/地区",
+      "statUsers": "用户",
+      "statTokens": "Token / 24 小时",
+      "statLanes": "活跃通道",
+      "tipUsers": "{{count}} 位用户",
+      "tipTokens": "{{tokens}} token / 24 小时",
+      "tipYou": "你所在的国家/地区",
+      "unknownRegion": "未填写地区"
+    }
   },
   "status": {
     "starting": {
@@ -129,14 +142,16 @@
     "title": "卖出",
     "sub": "每个已连接的订阅账号都有独立的卖出开关和每日限额。",
     "connectTitle": "连接订阅",
-    "connectDesc": "OAuth 登录会打开浏览器。令牌保存在系统钥匙串中，绝不上传。",
+    "connectDesc": "OAuth 登录会打开浏览器。令牌保存在本地，绝不上传。",
     "connected": "已连接 {{provider}}（{{account}}）。",
     "accountsTitle": "订阅账号",
     "accountsDesc": "每个已连接的账号单独列出。打开你想卖出的账号并分别设置每日限额，未打开的账号不会用于市场请求。",
     "accountsEmpty": "暂无账号 — 可通过上方 OAuth 连接，或在下方从本机 CLI 导入。",
     "remove": "移除",
-    "quotaLeft": "窗口剩余（估算）",
-    "expires": "过期时间",
+    "quotaLeft": "5 小时窗口剩余（估算）",
+    "windowUsed": "本窗口已售出（5 小时）",
+    "usedTodayFact": "今日已售出（UTC）",
+    "expiredHint": "该凭证已失效或无法自动刷新，请重新连接账号后再卖出。",
     "statusAvailable": "可用",
     "statusCooldown": "冷却中",
     "statusExpired": "已过期",
@@ -163,6 +178,7 @@
     "limitSave": "保存",
     "limitSaved": "已保存",
     "limitUnlimited": "不限量——仅受套餐本身限制",
+    "limitUnlimitedKey": "不限量——仅受该 API Key 的余额限制",
     "ofSubscription": "占订阅日额度",
     "cliRescan": "重新导入",
     "cliRescanHint": "重新扫描本机 CLI 凭据并导入（启动时已自动执行一次）",
@@ -186,7 +202,8 @@
       "paused": "已暂停",
       "off": "未开启",
       "expired": "需重新登录",
-      "exhausted": "额度用尽"
+      "exhausted": "额度用尽",
+      "withheld": "因价格停售"
     },
     "lanePause": {
       "rate_limit": "触发限流",
@@ -196,11 +213,36 @@
       "manual": "已暂停",
       "cooldown": "冷却中",
       "quarantined": "已被平台暂停",
-      "untradable": "平台未开放共享"
+      "untradable": "平台未开放共享",
+      "price": "价格低于区间"
     },
     "limitEdit": "修改限额",
     "limitCancel": "取消",
-    "limitNoCap": "不限"
+    "limitNoCap": "不限",
+    "limitReached": "已达每日卖出限额（{{limit}} tokens）——该订阅下所有模型已停止卖出，UTC 次日零点恢复。",
+    "bandLabel": "市场价 ≥ 此百分比时才卖出（占原价）",
+    "bandMin": "可接受的最低价（占原价百分比）",
+    "bandEdit": "修改卖出价格下限",
+    "bandNone": "不限价格",
+    "bandHintOff": "市场出什么价都卖。设一个底价，价格过低时就自动停售。",
+    "rank": {
+      "title": "各模型当前市场价（占原价）",
+      "onSaleOfTotal": "{{total}} 个模型中 {{n}} 个在卖",
+      "onSale": "可卖",
+      "heldOnPrice": "停售 · 价格",
+      "otherwiseOff": "其他原因停售",
+      "switchedOff": "开关未开",
+      "noBand": "未设底价",
+      "noPrices": "还没读到市场价——在读到之前所有模型照常卖出。",
+      "bandFloor": "底价：原价的 {{lo}}%",
+      "heldCount": "{{n}} 个因价格停售",
+      "showAll": "展开其余 {{n}} 个",
+      "showLess": "收起"
+    },
+    "unitTokensDay": "tokens / 天",
+    "unitOfList": "（占原价）",
+    "bandQuick": "快捷：",
+    "bandHintFloor": "仅当市场价不低于原价的 {{lo}}% 时卖出；低于该价格自动停售，价格回升后自动恢复。"
   },
   "consume": {
     "title": "买入",
@@ -276,6 +318,7 @@
     "payReceivedDesc": "正在等待链上确认（已 {{n}} 个），确认后会自动计入余额。",
     "payCredited": "已计入余额",
     "payCreditedDesc": "资金已进入可用余额，现在就能使用。",
+    "payReceiptSplit": "链上到账 {{gross}} USDT · 充值手续费 {{fee}} USDT",
     "payAgain": "再充一笔",
     "availableHint": "可用余额：{{amount}} USDT",
     "tabDeposit": "充值",
@@ -293,6 +336,7 @@
     "factCredit": "到账",
     "factCreditVal": "链上确认后自动入账",
     "factDepositFee": "充值手续费",
+    "feeFree": "免费",
     "factDepositMin": "最低充值",
     "factMin": "最低提现",
     "factMaxSingle": "单笔上限",
@@ -546,7 +590,7 @@
   },
   "settings": {
     "title": "设置",
-    "sub": "应用行为：开机自启、软件更新。关闭窗口时 Asale 会隐藏到系统托盘。",
+    "sub": "应用行为：浏览器访问、窗口与托盘、开机自启、软件更新。",
     "autostartTitle": "开机自启",
     "autostartDesc": "登录系统后自动启动 Asale——如果你在出售 Token，建议开启以保持在线。",
     "autostartLabel": "登录时启动 Asale",
@@ -594,7 +638,22 @@
     "proxyDirect": "直连（未使用代理）",
     "proxyEnvOverride": "环境变量 {{name}}={{value}} 已覆盖此处设置；如需在界面中控制，请清除该环境变量后重启 Asale 服务。",
     "daemonRunning": "运行中",
-    "daemonStopped": "未连接"
+    "daemonStopped": "未连接",
+    "webTitle": "网页模式",
+    "webDesc": "服务本身就带完整的应用界面，可以直接用浏览器打开——本机或局域网另一台机器都行。没有桌面环境的机器就是这么用 Asale 的。",
+    "webUrl": "应用地址",
+    "webUrlHint": "链接里的 token 就是访问凭证，拿到它就等于拿到这个账号，请当作密码对待。",
+    "webOpen": "在浏览器中打开",
+    "webBind": "监听地址",
+    "webRemotePill": "可被网络访问",
+    "webRemoteWarn": "服务正监听在其他机器也能访问的地址上。上面链接里的 token 是唯一的防线——请把端口放在防火墙后，或者前面加一层带 TLS 的反向代理。想改回只允许本机，重启服务：asale start --bind 127.0.0.1:9700",
+    "webLocalHint": "服务当前只监听本机。想从手机或另一台机器访问，用这条命令重启：asale start --web",
+    "webUnavailable": "应用地址还取不到——服务正在启动。",
+    "trayTitle": "窗口与托盘",
+    "trayDesc": "关掉窗口后 Asale 仍在出售。托盘图标会显示实时状态，点一下会弹出概览面板，里面有今日数据和真正的退出按钮。",
+    "trayCloseLabel": "关闭窗口时最小化到托盘",
+    "trayCloseHides": "关闭窗口后 Asale 继续运行并出售，要退出请用托盘面板。",
+    "trayCloseQuits": "关闭窗口即退出 Asale，出售也随之停止。"
   },
   "common": {
     "copy": "复制",
@@ -795,5 +854,12 @@
       "declined": "{{provider}} 登录被拒绝。",
       "unsupportedProvider": "该服务不使用设备码登录（仅 Kimi 与 Grok 支持）。"
     }
+  },
+  "tray": {
+    "openDesktop": "打开桌面窗口",
+    "openWeb": "在浏览器中打开",
+    "quit": "完全退出",
+    "quitNote": "退出后停止出售；关闭窗口只是收进托盘。",
+    "earnedToday": "今日收入"
   }
 }

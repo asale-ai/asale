@@ -2,6 +2,7 @@
 import { useState, type ReactNode, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import { IconCopy, IconCheck, IconAlert } from "./icons";
+import { brandGlyph } from "./brand-marks";
 
 /* Copy-to-clipboard hook: returns [copied, copy]. */
 export function useCopy(resetMs = 1600): [boolean, (text: string) => void] {
@@ -108,20 +109,15 @@ export function PageSkeleton() {
   );
 }
 
-/* Identity mark for a provider / CLI (Claude, Codex, Gemini …).
-   Deliberately monochrome and shared by every page: a screenful of vendor
-   colours is the loudest thing on the screen and says nothing the label next
-   to it does not already say. The tile it sits in carries the state instead. */
-const MARK_LETTER: Record<string, string> = {
-  claude: "C", claude_work: "C", codex: "O", gemini: "G",
-  kimi: "K", kimi_api: "K", xai: "X", xai_api: "X",
-};
+/* Identity mark for a provider / CLI (Claude, Codex, Gemini …) — the vendor's
+   own logo, so a row is recognisable before its label is read. Shared by every
+   page; see brand-marks.tsx for the artwork and why colour lives in the glyph
+   but never encodes state. Anything we have no mark for falls back to its
+   initial, which is what the whole app used to do. The tile carries the state. */
 export function Mark({ id, size = "md" }: { id: string; size?: "md" | "sm" }) {
-  // Exact id first — some ids are prefixes of others (`kimi`/`kimi_api`).
-  const key = id in MARK_LETTER ? id : Object.keys(MARK_LETTER).find((k) => id.startsWith(k));
   return (
     <span className={`mark ${size}`} aria-hidden>
-      {key ? MARK_LETTER[key] : id.charAt(0).toUpperCase()}
+      {brandGlyph(id) ?? id.charAt(0).toUpperCase()}
     </span>
   );
 }
@@ -197,18 +193,32 @@ export function IconAction({
 }
 
 /* A headline number. `primary` gets the brand wash — one per row at most,
-   otherwise nothing stands out. */
+   otherwise nothing stands out.
+
+   Three rows, always in the same places, so a row of tiles reads as one object:
+   the label and — opposite it — `state`, whether the thing is on; then the
+   headline itself; then `sub` with `foot` (the page that manages it) at the far
+   end. The last row is pinned to the bottom, so tiles of unequal content still
+   line their links up. */
 export function StatTile({
-  icon, label, value, sub, primary = false, loading = false,
+  icon, label, state, value, sub, foot, primary = false, loading = false,
 }: {
-  icon?: ReactNode; label: string; value: ReactNode; sub?: ReactNode;
-  primary?: boolean; loading?: boolean;
+  icon?: ReactNode; label: string; state?: ReactNode; value: ReactNode;
+  sub?: ReactNode; foot?: ReactNode; primary?: boolean; loading?: boolean;
 }) {
   return (
     <div className={`stat-tile${primary ? " primary" : ""}`}>
-      <div className="st-label">{icon}<span>{label}</span></div>
-      <div className="st-value">{loading ? <Skeleton w={96} h={28} r={9} /> : value}</div>
-      {sub !== undefined && <div className="st-sub">{loading ? <Skeleton w={64} h={12} /> : sub}</div>}
+      <div className="st-label">
+        {icon}<span>{label}</span>
+        {state !== undefined && <span className="st-state">{loading ? <Skeleton w={52} h={13} /> : state}</span>}
+      </div>
+      <div className="st-value">{loading ? <Skeleton w={96} h={26} r={9} /> : value}</div>
+      {(sub !== undefined || foot !== undefined) && (
+        <div className="st-bottom">
+          {sub !== undefined && <div className="st-sub">{loading ? <Skeleton w={64} h={12} /> : sub}</div>}
+          {foot}
+        </div>
+      )}
     </div>
   );
 }

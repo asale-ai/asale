@@ -12,6 +12,12 @@
 # macOS is not split into arm/intel: package.sh defaults to universal-apple-darwin, one
 # bundle covers both, and the download page is written for a single universal .dmg.
 #
+# Every job also produces `asale-cli-<version>-<platform>.{tar.gz,zip}`: the `asale`
+# command line plus the `asaled` service, neither of which links webkit/GTK. That archive
+# is the whole install on a machine with no desktop — asaled serves the web UI itself — and
+# it is what https://asale.ai/dl/install.sh downloads. Linux is x86_64 only for now; arm64
+# boxes have to build it themselves with `./scripts/package.sh --cli-only`.
+#
 # Triggers: pushing a v* tag, or a manual workflow_dispatch.
 #
 # Must be configured in the repository (Settings → Secrets and variables → Actions):
@@ -272,7 +278,8 @@ jobs:
               -name '*.dmg' -o -name '*.app.tar.gz' \
               -o -name '*.msi' -o -name '*-setup.exe' -o -name '*.nsis.zip' \
               -o -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \
-              -o -name '*.sig' \) \
+              -o -name '*.sig' \
+              -o -name 'asale-cli-*.tar.gz' -o -name 'asale-cli-*.zip' \) \
             -exec cp {} artifacts/ \;
           ls -lh artifacts/
           # Zero files = packaging failed silently (e.g. only a bare executable came out).

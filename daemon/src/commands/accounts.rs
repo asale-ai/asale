@@ -276,6 +276,19 @@ pub(crate) async fn drop_legacy_placeholder(state: &AppState, provider: &str, im
     }
 }
 
+/// Whether this credential is a metered platform key rather than a plan
+/// subscription. A key is billed against a balance: it has no rolling window and
+/// no plan cap, so every window-derived number the Sell page shows would be a
+/// fabrication for it — the UI hides them and leans on the daily sell cap
+/// instead. Three ways one gets here: the key-only providers, a key pasted into
+/// asale (`origin = api_key`), and a key lifted out of an installed CLI's
+/// credential file, which `cli_import` labels with this exact account id.
+fn is_key_credential(provider: &str, account_id: &str, origin: Option<&str>) -> bool {
+    origin == Some("api_key")
+        || account_id == "api-key"
+        || Provider::from_str_opt(provider).is_some_and(asale_protocol::ids::is_api_key_provider)
+}
+
 /// Every connected subscription account, one row each — the Sell page lists
 /// these and switches them on/off individually. Each row carries the live pool
 /// status plus everything the per-account sell limit UI needs:
@@ -286,6 +299,8 @@ pub(crate) async fn drop_legacy_placeholder(state: &AppState, provider: &str, im
 ///   - `window_cap` / `daily_cap`          — its plan's 5h cap and the daily
 ///                                           equivalent (×24/5), so a cap can be
 ///                                           expressed as a % of the plan.
+///   - `key_based`                         — a metered key, so the window
+///                                           numbers above do not apply to it.
 ///   - `origin` / `shared_with_local_cli`  — whether the credential is asale's
 ///                                           own OAuth login or a copy of the
 ///                                           one an installed CLI is using.
@@ -329,21 +344,32 @@ pub async fn list_accounts(state: &AppState) -> R<Value> {
                 "shared_with_local_cli".into(),
                 json!(s.origin.as_deref() == Some("import")),
             );
+            obj.insert(
+                "key_based".into(),
+                json!(is_key_credential(&s.provider, &s.account_id, s.origin.as_deref())),
+            );
         }
         out.push(row);
     }
     Ok(json!(out))
 }
 
-/// Turn one account's sell switch on/off and set its daily token cap
-/// (0 = unlimited). Selling is per account, never per provider: switching one
-/// Claude account on leaves your other Claude accounts untouched.
+/// Turn one account's sell switch on/off and set its selling terms: the daily
+/// token cap (0 = unlimited) and the market discount band it will sell inside.
+/// Selling is per account, never per provider: switching one Claude account on
+/// leaves your other Claude accounts untouched.
+///
+/// Every argument past `enabled` is optional and means "leave this as it is" —
+/// the UI edits the switch, the cap and the band independently, and a form that
+/// only touched one of them must not reset the others.
 pub async fn set_account_sell(
     state: &AppState,
     provider: String,
     account_id: String,
     enabled: bool,
     daily_limit: Option<i64>,
+    min_ratio: Option<i64>,
+    max_ratio: Option<i64>,
 ) -> R<Value> {
     let tools = state.store.list_tools().await.map_err(err)?;
     let existing = tools
@@ -353,10 +379,19 @@ pub async fn set_account_sell(
     // Omitting dailyLimit keeps the account's current cap (the UI toggles the
     // switch and edits the cap independently).
     let limit = daily_limit.unwrap_or(existing.sell_daily_limit).max(0);
+    let (band_lo, band_hi) = asale_client_core::store::normalise_band(
+        min_ratio.unwrap_or(existing.sell_min_ratio),
+        max_ratio.unwrap_or(existing.sell_max_ratio),
+    );
 
     state
         .store
         .set_tool_sell(&provider, &account_id, enabled, limit)
+        .await
+        .map_err(err)?;
+    state
+        .store
+        .set_tool_ratio_band(&provider, &account_id, band_lo, band_hi)
         .await
         .map_err(err)?;
     accounts_changed(state).await;
@@ -366,6 +401,8 @@ pub async fn set_account_sell(
         "account_id": account_id,
         "sell_enabled": enabled,
         "sell_daily_limit": limit,
+        "sell_min_ratio": band_lo,
+        "sell_max_ratio": band_hi,
     }))
 }
 
@@ -567,4 +604,24 @@ pub async fn remove_account(state: &AppState, provider: String, account_id: Stri
     // directory from the table, so a removed account leaves nothing behind.
     accounts_changed(state).await;
     Ok(removed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Sell page hides every window-derived figure for these, so the
+    /// classifier has to catch all three shapes a key arrives in — including a
+    /// key lifted out of `~/.codex/auth.json`, whose only marker is the account
+    /// id `cli_import` gives it.
+    #[test]
+    fn a_key_is_told_apart_from_a_plan_subscription() {
+        assert!(is_key_credential("kimi_api", "me@x.com", Some("api_key")));
+        assert!(is_key_credential("xai_api", "me@x.com", Some("import")));
+        assert!(is_key_credential("codex", "api-key", Some("import")));
+
+        assert!(!is_key_credential("claude", "me@x.com", Some("import")));
+        assert!(!is_key_credential("codex", "me@x.com", Some("oauth")));
+        assert!(!is_key_credential("kimi", "me@x.com", Some("oauth")));
+    }
 }

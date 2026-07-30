@@ -34,6 +34,20 @@
 //! Rate limits and spent quota are not faults: they pause the lane with a
 //! `resume_at` and come back on their own. A failed auth needs the operator to
 //! sign in again, so it is manual from the first occurrence.
+//!
+//! # The price band (§4.6)
+//!
+//! A lane can also be held back for a reason that is not a fault at all: the
+//! market price has moved outside the band its account is willing to sell in.
+//! That is a *price* decision, so it is kept apart from the pause ladder above
+//! — it needs no operator, has no resume instant, and must not consume a rung
+//! of the breaker. See [`LaneState::price_withheld`] and [`apply_price_band`].
+//!
+//! Prices here are always **percent of the vendor's list price** (`10..=100`,
+//! the range the server clamps `mkt_ratio` to), never percent off it. That is
+//! the number the seller decides about — "I will not sell below 60% of list" —
+//! and keeping one convention end to end is what stops a band from silently
+//! meaning its own inverse.
 
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -115,12 +129,29 @@ pub struct LaneState {
     pub resume_at: i64,
     /// Last upstream error, for the UI.
     pub last_error: String,
+    /// What the market currently pays for this model, in whole percent of the
+    /// vendor's list price. `None` until the device has seen a price for it —
+    /// which is not the same as 0, and must never be read as "free".
+    pub ratio: Option<i32>,
+    /// Held back because the price above sits outside the account's band.
+    /// Not a `paused` reason: nothing is wrong with this lane, so it takes no
+    /// rung of the breaker ladder and needs no operator to come back.
+    pub price_withheld: bool,
+    /// When the price first came back inside the band, while withheld. The lane
+    /// returns only after it has stayed there for the dwell time — see
+    /// [`apply_price_band`]. 0 = not waiting.
+    pub price_ok_since: i64,
+    /// The band the two fields above were decided under. Editing the band is
+    /// the operator changing their mind, not the market moving, so it clears
+    /// the hysteresis: someone who has just widened their floor expects the
+    /// lane back now, not in three minutes.
+    pub price_band: Option<(i64, i64)>,
 }
 
 impl LaneState {
     /// Whether this lane may serve market traffic at `now`.
     pub fn servable(&self, now: i64) -> bool {
-        self.paused.is_none() && !self.cooldown_until.is_some_and(|c| c > now)
+        self.paused.is_none() && !self.cooldown_until.is_some_and(|c| c > now) && !self.price_withheld
     }
 
     /// The next instant at which this lane's state changes by itself, if any.
@@ -136,6 +167,93 @@ impl LaneState {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         }
+    }
+}
+
+/// Percentage points the price has to move back *past* the band's edge before a
+/// withheld lane returns.
+///
+/// Without it a price parked exactly on the edge would withdraw and re-enter on
+/// alternate ticks, and every one of those flips is a supply re-declaration the
+/// gateway has to reconcile.
+pub const PRICE_BAND_MARGIN_PCT: i32 = 2;
+
+/// How long the price must stay inside the band before a withheld lane returns.
+///
+/// Withdrawal is immediate and re-entry is slow on purpose, and the asymmetry
+/// is about the market, not about this device: sell-side supply is what the
+/// server's pricing loop divides demand by, so a fleet of devices that all
+/// re-enter the instant the price recovers collapses the ratio again and the
+/// whole market saws. Waiting out several pricing minutes — plus the per-lane
+/// jitter `apply_price_band` takes — spreads the return across them.
+pub const PRICE_REENTRY_DWELL_SECS: i64 = 180;
+
+/// Extra dwell, in seconds, before this particular lane rejoins the market.
+///
+/// Deterministic (so it does not re-roll every rebuild and reset the wait) and
+/// derived from the account rather than the device, because the devices that
+/// would otherwise return in lockstep are the ones holding the *same*
+/// subscriptions across a fleet.
+fn reentry_jitter(account_id: &str, model: &str) -> i64 {
+    // FNV-1a, 64-bit — a hash, not a checksum: all this needs is that two
+    // different lanes land on different offsets.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in account_id.bytes().chain(b":".iter().copied()).chain(model.bytes()) {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    (h % (PRICE_REENTRY_DWELL_SECS as u64)) as i64
+}
+
+/// Apply an account's price band to one lane, with hysteresis.
+///
+/// `ratio` is what the market currently pays for the model, in whole percent of
+/// list price (`None` = not known yet), `band` is the account's `(min, max)` on
+/// that same scale, and `jitter` is extra dwell time for this particular lane,
+/// so that two devices holding the same subscription do not return in the same
+/// second.
+///
+/// An unknown price never withholds: a device that has not managed to read the
+/// market yet should keep selling on the terms it already had, not take itself
+/// off the market because it is offline.
+pub fn apply_price_band(lane: &mut LaneState, ratio: Option<i32>, band: (i64, i64), jitter: i64, now: i64) {
+    lane.ratio = ratio;
+    if lane.price_band != Some(band) {
+        lane.price_band = Some(band);
+        lane.price_withheld = false;
+        lane.price_ok_since = 0;
+    }
+    let (lo, hi) = (band.0 as i32, band.1 as i32);
+    let Some(d) = ratio else {
+        // No price to judge: release anything held on the last one rather than
+        // leaving the lane stuck off for as long as the market is unreachable.
+        lane.price_withheld = false;
+        lane.price_ok_since = 0;
+        return;
+    };
+    if lane.price_withheld {
+        // Re-entry needs the price *past* the edge it left by, and held there.
+        let recovered = d >= lo + PRICE_BAND_MARGIN_PCT.min((hi - lo) / 2)
+            && d <= hi - PRICE_BAND_MARGIN_PCT.min((hi - lo) / 2);
+        if !recovered {
+            lane.price_ok_since = 0;
+            return;
+        }
+        if lane.price_ok_since == 0 {
+            lane.price_ok_since = now;
+            return;
+        }
+        if now - lane.price_ok_since >= PRICE_REENTRY_DWELL_SECS + jitter {
+            lane.price_withheld = false;
+            lane.price_ok_since = 0;
+        }
+        return;
+    }
+    // Leaving the band takes effect at once — the whole point of the band is
+    // not to sell at a price the operator rejected.
+    if d < lo || d > hi {
+        lane.price_withheld = true;
+        lane.price_ok_since = 0;
     }
 }
 
@@ -187,6 +305,11 @@ pub struct AccountRuntime {
     pub used_today: u64,
     /// Per-account daily sell cap in tokens; 0 = unlimited.
     pub sell_daily_limit: i64,
+    /// The price band this account sells inside, in whole percent *of* list
+    /// price. `(10, 100)` — the default and the whole legal range — never
+    /// withholds anything.
+    pub sell_min_ratio: i64,
+    pub sell_max_ratio: i64,
     pub cooldown_until: Option<i64>,
     /// Set on 401/403; cleared when a rebuild sees a newer expiry (refreshed).
     pub auth_failed: bool,
@@ -212,6 +335,8 @@ impl AccountRuntime {
             origin: None,
             used_today: 0,
             sell_daily_limit: 0,
+            sell_min_ratio: crate::store::RATIO_BAND_FULL.0,
+            sell_max_ratio: crate::store::RATIO_BAND_FULL.1,
             cooldown_until: None,
             auth_failed: false,
             last_used: 0,
@@ -297,6 +422,8 @@ pub struct AccountStatusView {
     pub origin: Option<String>,
     pub used_today: u64,
     pub sell_daily_limit: i64,
+    pub sell_min_ratio: i64,
+    pub sell_max_ratio: i64,
 }
 
 /// One `(account, model)` lane, as the UI and the declaration builder see it.
@@ -305,7 +432,7 @@ pub struct LaneStatusView {
     pub provider: String,
     pub account_id: String,
     pub model: String,
-    /// selling | cooldown | paused | off | expired | exhausted
+    /// selling | cooldown | paused | withheld | off | expired | exhausted
     pub status: String,
     pub paused_reason: Option<String>,
     /// True when the operator has to act before this lane sells again.
@@ -317,6 +444,14 @@ pub struct LaneStatusView {
     pub last_error: String,
     pub sell_enabled: bool,
     pub quota_remaining: u64,
+    /// What the market pays for this model, in whole percent of list price;
+    /// `None` when this device has not read a price for it yet. This is what
+    /// the sell page ranks its models by.
+    pub ratio: Option<i32>,
+    /// The band this lane's account is willing to sell inside — carried on the
+    /// lane so the chart can draw the threshold next to the bar it explains.
+    pub min_ratio: i64,
+    pub max_ratio: i64,
 }
 
 pub struct AccountPool {
@@ -374,6 +509,25 @@ impl AccountPool {
                 a
             })
             .collect();
+    }
+
+    /// Re-judge every lane against its account's price band.
+    ///
+    /// `ratios` maps a model to what the market pays for it, in whole percent of
+    /// list price; a model missing from it has no known price, and
+    /// [`apply_price_band`] leaves such a lane selling.
+    ///
+    /// Called right after `set_accounts` (which restores the hysteresis state
+    /// this reads) on every pool rebuild, so a lane's verdict is never older
+    /// than the last price the device managed to read.
+    pub fn apply_prices(&mut self, ratios: &BTreeMap<String, i32>, now: i64) {
+        for a in &mut self.accounts {
+            let band = (a.sell_min_ratio, a.sell_max_ratio);
+            for (model, lane) in &mut a.lanes {
+                let jitter = reentry_jitter(&a.account_id, model);
+                apply_price_band(lane, ratios.get(model).copied(), band, jitter, now);
+            }
+        }
     }
 
     /// Pick an available account for `provider` and lease one concurrency slot.
@@ -639,18 +793,31 @@ impl AccountPool {
                     ("cooldown", None)
                 } else if !a.sell_enabled {
                     ("off", None)
-                } else if a.available(now) {
-                    ("selling", None)
-                } else {
+                } else if !a.available(now) {
                     // The account itself is expired/exhausted; the lane is fine.
+                    // Checked before the price band because a spent daily cap
+                    // is the more actionable answer: it explains every lane of
+                    // the account at once, and it is the one with a clock on it.
                     (a.status(now), None)
+                } else if lane.price_withheld {
+                    ("withheld", None)
+                } else {
+                    ("selling", None)
                 };
                 out.push(LaneStatusView {
                     provider: a.provider.clone(),
                     account_id: a.account_id.clone(),
                     model: model.clone(),
                     status: status.to_string(),
-                    paused_reason: reason.map(|r| r.as_str().to_string()),
+                    // A withheld lane carries `price` as its reason so both the
+                    // UI and the supply declaration can say *why* without
+                    // inventing a `PauseReason` for something that is not a
+                    // pause. Nothing is broken, so `requires_user` stays false.
+                    paused_reason: match (status, reason) {
+                        (_, Some(r)) => Some(r.as_str().to_string()),
+                        ("withheld", None) => Some("price".to_string()),
+                        _ => None,
+                    },
                     requires_user: reason.is_some_and(|r| r.requires_user()),
                     resume_at: if lane.resume_at > now { lane.resume_at } else { 0 },
                     cooldown_until: lane.cooldown_until.filter(|c| *c > now),
@@ -658,6 +825,9 @@ impl AccountPool {
                     last_error: lane.last_error.clone(),
                     sell_enabled: a.sell_enabled,
                     quota_remaining: a.quota_remaining,
+                    ratio: lane.ratio,
+                    min_ratio: a.sell_min_ratio,
+                    max_ratio: a.sell_max_ratio,
                 });
             }
         }
@@ -680,6 +850,8 @@ impl AccountPool {
                 origin: a.origin.clone(),
                 used_today: a.used_today,
                 sell_daily_limit: a.sell_daily_limit,
+                sell_min_ratio: a.sell_min_ratio,
+                sell_max_ratio: a.sell_max_ratio,
             })
             .collect()
     }
@@ -702,6 +874,135 @@ mod tests {
         let mut a = AccountRuntime::new("claude", id, &format!("claude:{id}")).with_models([OPUS, HAIKU]);
         a.quota_remaining = quota;
         a
+    }
+
+    /// A sell-enabled account with a price band, and the prices to judge it.
+    /// Both are percent *of* list price: 100 is list, 60 is four-tenths off.
+    fn banded(id: &str, band: (i64, i64)) -> AccountRuntime {
+        let mut a = acct(id, 1_000);
+        a.sell_enabled = true;
+        a.sell_min_ratio = band.0;
+        a.sell_max_ratio = band.1;
+        a
+    }
+
+    fn prices(pairs: &[(&str, i32)]) -> BTreeMap<String, i32> {
+        pairs.iter().map(|(m, r)| (m.to_string(), *r)).collect()
+    }
+
+    #[test]
+    fn price_outside_the_band_withholds_the_lane_at_once() {
+        let now = 1_000;
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        p.set_accounts(vec![banded("a", (60, 100))]);
+        // Opus is trading at 38% of list — below what this account will accept
+        // — while Haiku is at 80% and inside the band.
+        p.apply_prices(&prices(&[(OPUS, 38), (HAIKU, 80)]), now);
+
+        assert!(p.pick_for_sale("claude", OPUS, now).is_none(), "withheld lane must not sell");
+        assert!(p.pick_for_sale("claude", HAIKU, now).is_some());
+
+        let views = p.lane_views(now);
+        let opus = views.iter().find(|v| v.model == OPUS).unwrap();
+        assert_eq!(opus.status, "withheld");
+        assert_eq!(opus.paused_reason.as_deref(), Some("price"));
+        assert!(!opus.requires_user, "a price decision is not something to fix");
+        assert_eq!(opus.ratio, Some(38));
+        // Local use of your own subscription is not a sale, so the band on it
+        // must not lock the operator out.
+        assert!(p.pick_local("claude", OPUS, now).is_some());
+    }
+
+    #[test]
+    fn a_recovered_price_has_to_hold_before_the_lane_returns() {
+        let now = 1_000;
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        p.set_accounts(vec![banded("a", (60, 100))]);
+        p.apply_prices(&prices(&[(OPUS, 38)]), now);
+        assert!(p.pick_for_sale("claude", OPUS, now).is_none());
+
+        // Back inside the band, but only just: the margin keeps a price parked
+        // on the edge from flapping the lane on and off.
+        p.apply_prices(&prices(&[(OPUS, 60)]), now + 10);
+        assert!(p.pick_for_sale("claude", OPUS, now + 10).is_none(), "on the edge is not back");
+
+        // Clear of the edge, but the dwell has not elapsed yet.
+        p.apply_prices(&prices(&[(OPUS, 70)]), now + 20);
+        assert!(p.pick_for_sale("claude", OPUS, now + 20).is_none());
+
+        // Held there past the dwell (plus this lane's jitter, which is bounded
+        // by the dwell itself) — now it comes back.
+        let late = now + 20 + 2 * PRICE_REENTRY_DWELL_SECS;
+        p.apply_prices(&prices(&[(OPUS, 70)]), late);
+        assert!(p.pick_for_sale("claude", OPUS, late).is_some());
+    }
+
+    #[test]
+    fn a_price_that_dips_out_again_restarts_the_wait() {
+        let now = 1_000;
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        p.set_accounts(vec![banded("a", (60, 100))]);
+        p.apply_prices(&prices(&[(OPUS, 38)]), now);
+        p.apply_prices(&prices(&[(OPUS, 70)]), now + 10);
+        // One bad minute in the middle of the wait sends it back to the start.
+        p.apply_prices(&prices(&[(OPUS, 45)]), now + 20);
+        let late = now + 10 + 2 * PRICE_REENTRY_DWELL_SECS;
+        p.apply_prices(&prices(&[(OPUS, 70)]), late);
+        assert!(p.pick_for_sale("claude", OPUS, late).is_none(), "the clock restarts on a relapse");
+    }
+
+    #[test]
+    fn widening_the_band_puts_the_lane_back_at_once() {
+        let now = 1_000;
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        p.set_accounts(vec![banded("a", (60, 100))]);
+        p.apply_prices(&prices(&[(OPUS, 38)]), now);
+        assert!(p.pick_for_sale("claude", OPUS, now).is_none());
+
+        // The operator lowers their own floor. That is a decision about what
+        // they will accept, not a market move, so it does not serve out the
+        // dwell that exists to stop a fleet re-entering in lockstep.
+        p.set_accounts(vec![banded("a", (20, 100))]);
+        p.apply_prices(&prices(&[(OPUS, 38)]), now + 1);
+        assert!(p.pick_for_sale("claude", OPUS, now + 1).is_some());
+    }
+
+    #[test]
+    fn an_unknown_price_never_withholds() {
+        let now = 1_000;
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        p.set_accounts(vec![banded("a", (60, 100))]);
+        p.apply_prices(&prices(&[(OPUS, 38)]), now);
+        // The market went unreachable: being offline is not a reason to stop
+        // selling on the terms this device already had.
+        p.apply_prices(&BTreeMap::new(), now + 10);
+        assert!(p.pick_for_sale("claude", OPUS, now + 10).is_some());
+        assert_eq!(p.lane_views(now + 10)[0].ratio, None);
+    }
+
+    #[test]
+    fn the_default_band_withholds_nothing() {
+        let now = 1_000;
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        let mut a = acct("a", 1_000);
+        a.sell_enabled = true;
+        p.set_accounts(vec![a]);
+        // The two ends of what the server's `mkt_ratio` clamp allows.
+        p.apply_prices(&prices(&[(OPUS, 10), (HAIKU, 100)]), now);
+        assert!(p.lane_views(now).iter().all(|v| v.status == "selling"));
+    }
+
+    #[test]
+    fn a_spent_daily_cap_outranks_the_price_band() {
+        let now = 1_000;
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        // Quota 0 is what `rebuild_pool` leaves behind once the daily sell cap
+        // is spent; the operator needs to hear about that, not about the price.
+        let mut a = banded("a", (60, 100));
+        a.quota_remaining = 0;
+        p.set_accounts(vec![a]);
+        p.apply_prices(&prices(&[(OPUS, 38), (HAIKU, 38)]), now);
+        assert!(p.lane_views(now).iter().all(|v| v.status == "exhausted"));
     }
 
     #[test]

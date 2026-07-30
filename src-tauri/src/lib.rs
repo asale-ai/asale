@@ -7,8 +7,38 @@
 //!   - shows the webview (the frontend talks to the daemon over HTTP),
 //!   - provides desktop niceties: tray, autostart, updater, single-instance,
 //!     deep links, window-state.
+//!
+//! Two windows, both pointed at the same frontend bundle:
+//!   `main`   the app
+//!   `panel`  the tray overview — the same React app told to render its panel
+//!            view (`?view=panel`), so the numbers on it are the numbers on the
+//!            dashboard rather than a second implementation that can disagree.
 
 mod tray;
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tauri::{AppHandle, Manager};
+
+/// Settings-store key for the window-close behaviour. Lives in the daemon store
+/// (not in a shell-only file) because the Settings page that writes it is the
+/// same page in the browser, and a preference that only existed inside the
+/// desktop binary would silently reset when it was changed from a browser.
+pub const CLOSE_TO_TRAY_KEY: &str = "close_to_tray";
+
+/// The little shared state the shell itself needs. Everything else is the
+/// daemon's.
+pub struct Shell {
+    /// `http://127.0.0.1:<port>` — the shell always reaches the daemon over
+    /// loopback, even when the daemon binds wider for remote browser access.
+    pub daemon_base: String,
+    /// Required on every /rpc call, loopback included.
+    pub token: String,
+    /// Mirror of `CLOSE_TO_TRAY_KEY`, refreshed by the tray sync loop. An atomic
+    /// because the window-close handler is synchronous and must not block on
+    /// the daemon to decide whether to close.
+    pub close_to_tray: AtomicBool,
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -22,8 +52,8 @@ pub fn run() {
     let daemon_base = format!("http://127.0.0.1:{}", bind.port());
 
     // Ensure a daemon: reuse an already-running one (started standalone by the
-    // user, e.g. `asaled` on a dev box), otherwise run it inside this process
-    // on a dedicated runtime thread.
+    // user, e.g. `asale start` on a dev box), otherwise run it inside this
+    // process on a dedicated runtime thread.
     {
         let base_hostport = format!("127.0.0.1:{}", bind.port());
         std::thread::spawn(move || {
@@ -51,11 +81,7 @@ pub fn run() {
         // single-instance must be the first registered plugin: a second launch
         // exits immediately and focuses the already-running window.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            use tauri::Manager;
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.show();
-                let _ = win.set_focus();
-            }
+            show_main(app);
         }))
         .plugin({
             // Remember window position/size — but not visibility, so the app
@@ -63,6 +89,10 @@ pub fn run() {
             use tauri_plugin_window_state::StateFlags;
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(StateFlags::all() & !StateFlags::VISIBLE)
+                // The panel places itself under the tray icon on every open;
+                // restoring a remembered position would drop it wherever the
+                // menu bar happened to be on the last machine it ran on.
+                .with_denylist(&["panel"])
                 .build()
         })
         .plugin(tauri_plugin_shell::init())
@@ -70,6 +100,15 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .invoke_handler(tauri::generate_handler![
+            show_main_window,
+            hide_tray_panel,
+            open_web_ui,
+            web_ui_url,
+            quit_app,
+            get_close_to_tray,
+            set_close_to_tray,
+        ])
         .setup(move |app| {
             // The daemon requires its token on every request, loopback
             // included. The shell runs as the same user, so it can read
@@ -79,11 +118,21 @@ pub fn run() {
             // A browser, which cannot read the file, uses the `?token=` URL the
             // daemon prints at startup instead.
             let token = asale_daemon::load_or_create_token()?;
+            let script = format!(
+                "try{{localStorage.setItem('asale.daemon.token',{});}}catch(e){{}}",
+                serde_json::to_string(&token).unwrap_or_else(|_| "''".into())
+            );
+
+            let shell = Arc::new(Shell {
+                daemon_base: daemon_base.clone(),
+                token: token.clone(),
+                // Hide-on-close is the default; the tray loop corrects this
+                // within a tick if the user has chosen otherwise.
+                close_to_tray: AtomicBool::new(true),
+            });
+            app.manage(shell.clone());
+
             {
-                let script = format!(
-                    "try{{localStorage.setItem('asale.daemon.token',{});}}catch(e){{}}",
-                    serde_json::to_string(&token).unwrap_or_else(|_| "''".into())
-                );
                 let cfg = app
                     .config()
                     .app
@@ -93,14 +142,21 @@ pub fn run() {
                     .cloned()
                     .ok_or_else(|| anyhow_msg("no `main` window in tauri.conf.json"))?;
                 tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?
-                    .initialization_script(script)
+                    .initialization_script(script.clone())
                     .build()?;
+            }
+
+            // The tray overview panel. Built hidden and positioned on each open
+            // (see tray::toggle_panel). A failure here is not fatal: the tray
+            // menu still works, and a left click falls back to opening the app.
+            if let Err(e) = build_panel(app.handle(), &script) {
+                tracing::warn!("tray panel window could not be created: {e}");
             }
 
             // The tray polls the same /rpc surface as the UI, so it needs the
             // token too — without it every status read 401s and the entry is
             // stuck reporting the service as offline.
-            tray::setup(app.handle(), daemon_base.clone(), token)?;
+            tray::setup(app.handle(), shell)?;
 
             // Deep link (asale://): macOS registers via the bundled Info.plist
             // (tauri.conf.json > plugins.deep-link); Windows/Linux register at
@@ -115,11 +171,8 @@ pub fn run() {
                 }
                 let handle = app.handle().clone();
                 app.deep_link().on_open_url(move |event| {
-                    use tauri::{Emitter, Manager};
-                    if let Some(win) = handle.get_webview_window("main") {
-                        let _ = win.show();
-                        let _ = win.set_focus();
-                    }
+                    use tauri::Emitter;
+                    show_main(&handle);
                     for url in event.urls() {
                         tracing::info!("deep link received: {url}");
                         let _ = handle.emit("deep-link", url.to_string());
@@ -128,18 +181,146 @@ pub fn run() {
             }
             Ok(())
         })
-        .on_window_event(|window, event| {
-            // Closing the main window hides to the tray (spec §12); quitting
-            // is done from the tray menu.
-            if window.label() == "main" {
+        .on_window_event(|window, event| match window.label() {
+            // Closing the main window hides to the tray by default (spec §12);
+            // quitting is done from the tray, or from the window if the user has
+            // turned that default off in Settings.
+            "main" => {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
+                    let hide = window
+                        .app_handle()
+                        .try_state::<Arc<Shell>>()
+                        .map(|s| s.close_to_tray.load(Ordering::Relaxed))
+                        .unwrap_or(true);
+                    if hide {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                }
+            }
+            // The panel behaves like a menu: clicking anywhere else dismisses
+            // it. Without this it would sit on top of every other window until
+            // the tray icon was clicked a second time.
+            "panel" => {
+                if let tauri::WindowEvent::Focused(false) = event {
                     let _ = window.hide();
                 }
             }
+            _ => {}
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn build_panel(app: &AppHandle, script: &str) -> tauri::Result<()> {
+    // Same bundle, different view. `WebviewUrl::App` resolves against the dev
+    // server in `tauri dev` and against the embedded assets in a build, so this
+    // one string works in both.
+    //
+    // The view is *also* announced through the initialization script. The query
+    // string is carried through a `PathBuf`, and path normalisation is not the
+    // same on every platform; a global set before the first page script runs is
+    // not subject to any of that. main.tsx accepts either.
+    let script = format!("window.__ASALE_VIEW__='panel';{script}");
+    tauri::WebviewWindowBuilder::new(app, "panel", tauri::WebviewUrl::App("index.html?view=panel".into()))
+        .title("Asale")
+        .inner_size(340.0, 430.0)
+        .resizable(false)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .visible(false)
+        .focused(false)
+        .initialization_script(script)
+        .build()?;
+    Ok(())
+}
+
+/// Bring the app window up — from the tray, a second launch, or a deep link.
+///
+/// `unminimize` matters as much as `show`: a window minimized to the dock is
+/// "visible" as far as the platform is concerned, so a plain show/focus on it
+/// does nothing at all and the click reads as broken.
+pub fn show_main(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("panel") {
+        let _ = win.hide();
+    }
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
+/// The URL that opens this daemon's UI in a browser, token included.
+///
+/// The token is not a convenience: every RPC needs it, so a browser sent to the
+/// bare address would load the app and then fail every call it makes.
+fn web_url(app: &AppHandle) -> Result<String, String> {
+    let shell = app.try_state::<Arc<Shell>>().ok_or("shell state missing")?;
+    Ok(format!("{}/?token={}", shell.daemon_base, shell.token))
+}
+
+pub fn open_web(app: &AppHandle) -> Result<String, String> {
+    use tauri_plugin_shell::ShellExt;
+    let url = web_url(app)?;
+    // Deprecated in favour of tauri-plugin-opener, which is a separate plugin
+    // and a separate capability entry. Not worth adding a dependency for the one
+    // call site the shell has; revisit if more of the app needs to open URLs.
+    #[allow(deprecated)]
+    app.shell().open(&url, None).map_err(|e| e.to_string())?;
+    Ok(url)
+}
+
+// ── commands the frontend calls (Settings page + tray panel) ────────────────
+
+#[tauri::command]
+fn show_main_window(app: AppHandle) {
+    show_main(&app);
+}
+
+#[tauri::command]
+fn hide_tray_panel(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("panel") {
+        let _ = win.hide();
+    }
+}
+
+#[tauri::command]
+fn open_web_ui(app: AppHandle) -> Result<String, String> {
+    if let Some(win) = app.get_webview_window("panel") {
+        let _ = win.hide();
+    }
+    open_web(&app)
+}
+
+/// The URL without opening it, for "copy link" and for showing what will open.
+#[tauri::command]
+fn web_ui_url(app: AppHandle) -> Result<String, String> {
+    web_url(&app)
+}
+
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
+
+#[tauri::command]
+fn get_close_to_tray(app: AppHandle) -> bool {
+    app.try_state::<Arc<Shell>>()
+        .map(|s| s.close_to_tray.load(Ordering::Relaxed))
+        .unwrap_or(true)
+}
+
+/// Apply the close behaviour immediately. Persisting it is the frontend's job
+/// (`set_setting`), which is also what makes the same switch work in a browser;
+/// this only keeps the running window from lagging a tick behind the switch the
+/// user just flipped.
+#[tauri::command]
+fn set_close_to_tray(app: AppHandle, value: bool) {
+    if let Some(s) = app.try_state::<Arc<Shell>>() {
+        s.close_to_tray.store(value, Ordering::Relaxed);
+    }
 }
 
 /// A boxed error carrying just a message, for `setup`'s `Box<dyn Error>`.

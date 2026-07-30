@@ -97,8 +97,21 @@ Claude Pro / Max · ChatGPT / Codex · Google Gemini · Kimi · xAI Grok
 
 [![最新リリース](https://img.shields.io/github/v/release/asale-ai/asale?label=latest&color=2f7d4f)](https://github.com/asale-ai/asale/releases/latest)
 
-無料です。いちばん簡単なのは[**公式サイト**](https://asale.ai)を開くこと。OS を自動判別して
-対応するインストーラを渡します。直接リンクからでも構いません:
+無料です。1 行で完了します —— アプリと `asale` コマンドラインの両方が入ります:
+
+```sh
+curl -fsSL https://asale.ai/dl/install.sh | sh      # macOS / Linux
+```
+```powershell
+irm https://asale.ai/dl/install.ps1 | iex           # Windows
+```
+
+あとで同じ 1 行を実行すればアップグレードです。**デスクトップのない**マシンでは、描画できない
+GUI の代わりにウェブモードが入ります ——
+[ヘッドレス: サーバーで動かす](#ヘッドレス-サーバーで動かす)を参照してください。
+
+[**公式サイト**](https://asale.ai)を開けば OS を自動判別して対応するインストーラを渡します。
+直接リンクからでも構いません:
 
 | プラットフォーム | 直接リンク |
 |---|---|
@@ -120,7 +133,30 @@ Claude Pro / Max · ChatGPT / Codex · Google Gemini · Kimi · xAI Grok
    macOS は警告なしで起動します。
 
 インストール後はバックグラウンドに常駐し（メニューバーアイコン）、ログイン時の自動起動と
-自動アップデートに対応します。
+自動アップデートに対応します。**ウィンドウを閉じても終了しません** —— Asale はトレイに収まった
+まま販売を続けます。トレイアイコンをクリックすると、現在の数値・ブラウザーで開くボタン・本当の
+終了ボタンを備えた小さなパネルが開きます。この動作は「設定 → ウィンドウとトレイ」で切り替え
+られます。
+
+### ヘッドレス: サーバーで動かす
+
+サービス自体がアプリ全体を持ち、ウェブ UI も自分で配信します。グラフィカルセッションのない
+マシンは劣った構成ではなく、同じクライアントがポート上にあるだけです:
+
+```sh
+curl -fsSL https://asale.ai/dl/install.sh | sh
+asale start --web          # 全インターフェースで待ち受け、ポート 9700
+asale url                  # 開くべき URL（アクセストークン込み）
+asale autostart enable     # 再起動後も自動で戻る
+```
+
+その URL を任意のブラウザーで開けば、完全なクライアントになります。URL に含まれるトークンが
+アクセス権のすべてです —— 手に入れた人は認証情報を読み、残高を使えます —— ポートは
+ファイアウォールや TLS リバースプロキシの内側に置いてください。
+
+`asale` はヘッドレスに限らず全プラットフォームでインストールされます: `start`、`stop`、
+`restart`、`status`、`logs`、`open`、`autostart`、`update`、`uninstall`。
+詳細は [docs/CLI.md](docs/CLI.md) を参照してください。
 
 ### 初回セットアップ
 

@@ -114,6 +114,36 @@ once.
 
 Output lands in `target/<target>/release/bundle/`, with a `.sig` next to each installer.
 
+### The command line and the headless archive
+
+Every run also produces `bundle/cli/asale-cli-<version>-<platform>.tar.gz` (`.zip` on
+Windows), holding two binaries:
+
+- **`asaled`** — the service. All of asale's logic, with the web UI embedded
+  (`rust-embed`, see `daemon/src/rpc.rs`), so a machine with no desktop can run
+  `asale start --web` and be used from any browser.
+- **`asale`** — the command line: start/stop/restart/status, boot registration, and the
+  tokenized URL to open. See [CLI.md](CLI.md).
+
+Neither links webkit or GTK, which is what makes them installable on a bare server — and
+what lets a build machine produce them without any of the desktop dependencies:
+
+> Cargo builds the command line as **`asale-cli`**; the packaging scripts put it into the
+> archive as `asale`. The desktop shell's own binary is already called `asale`, and two bin
+> targets in one workspace writing to the same `target/<profile>/` path overwrite each
+> other. So `cargo run -p asale-cli -- status` locally, `asale status` once installed.
+
+```bash
+./scripts/package.sh --cli-only     # just the archive, no .dmg/.deb/.AppImage
+./scripts/package.sh --no-cli       # just the installers, as before
+```
+
+`--cli-only` still builds the frontend first: the web UI is compiled *into* `asaled`, so
+skipping `pnpm build` would produce a service that answers "no UI embedded".
+
+The archive is what `https://asale.ai/dl/install.sh` downloads, matched by the regexes in
+the site repo's `src/lib/downloads.ts` — renaming it means changing that table too.
+
 ---
 
 ## Releasing and auto-update

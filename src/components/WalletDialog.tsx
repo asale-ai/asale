@@ -360,7 +360,11 @@ function RailDeposit({
                 <Skeleton h={34} r={8} />
               </div>
             ) : session.status === "credited" || session.status === "matched" ? (
-              <PayReceipt session={session} onRestart={() => { clearAmount(); restart(); }} />
+              <PayReceipt
+                session={session}
+                fee={limits?.deposit_fee ?? null}
+                onRestart={() => { clearAmount(); restart(); }}
+              />
             ) : (
               <>
                 <p className="pay-hint">
@@ -416,7 +420,9 @@ function RailDeposit({
 
       <FactGrid facts={[
         { k: t("wallet.factNetwork"), v: method.network },
-        { k: t("wallet.factDepositFee"), v: <span className="mono">{limits ? `${fmtUsdt(limits.deposit_fee)} USDT` : "—"}</span> },
+        // "0.00 USDT" is a true answer that reads as an oversight. A rail that
+        // charges nothing should say so — it is the reason to pick it.
+        { k: t("wallet.factDepositFee"), v: <span className="mono">{limits ? (limits.deposit_fee > 0 ? `${fmtUsdt(limits.deposit_fee)} USDT` : t("wallet.feeFree")) : "—"}</span> },
         { k: t("wallet.factDepositMin"), v: <span className="mono">{limits ? `${fmtUsdt(limits.deposit_min)} USDT` : "—"}</span> },
         { k: t("wallet.factCredit"), v: t("wallet.factCreditVal") },
       ]} />
@@ -437,18 +443,43 @@ function WalletMark({ wallet }: { wallet: WalletBrand }) {
  *
  *  `matched` and `credited` are deliberately different screens: the money has
  *  arrived in both, but only the second is spendable, and someone watching
- *  this sheet wants to know which they are looking at. */
-function PayReceipt({ session, onRestart }: { session: DepositSession; onRestart: () => void }) {
+ *  this sheet wants to know which they are looking at.
+ *
+ *  The big figure is what reaches the balance, not what landed on chain. Those
+ *  differ by the deposit fee, and showing the gross here was the whole reason a
+ *  3 USDT top-up looked like it lost a dollar on the way in: the sheet said
+ *  2.70 and the balance moved 1.70. The chain amount is still shown, demoted to
+ *  the line that explains the difference. */
+function PayReceipt({
+  session, fee, onRestart,
+}: {
+  session: DepositSession;
+  /** Flat deposit fee in micro-USDT; null until the limits land. */
+  fee: number | null;
+  onRestart: () => void;
+}) {
   const { t } = useTranslation();
   const credited = session.status === "credited";
   const received = session.deposit?.amount ?? null;
+  // Clamped exactly as the server clamps it (bin/chain.rs), so a deposit
+  // smaller than the fee reads as the zero it will actually credit rather than
+  // as a negative number no ledger will ever show.
+  const charged = received != null && fee != null ? Math.min(Math.max(fee, 0), received) : null;
+  const net = received != null && charged != null ? received - charged : received;
   return (
     <div className="pay-done fade-in">
       <span className={`pay-done-mark${credited ? " ok" : ""}`}>
         {credited ? <IconCheck /> : <IconRefresh className="spin" />}
       </span>
       <p className="pay-done-title">{t(credited ? "wallet.payCredited" : "wallet.payReceived")}</p>
-      {received != null && <p className="pay-done-amount mono">{fmtUsdt(received)} USDT</p>}
+      {net != null && <p className="pay-done-amount mono">{fmtUsdt(net)} USDT</p>}
+      {/* Only worth a line when a fee was actually taken — on a rail that
+          charges nothing, the breakdown would just repeat the figure above. */}
+      {received != null && charged != null && charged > 0 && (
+        <p className="pay-done-split">
+          {t("wallet.payReceiptSplit", { gross: fmtUsdt(received), fee: fmtUsdt(charged) })}
+        </p>
+      )}
       <p className="pay-done-desc">
         {credited
           ? t("wallet.payCreditedDesc")

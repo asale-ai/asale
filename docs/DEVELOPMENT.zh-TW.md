@@ -99,6 +99,34 @@ Tauri 不能跨系統打包：`.dmg` 只能在 macOS 出，`.msi`/`.exe` 只能�
 
 產物在 `target/<target>/release/bundle/`，每個安裝包旁邊有一個 `.sig`。
 
+### 命令列與無桌面歸檔
+
+每次打包還會出一份 `bundle/cli/asale-cli-<版本>-<平台>.tar.gz`（Windows 上是 `.zip`），
+裡面是兩個二進位檔：
+
+- **`asaled`** —— 服務本體。用戶端的全部邏輯都在它裡面，Web UI 也編了進去
+  （`rust-embed`，见 `daemon/src/rpc.rs`），所以一台沒有桌面的機器
+  `asale start --web` 之後用瀏覽器就能用。
+- **`asale`** —— 命令列：start/stop/restart/status、開機自啟註冊、印出帶 token 的網址。
+  見 [CLI.md](CLI.md)。
+
+兩個都不連結 webkit / GTK —— 這既是它們能裝在裸伺服器上的原因，也讓建置機不需要任何桌面相依：
+
+> cargo 裡命令列的 bin 名是 **`asale-cli`**，打包腳本才把它放進歸檔改名為 `asale`。
+> 桌面殼的二進位檔本來就叫 `asale`，同一個 workspace 裡兩個 bin 寫同一個 `target/<profile>/`
+> 路徑會互相覆蓋。所以本機是 `cargo run -p asale-cli -- status`，裝完是 `asale status`。
+
+```bash
+./scripts/package.sh --cli-only     # 只出歸檔，不打 .dmg/.deb/.AppImage
+./scripts/package.sh --no-cli       # 只打安裝包，跟以前一樣
+```
+
+`--cli-only` 仍然會先建置前端：Web UI 是編進 `asaled` 的，跳過 `pnpm build` 出來的服務
+只會回一句「沒有內嵌 UI」。
+
+`https://asale.ai/dl/install.sh` 下載的就是這份歸檔，靠站點倉庫 `src/lib/downloads.ts`
+裡的正規表示式比對 —— 改名要同時改那張表。
+
 ---
 
 ## 發佈與自動更新

@@ -161,7 +161,9 @@ export function App() {
         <div className="main-inner fade-in" key={booted ? tab : "boot"}>
           {!booted ? <PageSkeleton /> : (
             <>
-              {tab === "dashboard" && <Dashboard onNavigate={setTab} />}
+              {/* The overview map calls out the reader's own country, and the
+                  only place that is known is the profile polled above. */}
+              {tab === "dashboard" && <Dashboard onNavigate={setTab} region={profile?.region ?? ""} />}
               {tab === "publish" && <Publish />}
               {tab === "consume" && <Consume />}
               {tab === "usage" && <Usage />}

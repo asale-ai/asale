@@ -48,6 +48,12 @@
   --warning-soft: rgba(224, 169, 74, 0.13);
   --danger-soft: rgba(240, 102, 107, 0.13);
 
+  /* World map — a country is a surface, and the hairline between two of them is
+     the page background, so the map obeys rule 3 like everything else. The
+     accent is mixed *into* the land to shade it; no second hue is introduced. */
+  --map-land: #1c1f27;
+  --map-edge: #0c0d11;
+
   --overlay: rgba(4, 5, 8, 0.6);
   --shadow-pop: 0 16px 44px -18px rgba(0, 0, 0, 0.8), 0 2px 8px -4px rgba(0, 0, 0, 0.6);
   color-scheme: dark;
@@ -78,6 +84,9 @@
   --success-soft: rgba(20, 160, 106, 0.1);
   --warning-soft: rgba(184, 121, 26, 0.1);
   --danger-soft: rgba(217, 74, 80, 0.09);
+
+  --map-land: #e4e4ec;
+  --map-edge: #fbfbfc;
 
   --overlay: rgba(24, 26, 34, 0.3);
   --shadow-pop: 0 16px 40px -18px rgba(20, 24, 40, 0.28), 0 2px 6px -3px rgba(20, 24, 40, 0.1);
@@ -404,21 +413,37 @@ h4 { font-size: var(--fs-sub); font-weight: 600; letter-spacing: -0.006em; margi
   border-radius: var(--r3);
   border: 1px solid var(--line);
   background: var(--surface);
+  /* Column so `.st-foot` can be pushed to the bottom: a row of tiles then lines
+     its footers up even when one of them has a taller sub. */
+  display: flex; flex-direction: column;
 }
 .stat-tile .st-label {
   display: flex; align-items: center; gap: var(--s2);
   font-size: var(--fs-meta); font-weight: 500; color: var(--fg-2);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  /* One pill tall, whether or not this tile has one, so the headlines of a row
+     of tiles start on the same line. */
+  min-height: 23px;
 }
 .stat-tile .st-label svg { width: 14px; height: 14px; flex-shrink: 0; color: var(--fg-3); }
+/* On or off, opposite the label. State is a corner mark here, not a headline:
+   the tile is about what is connected, and "online" is one word about it. */
+.stat-tile .st-state { margin-left: auto; flex-shrink: 0; display: flex; }
 .stat-tile .st-value {
   margin-top: var(--s3); font-size: 24px; font-weight: 600; letter-spacing: -0.03em; line-height: 1.2;
-  display: flex; align-items: center; gap: var(--s2); min-height: 29px;
+  display: flex; align-items: center; gap: var(--s2); min-height: 28px;
 }
 .stat-tile.primary .st-value { color: var(--accent); }
 .stat-tile .st-value .st-unit { font-size: var(--fs-sub); font-weight: 500; letter-spacing: 0; color: var(--fg-3); }
+/* The closing line: what the headline is about, and the page that manages it.
+   One row, pinned to the bottom, so three tiles of unequal content still end
+   level with each other. */
+.stat-tile .st-bottom {
+  margin-top: auto; padding-top: var(--s3);
+  display: flex; align-items: center; gap: var(--s3);
+}
 .stat-tile .st-sub {
-  margin-top: 6px; font-size: var(--fs-meta); color: var(--fg-3); line-height: 1.5;
+  flex: 1; min-width: 0; font-size: var(--fs-meta); color: var(--fg-3); line-height: 1.5;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
@@ -646,7 +671,10 @@ select.input {
 .pick:hover:not(:disabled) { background: var(--surface-3); }
 .pick:disabled { opacity: 0.5; cursor: not-allowed; }
 .pick .pick-ico { width: 30px; height: 30px; border-radius: var(--r1); flex-shrink: 0; display: grid; place-items: center; }
-.pick .pick-ico svg, .pick .pick-ico img { width: 18px; height: 18px; }
+.pick .pick-ico > svg, .pick .pick-ico img { width: 18px; height: 18px; }
+/* A `.mark` in the slot brings its own 32px tile; let the slot's 30px win so
+   the logo sits inside the tile rather than 1px over each edge of it. */
+.pick .pick-ico .mark { width: 100%; height: 100%; }
 .pick > span:last-child { min-width: 0; }
 .pick .pick-title { display: block; font-weight: 500; font-size: var(--fs-sub); line-height: 1.3; }
 .pick .pick-sub { display: block; color: var(--fg-3); font-size: var(--fs-meta); margin-top: 1px; }
@@ -670,15 +698,23 @@ select.input {
 .devicecode-label { font-size: var(--fs-meta); color: var(--fg-2); }
 .devicecode .copychip .cc-val { font-size: var(--fs-head); letter-spacing: 0.12em; color: var(--fg); }
 
-/* ── Provider mark — the app's one identity chip, deliberately monochrome ── */
+/* ── Provider mark — the app's one identity chip, carrying the vendor's logo ──
+   The glyph is the vendor's, so the tile must not repaint it: `color` only
+   reaches the marks whose official form is monochrome, and a state that tinted
+   those would leave Claude orange and Gemini four-coloured beside them. State
+   therefore moves the tile's background and nothing else. */
 .mark {
   flex-shrink: 0; display: grid; place-items: center;
-  background: var(--surface-3); color: var(--fg-2);
+  background: var(--surface-3); color: var(--fg);
   font-weight: 600; letter-spacing: -0.01em;
 }
 .mark.md { width: 32px; height: 32px; border-radius: var(--r1); font-size: var(--fs-sub); }
 .mark.sm { width: 26px; height: 26px; border-radius: 7px; font-size: var(--fs-meta); }
-.is-on > .e-badge .mark, .acct.selling .mark { background: var(--accent-soft); color: var(--accent); }
+/* Sized against the tile rather than the font, so one rule covers both sizes
+   (and the 30px slot on the connect tiles) while the letter fallback keeps the
+   font-size it always had. */
+.mark svg { width: 56%; height: 56%; }
+.is-on > .e-badge .mark, .acct.selling .mark { background: var(--accent-soft); }
 
 /* ── List rows ──────────────────────────────────────────────────────────── */
 .list { display: flex; flex-direction: column; }
@@ -799,6 +835,114 @@ select.input {
 .lane-resume svg { width: 11px; height: 11px; }
 .lane-resume:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent); }
 .lane-resume:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* ── Discount ranking ───────────────────────────────────────────────────────
+   One subscription's models ranked by how far below list price the market has
+   pushed them, against the band the operator will sell inside.
+
+   The bars carry *state*, not identity, so they wear the status colours rather
+   than a categorical set — and every one of them says its state in words in
+   the same row, because a colour on its own is not an answer. The scale is
+   fixed at 0–100%: the band markers only mean something against an axis that
+   does not move when the prices do. */
+.disc-rank { display: flex; flex-direction: column; gap: 6px; }
+.dr-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s3); }
+.dr-title { font-size: var(--fs-meta); color: var(--fg-2); font-weight: 500; }
+.dr-count { font-size: var(--fs-micro); color: var(--fg-3); }
+.dr-rows { display: flex; flex-direction: column; gap: 5px; }
+.dr-row {
+  display: grid;
+  grid-template-columns: minmax(88px, 160px) minmax(60px, 1fr) 46px minmax(64px, auto) auto;
+  align-items: center; gap: var(--s2);
+  font-size: var(--fs-micro);
+}
+.dr-model { color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dr-row.selling .dr-model { color: var(--fg); }
+.dr-track { position: relative; height: 8px; border-radius: 999px; background: var(--bg-2); overflow: hidden; }
+/* The window the operator said they would sell in. The tint alone is too quiet
+   to be a threshold, so the edge that matters — where selling stops — is drawn
+   as a line, and a bar crossing it is the whole point of the chart. */
+.dr-band {
+  position: absolute; top: 0; bottom: 0;
+  background: var(--success-soft);
+  border-left: 2px solid var(--accent-line);
+}
+/* A band that reaches list price has no upper edge to draw — no price is too
+   good to accept — so only the floor gets a line. */
+.dr-band.to-top { border-right: none; }
+.dr-band:not(.to-top) { border-right: 2px solid var(--accent-line); }
+.dr-fill {
+  position: absolute; top: 0; bottom: 0; left: 0;
+  /* Rounded only at the data end; the zero end stays square on the baseline. */
+  border-radius: 0 4px 4px 0;
+  transition: width var(--t-slow) var(--ease);
+}
+.dr-row.selling .dr-fill { background: var(--success); }
+/* Held on price is a decision, not a fault, so it wears the accent rather than
+   a warning colour — and a 45° texture, so the state survives a colourblind
+   reader, a greyscale print and forced-colours mode. */
+.dr-row.price .dr-fill {
+  background: repeating-linear-gradient(
+    45deg, var(--accent) 0 3px, var(--accent-hover) 3px 6px
+  );
+}
+.dr-row.blocked .dr-fill { background: var(--warning); }
+.dr-row.blocked.attention .dr-fill { background: var(--danger); }
+.dr-row.off .dr-fill { background: var(--fg-3); }
+.dr-val { text-align: right; color: var(--fg); font-weight: 500; }
+.dr-row.off .dr-val { color: var(--fg-2); }
+.dr-state { color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dr-row.price .dr-state { color: var(--accent); }
+.dr-row.blocked .dr-state { color: var(--warning); }
+.dr-row.blocked.attention .dr-state { color: var(--danger); }
+.dr-back { color: var(--fg-3); }
+.dr-more { align-self: flex-start; }
+.dr-foot {
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--s3);
+  font-size: var(--fs-micro); color: var(--fg-3); margin-top: 2px;
+}
+.dr-key { display: inline-flex; align-items: center; gap: 5px; }
+.dr-swatch { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+.dr-swatch.selling { background: var(--success); }
+.dr-swatch.price { background: repeating-linear-gradient(45deg, var(--accent) 0 3px, var(--accent-hover) 3px 6px); }
+.dr-swatch.blocked { background: var(--warning); }
+.dr-scale { margin-left: auto; }
+.dr-nodata { font-size: var(--fs-micro); color: var(--fg-3); }
+
+/* ── Price floor editor ─────────────────────────────────────────────────────
+   One number and a unit, plus one-click floors. What a seller decides is only
+   ever "not below X" — no price is too good to accept — so the comparison sign
+   sits in front of the field and there is nothing else to fill in. */
+.band-edit { display: flex; flex-direction: column; gap: var(--s2); }
+.band-input { max-width: 68px; }
+.band-cap { font-size: var(--fs-meta); color: var(--fg-3); white-space: nowrap; }
+/* The `≥` reads as part of the value, not as a caption beside it. */
+.band-edit .input-row > .band-cap:first-child { font-size: var(--fs-body); color: var(--fg-2); }
+.band-presets { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+/* The unit that rides beside a value or an input — never inside it, so the
+   number stays selectable and the field stays a plain number field. */
+.unit { font-size: var(--fs-meta); color: var(--fg-3); white-space: nowrap; }
+.chip {
+  border: 1px solid var(--line-2); background: transparent; color: var(--fg-2);
+  border-radius: 999px; padding: 3px 10px; font-size: var(--fs-micro); font-weight: 500;
+  cursor: pointer; white-space: nowrap;
+  transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+              border-color var(--t-fast) var(--ease);
+}
+.chip:hover { background: var(--surface-3); color: var(--fg); }
+.chip.on { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); }
+
+/* Narrow windows stack the row rather than dropping a column. The state stays:
+   it is the half of the encoding that is not colour, so hiding it would leave
+   the bars distinguishable only by hue. */
+@media (max-width: 720px) {
+  .dr-row { grid-template-columns: 1fr auto; row-gap: 4px; }
+  .dr-model { grid-area: 1 / 1; }
+  .dr-val { grid-area: 1 / 2; }
+  .dr-track { grid-area: 2 / 1 / 3 / 3; }
+  .dr-state { grid-area: 3 / 1 / 4 / 3; }
+  .dr-row .lane-resume { grid-area: 4 / 1; justify-self: start; }
+}
 
 /* ── Fact strip ─────────────────────────────────────────────────────────────
    The rules or constants of whatever sits next to it. Cells are separated by
@@ -984,6 +1128,66 @@ select.input {
 }
 .trend .tr-bar:hover { opacity: 1; }
 .trend-axis { display: flex; justify-content: space-between; font-size: var(--fs-micro); color: var(--fg-3); margin-top: var(--s2); }
+
+/* ── Overview roster ────────────────────────────────────────────────────────
+   A roster as a row of marks, in the footer of the tile whose state it belongs
+   to. A tile has no room for a list of rows, and the overview's question is
+   only "what is connected, and is it on" — so identity is the mark, state is
+   the dot on it, and the detail is one click away on the page the tile links to
+   (and in the title attribute, for the one item being pointed at). */
+.mark-row { display: flex; flex-wrap: wrap; gap: var(--s2); }
+.mark-chip { position: relative; display: inline-flex; }
+.mark-chip.is-off { opacity: 0.45; }
+.mark-chip.is-on .mark { background: var(--accent-soft); }
+/* Punched out of the card surface so the dot reads on top of the mark. */
+.mark-chip .mc-dot { position: absolute; right: -2px; bottom: -2px; box-shadow: 0 0 0 2px var(--surface); }
+
+/* ── World map ──────────────────────────────────────────────────────────────
+   Country outlines come from src/lib/world.ts, so this is plain SVG: fills are
+   the accent mixed into the land, and the only motion is the packet on a lane.
+   The map keeps the full width of the card; the legend sits under a rule. */
+.map-card { padding-bottom: 0; }
+.map-frame { position: relative; margin: 0 calc(-1 * var(--s6)); }
+.map-svg { display: block; width: 100%; height: auto; transition: opacity var(--t-slow) var(--ease); }
+.map-svg.is-loading { opacity: 0.4; }
+.map-svg path.is-live { cursor: pointer; }
+
+.map-tip {
+  position: absolute; z-index: 10; pointer-events: none;
+  padding: var(--s2) var(--s3); border-radius: var(--r2);
+  background: var(--surface); border: 1px solid var(--line-2); box-shadow: var(--shadow-pop);
+  font-size: var(--fs-meta); line-height: 1.5;
+}
+.map-tip .mt-name { display: flex; align-items: center; gap: 6px; font-weight: 500; }
+.map-tip .mt-line { color: var(--fg-2); margin-top: 2px; }
+/* Neutral, like the mark on the map: on this map the accent means "users". */
+.map-tip .mt-you { color: var(--fg); margin-top: var(--s1); font-weight: 500; }
+
+.map-foot {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3) var(--s6);
+  padding: var(--s4) 0; border-top: 1px solid var(--line);
+}
+.map-legend { display: flex; align-items: center; gap: var(--s2); }
+.map-legend .mf-label { font-size: var(--fs-micro); font-weight: 500; color: var(--fg-3); }
+.map-legend .mf-hint { font-size: var(--fs-micro); color: var(--fg-3); }
+.map-ramp { display: flex; border-radius: 999px; overflow: hidden; }
+.map-ramp > span { width: 20px; height: 10px; }
+/* The reader's country, next to the mark that points at it on the map. Neutral
+   like the mark itself — the accent on this map means "users", nothing else. */
+.map-you-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: var(--fs-meta); font-weight: 500; color: var(--fg);
+}
+
+.map-stats { display: flex; flex-wrap: wrap; gap: var(--s3) var(--s5); margin-left: auto; }
+.map-stat dt {
+  display: flex; align-items: center; gap: 5px;
+  font-size: var(--fs-micro); font-weight: 500; color: var(--fg-3); white-space: nowrap;
+}
+.map-stat dt svg { width: 13px; height: 13px; }
+.map-stat dd {
+  margin: 3px 0 0; font-size: 17px; font-weight: 600; letter-spacing: -0.03em; color: var(--fg);
+}
 
 /* ── Copy chip / code ───────────────────────────────────────────────────── */
 .copychip {
@@ -1377,7 +1581,12 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .pay-done-mark svg { width: 24px; height: 24px; }
 .pay-done-mark.ok { background: var(--success-soft); color: var(--success); }
 .pay-done-title { font-weight: 600; margin: 0; }
+/* The credited figure — deliberately the only large number here, so what
+   reaches the balance is what gets read. */
 .pay-done-amount { font-size: 22px; font-weight: 600; margin: 0; }
+/* Where the difference went. Subordinate to the figure above but still legible:
+   this is the line that answers "why is it not the number I sent?". */
+.pay-done-split { font-size: var(--fs-meta); color: var(--fg-3); margin: -2px 0 0; font-variant-numeric: tabular-nums; }
 .pay-done-desc { font-size: var(--fs-sub); color: var(--fg-3); max-width: 300px; line-height: 1.6; margin: 0; }
 
 /* ── Amount picker ──────────────────────────────────────────────────────────
@@ -1615,3 +1824,64 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ── Tray overview panel ────────────────────────────────────────────────────
+   A second window (`?view=panel`, see main.tsx) that the tray icon opens under
+   itself. It is a menu, not a page: fixed size, no scrollbar, no chrome of its
+   own — the window has no decorations, so this fills it edge to edge and the
+   border below *is* the window's border.
+
+   The vocabulary is deliberately the status widget's, one size down: same dot,
+   same key/value rows, same tones. Somebody who has read one has read both. */
+.as-panel, .as-panel body { height: 100%; overflow: hidden; background: transparent; }
+.as-panel #root { height: 100%; }
+
+.tp {
+  height: 100%; display: flex; flex-direction: column; gap: var(--s3);
+  padding: var(--s4); box-sizing: border-box;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r3);
+  /* Nothing in here is a text field, and a stray selection left behind by a
+     click that was meant to dismiss the panel looks like a bug. */
+  user-select: none;
+}
+
+.tp-head { display: flex; gap: var(--s3); align-items: flex-start; }
+.tp-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin-top: 5px; background: var(--fg-3); }
+.tp-dot.pulse { animation: pulse 1.8s var(--ease) infinite; }
+.tp-dot.tone-ok { background: var(--success); }
+.tp-dot.tone-warn { background: var(--warning); }
+.tp-dot.tone-bad { background: var(--danger); }
+.tp-head-text { min-width: 0; }
+.tp-title { font-size: var(--fs-sub); font-weight: 600; color: var(--fg); }
+.tp-sub { font-size: var(--fs-meta); color: var(--fg-2); margin-top: 2px; line-height: 1.45; }
+
+.tp-rows {
+  display: flex; flex-direction: column; gap: 7px;
+  padding: var(--s3) 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+}
+.tp-row { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s3); font-size: var(--fs-meta); }
+.tp-k { color: var(--fg-2); flex-shrink: 0; }
+.tp-v { color: var(--fg); font-weight: 500; text-align: right; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tp-v.tone-ok { color: var(--fg); }
+.tp-v.tone-warn { color: var(--warning); }
+.tp-v.tone-idle { color: var(--fg-2); font-weight: 400; }
+.tp-note { color: var(--fg-3); font-weight: 400; }
+
+/* The two ways back into the app share a row; quitting sits apart from them,
+   because it is the one button here that ends the earning. */
+.tp-actions { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s2); margin-top: auto; }
+.tp-actions .btn { width: 100%; justify-content: center; }
+
+.tp-quit {
+  display: flex; align-items: center; justify-content: center; gap: var(--s2);
+  width: 100%; padding: 7px var(--s3);
+  border: 1px solid var(--line); border-radius: var(--r2);
+  background: transparent; color: var(--fg-2); cursor: pointer;
+  font-size: var(--fs-meta); font-weight: 500;
+  transition: color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+.tp-quit:hover { color: var(--danger); border-color: var(--danger); }
+.tp-quit:disabled { opacity: 0.5; cursor: default; }
+.tp-quit svg { width: 14px; height: 14px; }
+
+.tp-foot { font-size: var(--fs-micro); color: var(--fg-3); line-height: 1.45; text-align: center; }

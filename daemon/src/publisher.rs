@@ -41,11 +41,31 @@ const CATALOG_KEY: &str = "sellable_catalog";
 /// not at the next restart.
 const CATALOG_TTL: i64 = 600;
 
-/// What this device may advertise, per local provider, as of `fetched_at`.
+/// How stale the market's prices may get before they are pulled again.
+///
+/// The server reprices once a minute, and the price is what decides whether an
+/// account's band is satisfied — so this is the resolution at which a lane can
+/// react to the market at all. It is a much cheaper read than the catalog above
+/// (`/market/ratios` is one Postgres query and no Redis), which is why the two
+/// have separate clocks rather than one pull doing both.
+const PRICE_TTL: i64 = 60;
+
+/// What this device may advertise, per local provider, as of `fetched_at`, and
+/// what the market currently pays for it.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 struct SellableCatalog {
     fetched_at: i64,
     by_provider: std::collections::BTreeMap<String, Vec<String>>,
+    /// What the market pays per model, in whole percent **of** the vendor's
+    /// list price (100 = list price). Empty until the first pull; a model
+    /// missing from it has no known price, which is not the same as a price of
+    /// zero and must never be judged against a band.
+    #[serde(default)]
+    ratios: std::collections::BTreeMap<String, i32>,
+    /// When those prices were read. Kept apart from `fetched_at` because the
+    /// two are refreshed on different clocks.
+    #[serde(default)]
+    priced_at: i64,
 }
 
 /// Fallback advertised models, used only until the first successful catalog
@@ -190,7 +210,15 @@ pub async fn refresh_sellable_catalog(store: &LocalStore, api_base: &str) -> any
         .and_then(|raw| serde_json::from_str::<SellableCatalog>(&raw).ok())
         .unwrap_or_default();
     let changed = previous.by_provider != by_provider;
-    let fresh = SellableCatalog { fetched_at: now_secs(), by_provider };
+    // The prices ride along in the same record and are refreshed on their own,
+    // much faster clock — so carry them over rather than blanking every band
+    // verdict on the device every ten minutes.
+    let fresh = SellableCatalog {
+        fetched_at: now_secs(),
+        by_provider,
+        ratios: previous.ratios,
+        priced_at: previous.priced_at,
+    };
     store.set_setting(CATALOG_KEY, &serde_json::to_string(&fresh)?).await?;
     if changed {
         tracing::info!("sellable catalog updated: {:?}", fresh.by_provider);
@@ -198,10 +226,90 @@ pub async fn refresh_sellable_catalog(store: &LocalStore, api_base: &str) -> any
     Ok(changed)
 }
 
+/// Pull what the market currently pays for every tradable model and cache it.
+///
+/// This is what the per-account price bands are judged against. It deliberately
+/// does *not* fail the caller when the market is unreachable: a lane with no
+/// known price keeps selling on the terms it already had (see
+/// `pool::apply_price_band`), so an outage here costs freshness, not supply.
+///
+/// `/market/ratios` is the endpoint built for this — one Postgres query, no
+/// Redis, safe to poll once a minute per device. A server that predates it
+/// falls back to `/market/models`, which carries the same `ratio` field along
+/// with the whole market board. The fallback matters more than it looks: the
+/// client and the server ship separately, and without it every seller on an
+/// older deployment reads no price at all — which is indistinguishable, on
+/// screen, from a market that pays nothing.
+pub async fn refresh_market_prices(store: &LocalStore, api_base: &str) -> anyhow::Result<()> {
+    let http = asale_client_core::http::plain();
+    let mut rows = fetch_ratio_rows(&http, &format!("{api_base}/api/v1/market/ratios")).await;
+    if rows.is_err() {
+        let fallback = fetch_ratio_rows(&http, &format!("{api_base}/api/v1/market/models")).await;
+        if fallback.is_ok() {
+            tracing::debug!("market/ratios unavailable; read prices from market/models instead");
+            rows = fallback;
+        }
+    }
+
+    let mut ratios: std::collections::BTreeMap<String, i32> = Default::default();
+    for row in rows? {
+        let model = row.get("model").and_then(|v| v.as_str()).unwrap_or_default();
+        // `ratio` is the fraction of list price, in [0.10, 1.00]. A row without
+        // one says nothing about the price and is skipped rather than defaulted
+        // — a missing price and a price of zero are not the same claim.
+        let Some(ratio) = row.get("ratio").and_then(serde_json::Value::as_f64) else {
+            continue;
+        };
+        if model.is_empty() {
+            continue;
+        }
+        ratios.insert(model.to_string(), (ratio * 100.0).round().clamp(0.0, 100.0) as i32);
+    }
+    if ratios.is_empty() {
+        anyhow::bail!("the market returned no prices");
+    }
+
+    let mut catalog = store
+        .get_setting(CATALOG_KEY)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<SellableCatalog>(&raw).ok())
+        .unwrap_or_default();
+    catalog.ratios = ratios;
+    catalog.priced_at = now_secs();
+    store.set_setting(CATALOG_KEY, &serde_json::to_string(&catalog)?).await?;
+    Ok(())
+}
+
+/// GET a market endpoint and hand back its `models` array. Both endpoints that
+/// carry prices answer in this shape.
+async fn fetch_ratio_rows(
+    http: &reqwest::Client,
+    url: &str,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let resp = http.get(url).send().await?;
+    let status = resp.status();
+    if !status.is_success() {
+        anyhow::bail!("{url} returned {status}");
+    }
+    let body: serde_json::Value = resp.json().await?;
+    body.get("models")
+        .and_then(|m| m.as_array())
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("{url} returned no models array: {body}"))
+}
+
 /// Whether the cached catalog is due for a pull.
 async fn catalog_is_stale(store: &LocalStore) -> bool {
     let fetched_at = load_catalog(store).await.map(|c| c.fetched_at).unwrap_or(0);
     now_secs() - fetched_at >= CATALOG_TTL
+}
+
+/// Whether the cached market prices are due for a pull.
+async fn prices_are_stale(store: &LocalStore) -> bool {
+    let priced_at = load_catalog(store).await.map(|c| c.priced_at).unwrap_or(0);
+    now_secs() - priced_at >= PRICE_TTL
 }
 
 // ── Publisher policy (server-authoritative, mirrored locally) ──────────────
@@ -673,12 +781,20 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
         a.origin = tool.origin.clone();
         a.used_today = used_today;
         a.sell_daily_limit = tool.sell_daily_limit;
+        a.sell_min_ratio = tool.sell_min_ratio;
+        a.sell_max_ratio = tool.sell_max_ratio;
         fresh.push(a);
     }
     // Pauses that need a person outlive the process: without this a restart
     // would put a lane the operator was asked to fix straight back on the
     // market, which is exactly the flapping the breaker exists to stop.
     let persisted = store.list_lane_pauses().await.unwrap_or_default();
+    // The cached market prices, judged against each account's band *after*
+    // `set_accounts` — that is the call which restores the hysteresis state the
+    // verdict is built on, so applying the band before it would forget every
+    // pending re-entry on each rebuild (which is once a minute, and on every
+    // account edit).
+    let ratios = catalog.map(|c| c.ratios).unwrap_or_default();
     if let Ok(mut p) = pool.lock() {
         p.set_accounts(fresh);
         for (provider, account_id, model, reason, _err) in persisted {
@@ -686,6 +802,7 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
                 p.pause_lane(&provider, &account_id, &model, r, 0);
             }
         }
+        p.apply_prices(&ratios, now_secs());
     }
 }
 
@@ -735,6 +852,11 @@ pub fn spawn_lane_loop(
 /// waiting for the 60s periodic re-declaration to stumble over them just
 /// leaves capacity idle and the seller unpaid for up to a minute; the third is
 /// polled on `CATALOG_TTL`.
+///
+/// The fourth clock is the market's own: a model's price moving in or out of
+/// an account's price band changes what this device is offering without
+/// anything local having happened at all, so the prices are polled on
+/// `PRICE_TTL` and a changed verdict is pushed the same way a cooldown is.
 pub fn spawn_recovery_loop(
     store: Arc<LocalStore>,
     pool: Arc<StdMutex<AccountPool>>,
@@ -762,23 +884,53 @@ pub fn spawn_recovery_loop(
                 }
             }
 
+            // The market repriced: a lane can cross its account's band in
+            // either direction without anything on this device changing.
+            if prices_are_stale(&store).await {
+                if let Err(e) = refresh_market_prices(&store, &server_api_base).await {
+                    tracing::warn!("market price refresh failed: {e}");
+                }
+            }
+
+            let withheld_before = withheld_lanes(&pool);
             // Recompute quota/daily-cap headroom, then let the pool decide
             // whether anything actually became serviceable.
             rebuild_pool(&store, &pool).await;
+            let withheld_after = withheld_lanes(&pool);
             let ready = pool
                 .lock()
                 .map(|p| p.lane_views(now_secs()).iter().any(|v| v.status == "selling"))
                 .unwrap_or(false);
+            if withheld_before != withheld_after {
+                tracing::info!(
+                    withheld = withheld_after.len(),
+                    "price band verdict changed — re-declaring what this device is offering"
+                );
+            }
             // A catalog change must be pushed even when nothing is serving:
             // withdrawing a model the platform dropped is exactly as urgent as
-            // announcing one it added.
-            if ready || catalog_changed {
+            // announcing one it added. So is a lane the price band has just
+            // taken out — leaving it advertised is how a device ends up selling
+            // at a price its operator refused.
+            if ready || catalog_changed || withheld_before != withheld_after {
                 if let Some(h) = publisher.read().await.as_ref() {
                     h.nudge();
                 }
             }
         }
     })
+}
+
+/// The lanes currently held back on price, as a sorted set of
+/// `provider:account:model` — compared across a rebuild to tell whether the
+/// market moved this device's offering.
+fn withheld_lanes(pool: &StdMutex<AccountPool>) -> std::collections::BTreeSet<String> {
+    let Ok(p) = pool.lock() else { return Default::default() };
+    p.lane_views(now_secs())
+        .into_iter()
+        .filter(|v| v.status == "withheld")
+        .map(|v| format!("{}:{}:{}", v.provider, v.account_id, v.model))
+        .collect()
 }
 
 /// Start of the next UTC day, in unix seconds.
@@ -835,6 +987,14 @@ pub async fn start(state: &AppState) -> anyhow::Result<PublisherHandle> {
     if catalog_is_stale(&state.store).await {
         if let Err(e) = refresh_sellable_catalog(&state.store, &state.cfg.server_api_base).await {
             tracing::warn!("sellable catalog refresh failed, using the cached set: {e}");
+        }
+    }
+    // And against what the market pays *now*, for the same reason: going on the
+    // market judging the price bands against a ten-minute-old price is how a
+    // device sells a window at a price its operator had ruled out.
+    if prices_are_stale(&state.store).await {
+        if let Err(e) = refresh_market_prices(&state.store, &state.cfg.server_api_base).await {
+            tracing::warn!("market price refresh failed, using the cached prices: {e}");
         }
     }
     // Make sure the pool reflects the current account set before serving.
@@ -990,7 +1150,7 @@ mod tests {
 
         let mut by_provider = std::collections::BTreeMap::new();
         by_provider.insert("claude".to_string(), vec!["claude-sonnet-5".to_string()]);
-        let pulled = Some(SellableCatalog { fetched_at: 1, by_provider });
+        let pulled = Some(SellableCatalog { fetched_at: 1, by_provider, ..Default::default() });
         assert_eq!(sellable_models(&pulled, "claude"), vec!["claude-sonnet-5"]);
         assert!(sellable_models(&pulled, "gemini").is_empty(), "the catalog's silence is an answer");
     }
@@ -1013,14 +1173,14 @@ mod tests {
                 "grok-4.20-multi-agent".to_string(),
             ],
         );
-        let pulled = Some(SellableCatalog { fetched_at: 1, by_provider });
+        let pulled = Some(SellableCatalog { fetched_at: 1, by_provider, ..Default::default() });
         assert_eq!(sellable_models(&pulled, "xai"), vec!["grok-4.5", "grok-4.3"]);
 
         // Moonshot's ids line up with the catalog, so nothing is filtered.
         assert!(native_models("kimi").is_none());
         let mut by_provider = std::collections::BTreeMap::new();
         by_provider.insert("kimi".to_string(), vec!["kimi-k2.7-code".to_string()]);
-        let pulled = Some(SellableCatalog { fetched_at: 1, by_provider });
+        let pulled = Some(SellableCatalog { fetched_at: 1, by_provider, ..Default::default() });
         assert_eq!(sellable_models(&pulled, "kimi"), vec!["kimi-k2.7-code"]);
     }
 

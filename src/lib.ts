@@ -21,6 +21,9 @@ export type {
   DepositSession,
   DepositSessionStatus,
   DepositSessionTx,
+  Globe,
+  GlobeFlow,
+  GlobeRegion,
   MarketModel,
   MarketModelPrice,
   OAuthAccount,
@@ -46,6 +49,15 @@ if (typeof window !== "undefined") {
     const qs = params.toString();
     window.history.replaceState(null, "", window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash);
   }
+}
+
+/** The daemon access token this frontend is using, if it has one.
+ *
+ *  Exposed so the Settings page can build the URL that opens this same daemon
+ *  in another browser — the token is the whole authorization, so a link without
+ *  it loads the app and then fails every call it makes. */
+export function daemonToken(): string {
+  return (typeof window !== "undefined" && localStorage.getItem(TOKEN_KEY)) || "";
 }
 
 /** Base URL of the daemon RPC API. */
@@ -406,8 +418,9 @@ export interface Lane {
   provider: string;
   account_id: string;
   model: string;
-  status: "selling" | "cooldown" | "paused" | "off" | "expired" | "exhausted";
-  /** `rate_limit` | `quota` | `auth` | `breaker` | `manual` when paused. */
+  status: "selling" | "cooldown" | "paused" | "withheld" | "off" | "expired" | "exhausted";
+  /** `rate_limit` | `quota` | `auth` | `breaker` | `manual` when paused,
+   *  `price` when the market moved outside the account's price band. */
   paused_reason: string | null;
   /** True when the operator has to fix something and press resume. */
   requires_user: boolean;
@@ -418,6 +431,15 @@ export interface Lane {
   last_error: string;
   sell_enabled: boolean;
   quota_remaining: number;
+  /** What the market currently pays for this model, as whole percent *of* the
+   *  vendor's list price (100 = list price). `null` when this device has not
+   *  read a price for it yet, which is not a price of zero and must not be
+   *  drawn as one. */
+  ratio: number | null;
+  /** The account's own band, carried on the lane so the chart can draw the
+   *  threshold next to the bar it explains. */
+  min_ratio: number;
+  max_ratio: number;
 }
 
 export interface AccountStatus {
@@ -432,12 +454,25 @@ export interface AccountStatus {
   sell_enabled: boolean;
   /** This account's daily sell cap in tokens; 0 = unlimited. */
   sell_daily_limit: number;
+  /** The price floor this account sells at, in whole percent *of* list price: a
+   *  model the market prices below it is withheld until it comes back. `10` —
+   *  the default, and below every price the server can quote — never withholds
+   *  anything.
+   *
+   *  `sell_max_ratio` is the band's other end, which the UI no longer sets: no
+   *  price is too good to accept, so it stays at list price. */
+  sell_min_ratio: number;
+  sell_max_ratio: number;
   /** Tokens this account served today / in the current 5h window. */
   used_today: number;
   used_window: number;
   /** Its plan's 5h cap and the daily equivalent (×24/5), for "% of plan". */
   window_cap: number;
   daily_cap: number;
+  /** A metered platform key rather than a plan subscription: billed against a
+   *  balance, so it has no rolling window and the two caps above are guesses
+   *  that do not apply to it. The UI hides window figures for these. */
+  key_based: boolean;
   /** `oauth` = asale owns this login outright; `import` = copied from a local CLI. */
   origin: string | null;
   /** Where the credential in use came from (keychain service or file path). */
