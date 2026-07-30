@@ -16,5 +16,21 @@ export default defineConfig({
     },
   },
   server: { port: 9173, strictPort: true },
-  build: { outDir: "dist", emptyOutDir: true },
+  build: {
+    outDir: "dist",
+    emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          react: ["react", "react-dom", "react-i18next", "i18next"],
+          tauri: [
+            "@tauri-apps/api",
+            "@tauri-apps/plugin-autostart",
+            "@tauri-apps/plugin-process",
+            "@tauri-apps/plugin-updater",
+          ],
+        },
+      },
+    },
+  },
 });

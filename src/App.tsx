@@ -1,15 +1,6 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke, inTauri, isDaemonDown, waitForDaemon, type Profile } from "./lib";
-import { Dashboard } from "./pages/Dashboard";
-import { Publish } from "./pages/Publish";
-import { Consume } from "./pages/Consume";
-import { WalletPage } from "./pages/Wallet";
-import { Records } from "./pages/Records";
-import { Usage } from "./pages/Usage";
-import { Limits } from "./pages/Limits";
-import { Account } from "./pages/Account";
-import { Settings } from "./pages/Settings";
 import {
   IconDashboard, IconPublish, IconConsume, IconWallet,
   IconRecords, IconUsage, IconGauge, IconAccount, IconSettings,
@@ -17,6 +8,16 @@ import {
 import { StatusWidget } from "./components/StatusWidget";
 import { Skeleton, PageSkeleton } from "./ui";
 import type { JSX } from "react";
+
+const Dashboard = lazy(() => import("./pages/Dashboard").then((m) => ({ default: m.Dashboard })));
+const Publish = lazy(() => import("./pages/Publish").then((m) => ({ default: m.Publish })));
+const Consume = lazy(() => import("./pages/Consume").then((m) => ({ default: m.Consume })));
+const WalletPage = lazy(() => import("./pages/Wallet").then((m) => ({ default: m.WalletPage })));
+const Records = lazy(() => import("./pages/Records").then((m) => ({ default: m.Records })));
+const Usage = lazy(() => import("./pages/Usage").then((m) => ({ default: m.Usage })));
+const Limits = lazy(() => import("./pages/Limits").then((m) => ({ default: m.Limits })));
+const Account = lazy(() => import("./pages/Account").then((m) => ({ default: m.Account })));
+const Settings = lazy(() => import("./pages/Settings").then((m) => ({ default: m.Settings })));
 
 type Tab = "dashboard" | "publish" | "consume" | "usage" | "limits" | "wallet" | "records" | "account" | "settings";
 
@@ -160,7 +161,7 @@ export function App() {
         </div>
         <div className="main-inner fade-in" key={booted ? tab : "boot"}>
           {!booted ? <PageSkeleton /> : (
-            <>
+            <Suspense fallback={<PageSkeleton />}>
               {/* The overview map calls out the reader's own country, and the
                   only place that is known is the profile polled above. */}
               {tab === "dashboard" && <Dashboard onNavigate={setTab} region={profile?.region ?? ""} />}
@@ -172,7 +173,7 @@ export function App() {
               {tab === "records" && <Records />}
               {tab === "account" && <Account />}
               {tab === "settings" && <Settings />}
-            </>
+            </Suspense>
           )}
         </div>
       </main>

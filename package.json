@@ -1,6 +1,6 @@
 {
   "name": "asale-client",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "dev:app": "ASALE_QUOTA_PUBKEY=oN6MtrUQvzGkFSFZklnzPJkJ5Dlvx5Xu4OK3BovyJ+w= ASALE_DATA_DIR=${ASALE_DATA_DIR:-$HOME/.asale-dev} ASALE_BIND=${ASALE_BIND:-127.0.0.1:9701} ASALE_PROXY_PORT=${ASALE_PROXY_PORT:-9788} VITE_ASALE_DAEMON=${VITE_ASALE_DAEMON:-http://127.0.0.1:9701} tauri dev --config src-tauri/tauri.dev.conf.json"
+    "dev:app": "node scripts/dev-app.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
