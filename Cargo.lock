@@ -94,6 +94,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "asale-cli"
+version = "0.1.5"
+dependencies = [
+ "anyhow",
+ "serde_json",
+]
+
+[[package]]
 name = "asale-client-core"
 version = "0.1.5"
 dependencies = [

@@ -98,8 +98,21 @@ other**, so the platform's fee ratio is verifiable. The same data is available i
 
 [![latest release](https://img.shields.io/github/v/release/asale-ai/asale?label=latest&color=2f7d4f)](https://github.com/asale-ai/asale/releases/latest)
 
-Free. The quickest route is [**asale.ai**](https://asale.ai) — it detects your OS and hands
-you the right installer. Or go straight at one:
+Free. One line does the whole thing — app, plus the `asale` command line:
+
+```sh
+curl -fsSL https://asale.ai/dl/install.sh | sh      # macOS / Linux
+```
+```powershell
+irm https://asale.ai/dl/install.ps1 | iex           # Windows
+```
+
+Run the same line again later to upgrade. On a machine with **no desktop** the script
+installs web mode instead of a GUI it could not draw — see
+[Headless: run it on a server](#headless-run-it-on-a-server).
+
+Or take the installer by hand from [**asale.ai**](https://asale.ai), which detects your OS
+and hands you the right one. Or go straight at one:
 
 | Platform | Direct link |
 |---|---|
@@ -121,7 +134,30 @@ download section — Windows and Linux bundles have to be produced on the matchi
    by Apple, so macOS opens them without a warning.
 
 Once installed the app stays resident in the background (menu bar icon), supports launch
-at login, and updates itself.
+at login, and updates itself. **Closing the window does not quit it** — Asale keeps selling
+from the tray. Click the tray icon for a small panel with the live figures, a button for
+the browser, and a real quit; *Settings → Window and tray* turns that behaviour off if you
+would rather the close button closed.
+
+### Headless: run it on a server
+
+The service holds the whole app and serves its own web UI, so a box with no graphical
+session is not a lesser install — it is the same client on a port:
+
+```sh
+curl -fsSL https://asale.ai/dl/install.sh | sh
+asale start --web          # listen on every interface, port 9700
+asale url                  # the URL to open — access token included
+asale autostart enable     # come back automatically after a reboot
+```
+
+Open that URL from any browser and you get the full client. The token in it is the entire
+authorization — anyone holding it can read your credentials and spend your balance — so
+keep the port behind a firewall or a TLS reverse proxy.
+
+`asale` is installed on every platform, not just headless ones: `start`, `stop`, `restart`,
+`status`, `logs`, `open`, `autostart`, `update`, `uninstall`. Full reference:
+[docs/CLI.md](docs/CLI.md).
 
 ### First run
 

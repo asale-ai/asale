@@ -590,7 +590,7 @@
   },
   "settings": {
     "title": "设置",
-    "sub": "应用行为：开机自启、软件更新。关闭窗口时 Asale 会隐藏到系统托盘。",
+    "sub": "应用行为：浏览器访问、窗口与托盘、开机自启、软件更新。",
     "autostartTitle": "开机自启",
     "autostartDesc": "登录系统后自动启动 Asale——如果你在出售 Token，建议开启以保持在线。",
     "autostartLabel": "登录时启动 Asale",
@@ -638,7 +638,22 @@
     "proxyDirect": "直连（未使用代理）",
     "proxyEnvOverride": "环境变量 {{name}}={{value}} 已覆盖此处设置；如需在界面中控制，请清除该环境变量后重启 Asale 服务。",
     "daemonRunning": "运行中",
-    "daemonStopped": "未连接"
+    "daemonStopped": "未连接",
+    "webTitle": "网页模式",
+    "webDesc": "服务本身就带完整的应用界面，可以直接用浏览器打开——本机或局域网另一台机器都行。没有桌面环境的机器就是这么用 Asale 的。",
+    "webUrl": "应用地址",
+    "webUrlHint": "链接里的 token 就是访问凭证，拿到它就等于拿到这个账号，请当作密码对待。",
+    "webOpen": "在浏览器中打开",
+    "webBind": "监听地址",
+    "webRemotePill": "可被网络访问",
+    "webRemoteWarn": "服务正监听在其他机器也能访问的地址上。上面链接里的 token 是唯一的防线——请把端口放在防火墙后，或者前面加一层带 TLS 的反向代理。想改回只允许本机，重启服务：asale start --bind 127.0.0.1:9700",
+    "webLocalHint": "服务当前只监听本机。想从手机或另一台机器访问，用这条命令重启：asale start --web",
+    "webUnavailable": "应用地址还取不到——服务正在启动。",
+    "trayTitle": "窗口与托盘",
+    "trayDesc": "关掉窗口后 Asale 仍在出售。托盘图标会显示实时状态，点一下会弹出概览面板，里面有今日数据和真正的退出按钮。",
+    "trayCloseLabel": "关闭窗口时最小化到托盘",
+    "trayCloseHides": "关闭窗口后 Asale 继续运行并出售，要退出请用托盘面板。",
+    "trayCloseQuits": "关闭窗口即退出 Asale，出售也随之停止。"
   },
   "common": {
     "copy": "复制",
@@ -839,5 +854,12 @@
       "declined": "{{provider}} 登录被拒绝。",
       "unsupportedProvider": "该服务不使用设备码登录（仅 Kimi 与 Grok 支持）。"
     }
+  },
+  "tray": {
+    "openDesktop": "打开桌面窗口",
+    "openWeb": "在浏览器中打开",
+    "quit": "完全退出",
+    "quitNote": "退出后停止出售；关闭窗口只是收进托盘。",
+    "earnedToday": "今日收入"
   }
 }

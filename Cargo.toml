@@ -12,7 +12,7 @@
 
 [workspace]
 resolver = "2"
-members = ["protocol", "core", "daemon", "src-tauri"]
+members = ["protocol", "core", "daemon", "cli", "src-tauri"]
 
 [workspace.package]
 version = "0.1.5"

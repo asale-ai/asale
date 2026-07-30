@@ -590,7 +590,7 @@
   },
   "settings": {
     "title": "設定",
-    "sub": "應用行為：開機自動啟動、軟體更新。關閉視窗時 Asale 會隱藏到系統匣。",
+    "sub": "應用行為：瀏覽器存取、視窗與系統列、開機自啟、軟體更新。",
     "autostartTitle": "開機自動啟動",
     "autostartDesc": "登入系統後自動啟動 Asale——若你正在出售 Token，建議開啟以保持上線。",
     "autostartLabel": "登入時啟動 Asale",
@@ -638,7 +638,22 @@
     "proxyDirect": "直連（未使用代理）",
     "proxyEnvOverride": "環境變數 {{name}}={{value}} 已覆寫此處設定；如需在介面中控制，請清除該環境變數後重新啟動 Asale 服務。",
     "daemonRunning": "執行中",
-    "daemonStopped": "未連接"
+    "daemonStopped": "未連接",
+    "webTitle": "網頁模式",
+    "webDesc": "服務本身就帶完整的應用介面，可以直接用瀏覽器開啟——本機或區域網路另一台機器都行。沒有桌面環境的機器就是這麼用 Asale 的。",
+    "webUrl": "應用網址",
+    "webUrlHint": "連結裡的 token 就是存取憑證，拿到它就等於拿到這個帳號，請當作密碼看待。",
+    "webOpen": "在瀏覽器中開啟",
+    "webBind": "監聽位址",
+    "webRemotePill": "可被網路存取",
+    "webRemoteWarn": "服務正監聽在其他機器也能存取的位址上。上面連結裡的 token 是唯一的防線——請把連接埠放在防火牆後，或在前面加一層帶 TLS 的反向代理。想改回只允許本機，重啟服務：asale start --bind 127.0.0.1:9700",
+    "webLocalHint": "服務目前只監聽本機。想從手機或另一台機器存取，用這條指令重啟：asale start --web",
+    "webUnavailable": "應用網址還取不到——服務正在啟動。",
+    "trayTitle": "視窗與系統列",
+    "trayDesc": "關掉視窗後 Asale 仍在出售。系統列圖示會顯示即時狀態，點一下會彈出概覽面板，裡面有今日數據和真正的結束按鈕。",
+    "trayCloseLabel": "關閉視窗時縮到系統列",
+    "trayCloseHides": "關閉視窗後 Asale 繼續執行並出售，要結束請用系統列面板。",
+    "trayCloseQuits": "關閉視窗即結束 Asale，出售也隨之停止。"
   },
   "common": {
     "copy": "複製",
@@ -839,5 +854,12 @@
       "declined": "{{provider}} 登入被拒絕。",
       "unsupportedProvider": "此服務不使用裝置碼登入（僅 Kimi 與 Grok 支援）。"
     }
+  },
+  "tray": {
+    "openDesktop": "開啟桌面視窗",
+    "openWeb": "在瀏覽器中開啟",
+    "quit": "完全結束",
+    "quitNote": "結束後停止出售；關閉視窗只是收進系統列。",
+    "earnedToday": "今日收入"
   }
 }

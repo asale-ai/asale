@@ -18,13 +18,26 @@ pub fn client_config(state: &AppState) -> Value {
     })
 }
 
-/// Daemon self-description (version, data dir) — shown on the Settings page in
-/// browser mode where the desktop shell's autostart/updater don't exist.
+/// Daemon self-description (version, data dir, where it listens) — shown on the
+/// Settings page in browser mode where the desktop shell's autostart/updater
+/// don't exist.
+///
+/// The listen address is here because the Settings page offers "open this in a
+/// browser", and that offer means two very different things depending on it: on
+/// loopback the app is reachable only from this machine, on any other address
+/// the daemon token is the only thing between the network and the user's
+/// credentials. A page that hands out a URL has to be able to say which.
 pub fn daemon_info() -> Value {
+    let bound = crate::bound_addr();
     json!({
         "name": "asaled",
         "version": env!("CARGO_PKG_VERSION"),
         "data_dir": crate::state::data_dir(),
+        // Null before the listener is up (the very first RPCs of a cold start
+        // reach this through the desktop shell's in-process daemon).
+        "bind": bound.map(|a| a.to_string()),
+        "port": bound.map(|a| a.port()),
+        "remote": bound.map(|a| a.ip().is_unspecified() || !a.ip().is_loopback()),
     })
 }
 

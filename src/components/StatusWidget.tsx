@@ -11,14 +11,17 @@ import { useTranslation } from "react-i18next";
 import { invoke, type ClientStatus } from "../lib";
 import { IconWifi } from "../icons";
 
-type Tone = "ok" | "warn" | "bad" | "idle";
+export type Tone = "ok" | "warn" | "bad" | "idle";
 /** One resolved state: which colour, which text block, and whether the dot
  *  should breathe (reserved for "it is working on it, wait"). */
-interface View { tone: Tone; key: string; pulse?: boolean }
+export interface View { tone: Tone; key: string; pulse?: boolean }
 
 /** Collapse the raw status into the single state the user is actually in.
- *  Order is severity, not sequence: a signed-out client's link state is noise. */
-function resolve(ready: boolean, down: boolean, s: ClientStatus | null): View {
+ *  Order is severity, not sequence: a signed-out client's link state is noise.
+ *
+ *  Exported because the tray panel shows the same state from the same poll: two
+ *  readouts of "is this working" that could disagree is worse than either. */
+export function resolveStatus(ready: boolean, down: boolean, s: ClientStatus | null): View {
   // Nothing has answered yet. This is the normal first second of a launch (the
   // shell boots its daemon while the webview paints), so it must not read as a
   // fault — "daemon down" here would be a false alarm on every start.
@@ -123,7 +126,7 @@ export function StatusWidget() {
     };
   }, [pinned]);
 
-  const v = resolve(ready, down, status);
+  const v = resolveStatus(ready, down, status);
   const open = pinned || hovering;
   const s = status;
 

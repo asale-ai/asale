@@ -4,9 +4,10 @@ import { getVersion } from "@tauri-apps/api/app";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { invoke, realTauri } from "../lib";
-import { Card, Err, Ok, PageHead, FactGrid } from "../ui";
-import { IconPower, IconDownload, IconRefresh, IconCheck, IconServer, IconGlobe, IconInfo } from "../icons";
+import { apiBase, daemonToken, invoke, realTauri } from "../lib";
+import { shell } from "../shell";
+import { Card, CopyChip, Err, Ok, PageHead, FactGrid } from "../ui";
+import { IconPower, IconDownload, IconRefresh, IconCheck, IconServer, IconGlobe, IconInfo, IconExternal, IconAlert } from "../icons";
 import { errText } from "../errors";
 
 type UpdatePhase = "idle" | "checking" | "none" | "available" | "downloading" | "ready" | "error";
@@ -15,6 +16,12 @@ interface DaemonInfo {
   name: string;
   version: string;
   data_dir: string;
+  /** Where the daemon actually listens; null until its listener is up. */
+  bind: string | null;
+  port: number | null;
+  /** True when that address is reachable from other machines — at which point
+   *  the token in the URL below is the only thing protecting the account. */
+  remote: boolean | null;
 }
 
 type ProxyMode = "auto" | "off" | "manual";
@@ -46,6 +53,10 @@ export function Settings() {
   const [autostartBusy, setAutostartBusy] = useState(false);
   const [autostartErr, setAutostartErr] = useState("");
 
+  const [webUrl, setWebUrl] = useState("");
+  const [webErr, setWebErr] = useState("");
+  const [closeToTray, setCloseToTray] = useState<boolean | null>(null);
+
   const [proxy, setProxy] = useState<ProxySettings | null>(null);
   const [proxyMode, setProxyMode] = useState<ProxyMode>("auto");
   const [proxyUrl, setProxyUrl] = useState("");
@@ -65,10 +76,26 @@ export function Settings() {
       .then((d) => { setDaemon(d); setDaemonErr(""); })
       .catch((e) => setDaemonErr(errText(e)));
     invoke<ProxySettings>("proxy_settings").then(applyProxy).catch((e) => setProxyErr(errText(e)));
+
+    // The URL that opens this daemon in a browser. In the shell the token comes
+    // from the file the shell already read; in a browser we are *on* that URL,
+    // so it is rebuilt from the origin plus the token this page authenticates
+    // with — a link without the token loads the app and then 401s every call.
+    if (realTauri) {
+      shell.webUiUrl()
+        .then((u) => setWebUrl(u ?? ""))
+        .catch((e) => setWebErr(errText(e)));
+    } else {
+      const origin = apiBase() || window.location.origin;
+      const tok = daemonToken();
+      setWebUrl(tok ? `${origin}/?token=${tok}` : origin);
+    }
+
     if (!realTauri) return;
     // Shell-only info: the desktop app's own version (updater target).
     getVersion().then(setVersion).catch(() => {});
     isEnabled().then(setAutostart).catch((e) => setAutostartErr(errText(e)));
+    shell.getCloseToTray().then((v) => setCloseToTray(v ?? true)).catch(() => setCloseToTray(true));
   }, []);
 
   const applyProxy = (p: ProxySettings) => {
@@ -95,6 +122,17 @@ export function Settings() {
   };
 
   const proxyDirty = proxy !== null && (proxyMode !== proxy.mode || (proxyMode === "manual" && proxyUrl !== proxy.url));
+
+  // Two writes on purpose: the shell applies it to the *running* window
+  // immediately, and the daemon store is what survives a restart — and what the
+  // same switch reads when it is flipped from a browser instead.
+  const toggleCloseToTray = async () => {
+    if (closeToTray === null) return;
+    const next = !closeToTray;
+    setCloseToTray(next);
+    await shell.setCloseToTray(next).catch(() => {});
+    invoke("set_setting", { key: "close_to_tray", value: next ? "1" : "0" }).catch(() => {});
+  };
 
   const toggleAutostart = async () => {
     if (autostart === null || autostartBusy) return;
@@ -144,6 +182,62 @@ export function Settings() {
         ) : daemonErr ? (
           <Err>{t("settings.daemonUnreachable", { msg: daemonErr })}</Err>
         ) : null}
+      </Card>
+
+      {/* Web mode. The daemon serves the whole app itself, so "open this in a
+          browser" is not a lesser version of the desktop window — it is the
+          only version on a machine with no desktop, and the way to check on a
+          selling box from a phone. The URL carries the daemon token, which is
+          why this card spends as many words on who can use it as on how. */}
+      <Card
+        icon={<IconGlobe />}
+        title={t("settings.webTitle")}
+        desc={t("settings.webDesc")}
+        right={daemon?.remote ? <span className="pill warn">{t("settings.webRemotePill")}</span> : null}
+      >
+        {webUrl ? (
+          <>
+            <div className="field">
+              <label>{t("settings.webUrl")}</label>
+              <CopyChip value={webUrl} wrap />
+              <div className="hint">{t("settings.webUrlHint")}</div>
+            </div>
+
+            {realTauri && (
+              <div className="btn-row">
+                <button className="btn" onClick={() => shell.openWebUi().catch((e) => setWebErr(errText(e)))}>
+                  <IconExternal />
+                  {t("settings.webOpen")}
+                </button>
+              </div>
+            )}
+
+            {daemon?.bind && (
+              <div className="fact-grid tight card-foot">
+                <div className="fact">
+                  <span className="fact-k">{t("settings.webBind")}</span>
+                  <span className="fact-v mono">{daemon.bind}</span>
+                </div>
+              </div>
+            )}
+
+            {/* Bound past loopback, the token is the entire access control, and
+                it is sitting in a URL. Say so where the URL is. */}
+            {daemon?.remote ? (
+              <div className="callout warn card-foot">
+                <IconAlert />
+                <span>{t("settings.webRemoteWarn")}</span>
+              </div>
+            ) : (
+              <div className="callout card-foot">
+                <IconInfo />
+                <span>{t("settings.webLocalHint")}</span>
+              </div>
+            )}
+          </>
+        ) : (
+          <Err>{webErr || t("settings.webUnavailable")}</Err>
+        )}
       </Card>
 
       {/* Upstream proxy. Provider endpoints are unreachable from some regions,
@@ -221,6 +315,27 @@ export function Settings() {
 
       {realTauri ? (
         <>
+          {/* Closing the window keeps asale selling. That is the right default
+              and the surprising one, so it is a switch rather than a footnote —
+              and the tray panel it hides into is described next to it. */}
+          <Card icon={<IconServer />} title={t("settings.trayTitle")} desc={t("settings.trayDesc")}>
+            <div className="switch-row">
+              <span className="switch-label">{t("settings.trayCloseLabel")}</span>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={closeToTray === true}
+                  disabled={closeToTray === null}
+                  onChange={toggleCloseToTray}
+                />
+                <span className="track" />
+              </label>
+            </div>
+            <div className="hint card-foot">
+              {closeToTray === false ? t("settings.trayCloseQuits") : t("settings.trayCloseHides")}
+            </div>
+          </Card>
+
           <Card icon={<IconPower />} title={t("settings.autostartTitle")} desc={t("settings.autostartDesc")}>
             <div className="switch-row">
               <span className="switch-label">{t("settings.autostartLabel")}</span>

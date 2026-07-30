@@ -84,8 +84,20 @@ Claude Pro / Max · ChatGPT / Codex · Google Gemini · Kimi · xAI Grok
 
 [![最新版本](https://img.shields.io/github/v/release/asale-ai/asale?label=%E6%9C%80%E6%96%B0%E7%89%88&color=2f7d4f)](https://github.com/asale-ai/asale/releases/latest)
 
-免費。最省事的方式是打開[**官網首頁**](https://asale.ai)，它會自動辨識你的系統並給出對應安裝包。
-也可以直接點下面的直達連結：
+免費。一行指令裝完——桌面應用，外加 `asale` 命令列：
+
+```sh
+curl -fsSL https://asale.ai/dl/install.sh | sh      # macOS / Linux
+```
+```powershell
+irm https://asale.ai/dl/install.ps1 | iex           # Windows
+```
+
+之後再跑同一行就是升級。**沒有桌面環境**的機器上，腳本會裝成網頁模式，而不是裝一個畫不出來的
+視窗——見[無桌面：裝在伺服器上](#無桌面裝在伺服器上)。
+
+也可以打開[**官網首頁**](https://asale.ai)，它會自動辨識你的系統並給出對應安裝包；
+或者直接點下面的直達連結：
 
 | 平台 | 直達連結 |
 |---|---|
@@ -105,6 +117,26 @@ Claude Pro / Max · ChatGPT / Codex · Google Gemini · Kimi · xAI Grok
 2. 沒有第二步。發布包都用 Developer ID 憑證簽章並通過了 Apple 公證，macOS 不會攔。
 
 裝好之後應用會在背景常駐（選單列圖示），支援開機自動啟動，新版本自動更新。
+**關閉視窗不等於結束** —— Asale 會收進系統列繼續出售。點系統列圖示會彈出一個小面板，裡面有即時
+數據、「在瀏覽器中開啟」和真正的結束按鈕；不喜歡這個行為可以在「設定 → 視窗與系統列」關掉。
+
+### 無桌面：裝在伺服器上
+
+服務本身就帶完整的應用介面，所以一台沒有圖形環境的機器不是「簡配版」，而是同一個用戶端掛在連接埠上：
+
+```sh
+curl -fsSL https://asale.ai/dl/install.sh | sh
+asale start --web          # 監聽所有網卡，連接埠 9700
+asale url                  # 要開啟的網址，已帶存取 token
+asale autostart enable     # 重開機後自動回來
+```
+
+用任意瀏覽器開啟那個網址就是完整用戶端。網址裡的 token 就是全部存取憑證——拿到它的人能讀你的
+憑據、花你的餘額——所以請把連接埠放在防火牆或帶 TLS 的反向代理後面。
+
+`asale` 在所有平台都會裝上，不只是無桌面機器：`start`、`stop`、`restart`、`status`、
+`logs`、`open`、`autostart`、`update`、`uninstall`。
+完整說明見 [docs/CLI.md](docs/CLI.md)。
 
 ### 第一次使用
 

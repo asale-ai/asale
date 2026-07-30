@@ -51,6 +51,15 @@ if (typeof window !== "undefined") {
   }
 }
 
+/** The daemon access token this frontend is using, if it has one.
+ *
+ *  Exposed so the Settings page can build the URL that opens this same daemon
+ *  in another browser — the token is the whole authorization, so a link without
+ *  it loads the app and then fails every call it makes. */
+export function daemonToken(): string {
+  return (typeof window !== "undefined" && localStorage.getItem(TOKEN_KEY)) || "";
+}
+
 /** Base URL of the daemon RPC API. */
 export function apiBase(): string {
   const env = import.meta.env.VITE_ASALE_DAEMON as string | undefined;

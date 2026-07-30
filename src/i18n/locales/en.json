@@ -590,7 +590,7 @@
   },
   "settings": {
     "title": "Settings",
-    "sub": "App behavior: launch at login, updates. Closing the window hides Asale to the system tray.",
+    "sub": "App behaviour: browser access, the window and the tray, launch at login, and updates.",
     "autostartTitle": "Launch at login",
     "autostartDesc": "Start Asale automatically when you sign in to your computer — recommended if you sell tokens, so you stay online.",
     "autostartLabel": "Start Asale at login",
@@ -638,7 +638,22 @@
     "proxyDirect": "Direct (no proxy)",
     "proxyEnvOverride": "The environment variable {{name}}={{value}} overrides this setting. Clear it and restart the Asale service to control the proxy from here.",
     "daemonRunning": "Running",
-    "daemonStopped": "Unreachable"
+    "daemonStopped": "Unreachable",
+    "webTitle": "Web mode",
+    "webDesc": "The service serves the whole app itself, so it can be used from a browser — on this machine, or from another one over the network. This is how Asale is used on a machine with no desktop.",
+    "webUrl": "App address",
+    "webUrlHint": "The token in this link is the access token. Anyone who has it can use this account, so share it the way you would share a password.",
+    "webOpen": "Open in browser",
+    "webBind": "Listening on",
+    "webRemotePill": "Reachable from the network",
+    "webRemoteWarn": "The service is listening on an address other machines can reach. The token in the link above is the only thing protecting it — keep the port behind a firewall, or put a reverse proxy with TLS in front of it. To go back to this machine only, restart the service with: asale start --bind 127.0.0.1:9700",
+    "webLocalHint": "The service is listening on this machine only. To use it from another device — a phone, or your laptop against a home server — restart it with: asale start --web",
+    "webUnavailable": "The app address is not available yet — the service is still starting.",
+    "trayTitle": "Window and tray",
+    "trayDesc": "Asale keeps selling while its window is closed. The tray icon shows the live state; clicking it opens a small panel with today's figures and a real quit.",
+    "trayCloseLabel": "Closing the window hides Asale to the tray",
+    "trayCloseHides": "Closing the window keeps Asale running and selling. Quit it from the tray panel.",
+    "trayCloseQuits": "Closing the window quits Asale, which also stops selling."
   },
   "common": {
     "copy": "Copy",
@@ -839,5 +854,12 @@
       "declined": "The {{provider}} sign-in was declined.",
       "unsupportedProvider": "This provider does not use a device-code login (Kimi and Grok do)."
     }
+  },
+  "tray": {
+    "openDesktop": "Open Asale",
+    "openWeb": "Open in browser",
+    "quit": "Quit Asale",
+    "quitNote": "Quitting stops selling. Closing the window only hides it here.",
+    "earnedToday": "Earned today"
   }
 }

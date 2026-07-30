@@ -115,6 +115,38 @@ Tauri はクロスプラットフォームでパッケージングできませ�
 成果物は `target/<target>/release/bundle/` に出力され、各インストーラの隣に `.sig` が
 1 つずつ置かれます。
 
+### コマンドラインとヘッドレス用アーカイブ
+
+実行のたびに `bundle/cli/asale-cli-<version>-<platform>.tar.gz`（Windows では `.zip`）も
+生成されます。中身はバイナリ 2 つです:
+
+- **`asaled`** —— サービス本体。asale のすべてのロジックを持ち、ウェブ UI も埋め込まれて
+  います（`rust-embed`、`daemon/src/rpc.rs` を参照）。そのためデスクトップのないマシンでも
+  `asale start --web` の後、任意のブラウザーから利用できます。
+- **`asale`** —— コマンドライン: start/stop/restart/status、起動時登録、トークン付き URL の
+  表示。[CLI.md](CLI.md) を参照。
+
+どちらも webkit / GTK にリンクしません。これがまっさらなサーバーに導入できる理由であり、
+ビルドマシンにデスクトップ関連の依存を一切必要としない理由でもあります:
+
+> cargo 上のコマンドラインの bin 名は **`asale-cli`** で、アーカイブに入れる際に
+> パッケージングスクリプトが `asale` へ改名します。デスクトップシェルのバイナリが既に
+> `asale` であり、同一ワークスペースの 2 つの bin が同じ `target/<profile>/` パスに書くと
+> 互いを上書きしてしまうためです。ローカルでは `cargo run -p asale-cli -- status`、
+> インストール後は `asale status` になります。
+
+```bash
+./scripts/package.sh --cli-only     # アーカイブのみ。.dmg/.deb/.AppImage は作らない
+./scripts/package.sh --no-cli       # インストーラのみ。従来どおり
+```
+
+`--cli-only` でもフロントエンドは先にビルドされます。ウェブ UI は `asaled` の *中に*
+コンパイルされるため、`pnpm build` を飛ばすと「UI が埋め込まれていない」と答えるだけの
+サービスができあがります。
+
+このアーカイブが `https://asale.ai/dl/install.sh` のダウンロード対象で、サイト側リポジトリの
+`src/lib/downloads.ts` にある正規表現で選ばれます —— 名前を変えるならその表も変更が必要です。
+
 ---
 
 ## リリースと自動更新

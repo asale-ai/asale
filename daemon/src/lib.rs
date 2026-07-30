@@ -70,6 +70,18 @@ pub struct StartedDaemon {
 
 pub const DEFAULT_BIND: &str = "127.0.0.1:9700";
 
+/// The address this process actually ended up listening on, once it has.
+///
+/// Not the same thing as `resolve_bind`: a caller can ask for port 0, and the
+/// Settings page has to be able to say where the app *is* — including whether
+/// it is reachable from other machines, which is the difference between "only
+/// you can open this" and "anyone with the token can".
+static BOUND: std::sync::OnceLock<SocketAddr> = std::sync::OnceLock::new();
+
+pub fn bound_addr() -> Option<SocketAddr> {
+    BOUND.get().copied()
+}
+
 /// Resolve the bind address: explicit arg > $ASALE_BIND > 127.0.0.1:9700.
 pub fn resolve_bind(cli: Option<&str>) -> anyhow::Result<SocketAddr> {
     let raw = cli
@@ -287,6 +299,7 @@ pub async fn start(bind: SocketAddr) -> anyhow::Result<StartedDaemon> {
     let ctx = rpc::Ctx { state: app_state.clone(), token: Arc::new(token.clone()) };
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let addr = listener.local_addr()?;
+    let _ = BOUND.set(addr);
     tokio::spawn(async move {
         let app = rpc::router(ctx).into_make_service_with_connect_info::<SocketAddr>();
         if let Err(e) = axum::serve(listener, app).await {

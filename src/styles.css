@@ -1824,3 +1824,64 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ── Tray overview panel ────────────────────────────────────────────────────
+   A second window (`?view=panel`, see main.tsx) that the tray icon opens under
+   itself. It is a menu, not a page: fixed size, no scrollbar, no chrome of its
+   own — the window has no decorations, so this fills it edge to edge and the
+   border below *is* the window's border.
+
+   The vocabulary is deliberately the status widget's, one size down: same dot,
+   same key/value rows, same tones. Somebody who has read one has read both. */
+.as-panel, .as-panel body { height: 100%; overflow: hidden; background: transparent; }
+.as-panel #root { height: 100%; }
+
+.tp {
+  height: 100%; display: flex; flex-direction: column; gap: var(--s3);
+  padding: var(--s4); box-sizing: border-box;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r3);
+  /* Nothing in here is a text field, and a stray selection left behind by a
+     click that was meant to dismiss the panel looks like a bug. */
+  user-select: none;
+}
+
+.tp-head { display: flex; gap: var(--s3); align-items: flex-start; }
+.tp-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin-top: 5px; background: var(--fg-3); }
+.tp-dot.pulse { animation: pulse 1.8s var(--ease) infinite; }
+.tp-dot.tone-ok { background: var(--success); }
+.tp-dot.tone-warn { background: var(--warning); }
+.tp-dot.tone-bad { background: var(--danger); }
+.tp-head-text { min-width: 0; }
+.tp-title { font-size: var(--fs-sub); font-weight: 600; color: var(--fg); }
+.tp-sub { font-size: var(--fs-meta); color: var(--fg-2); margin-top: 2px; line-height: 1.45; }
+
+.tp-rows {
+  display: flex; flex-direction: column; gap: 7px;
+  padding: var(--s3) 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+}
+.tp-row { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s3); font-size: var(--fs-meta); }
+.tp-k { color: var(--fg-2); flex-shrink: 0; }
+.tp-v { color: var(--fg); font-weight: 500; text-align: right; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tp-v.tone-ok { color: var(--fg); }
+.tp-v.tone-warn { color: var(--warning); }
+.tp-v.tone-idle { color: var(--fg-2); font-weight: 400; }
+.tp-note { color: var(--fg-3); font-weight: 400; }
+
+/* The two ways back into the app share a row; quitting sits apart from them,
+   because it is the one button here that ends the earning. */
+.tp-actions { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s2); margin-top: auto; }
+.tp-actions .btn { width: 100%; justify-content: center; }
+
+.tp-quit {
+  display: flex; align-items: center; justify-content: center; gap: var(--s2);
+  width: 100%; padding: 7px var(--s3);
+  border: 1px solid var(--line); border-radius: var(--r2);
+  background: transparent; color: var(--fg-2); cursor: pointer;
+  font-size: var(--fs-meta); font-weight: 500;
+  transition: color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+.tp-quit:hover { color: var(--danger); border-color: var(--danger); }
+.tp-quit:disabled { opacity: 0.5; cursor: default; }
+.tp-quit svg { width: 14px; height: 14px; }
+
+.tp-foot { font-size: var(--fs-micro); color: var(--fg-3); line-height: 1.45; text-align: center; }

@@ -84,8 +84,20 @@ Claude Pro / Max · ChatGPT / Codex · Google Gemini · Kimi · xAI Grok
 
 [![最新版本](https://img.shields.io/github/v/release/asale-ai/asale?label=%E6%9C%80%E6%96%B0%E7%89%88&color=2f7d4f)](https://github.com/asale-ai/asale/releases/latest)
 
-免费。最省事的方式是打开[**官网首页**](https://asale.ai)，它会自动识别你的系统并给出对应安装包。
-也可以直接点下面的直达链接：
+免费。一行命令装完——桌面应用，外加 `asale` 命令行：
+
+```sh
+curl -fsSL https://asale.ai/dl/install.sh | sh      # macOS / Linux
+```
+```powershell
+irm https://asale.ai/dl/install.ps1 | iex           # Windows
+```
+
+以后再跑同一行就是升级。**没有桌面环境**的机器上，脚本会装成网页模式，而不是装一个画不出来的
+窗口——见[无桌面：装在服务器上](#无桌面装在服务器上)。
+
+也可以打开[**官网首页**](https://asale.ai)，它会自动识别你的系统并给出对应安装包；
+或者直接点下面的直达链接：
 
 | 平台 | 直达链接 |
 |---|---|
@@ -105,6 +117,26 @@ Claude Pro / Max · ChatGPT / Codex · Google Gemini · Kimi · xAI Grok
 2. 没有第二步。发布包都用 Developer ID 证书签名并通过了 Apple 公证，macOS 不会拦。
 
 装好之后应用会在后台常驻（菜单栏图标），支持开机自启，新版本自动更新。
+**关闭窗口不等于退出** —— Asale 会收进托盘继续出售。点托盘图标会弹出一个小面板，里面有实时
+数据、「在浏览器中打开」和真正的退出按钮；不喜欢这个行为可以在「设置 → 窗口与托盘」关掉。
+
+### 无桌面：装在服务器上
+
+服务本身就带完整的应用界面，所以一台没有图形环境的机器不是「简配版」，而是同一个客户端挂在端口上：
+
+```sh
+curl -fsSL https://asale.ai/dl/install.sh | sh
+asale start --web          # 监听所有网卡，端口 9700
+asale url                  # 要打开的网址，已带访问 token
+asale autostart enable     # 重启后自动回来
+```
+
+用任意浏览器打开那个网址就是完整客户端。网址里的 token 就是全部访问凭证——拿到它的人能读你的
+凭据、花你的余额——所以请把端口放在防火墙或带 TLS 的反向代理后面。
+
+`asale` 在所有平台都会装上，不只是无桌面机器：`start`、`stop`、`restart`、`status`、
+`logs`、`open`、`autostart`、`update`、`uninstall`。
+完整说明见 [docs/CLI.zh-CN.md](docs/CLI.zh-CN.md)。
 
 ### 首次使用
 

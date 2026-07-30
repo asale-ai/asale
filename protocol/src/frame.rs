@@ -131,6 +131,16 @@ pub mod codes {
     pub const BUDGET_EXCEEDED: &str = "BUDGET_EXCEEDED";
     pub const CHUNK_GAP: &str = "CHUNK_GAP";
     pub const INTERNAL: &str = "INTERNAL";
+    /// The publisher's WS session went away with this task still in flight.
+    ///
+    /// Only ever produced by the gateway, never sent by a publisher — a client that
+    /// could report this would by definition still be connected. It exists so the
+    /// case has a name in the failover path and in the client console, instead of
+    /// the request hanging until something else times out.
+    pub const PUBLISHER_GONE: &str = "PUBLISHER_GONE";
+    /// The publisher's session is alive but it has produced no frame for this task
+    /// for longer than the gateway is willing to wait. Also gateway-only.
+    pub const PUBLISHER_STALLED: &str = "PUBLISHER_STALLED";
 }
 
 /// Whether an error code is retriable (drives failure transfer).
@@ -142,5 +152,10 @@ pub fn is_retriable(code: &str) -> bool {
             | codes::TOKEN_EXPIRED
             | codes::CHUNK_GAP
             | codes::INTERNAL
+            // A publisher that vanished or went silent is the clearest case there
+            // is for handing the request to somebody else: nothing about it says
+            // the request itself is bad.
+            | codes::PUBLISHER_GONE
+            | codes::PUBLISHER_STALLED
     )
 }

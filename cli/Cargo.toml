@@ -1,0 +1,45 @@
+[package]
+name = "asale-cli"
+version.workspace = true
+edition.workspace = true
+description = "asale — command-line control for the asale client service (asaled): start/stop/restart, status, web URL, boot registration"
+default-run = "asale-cli"
+
+[lib]
+name = "asale_cli"
+path = "src/lib.rs"
+
+# Built as `asale-cli`, shipped as `asale`.
+#
+# The name it is installed under has to be `asale` — that is the command, and it
+# is what every message this binary prints tells the user to type. But the Tauri
+# shell in ../src-tauri is *also* a cargo package whose binary is `asale`, and
+# two bin targets in one workspace that write to the same `target/<profile>/`
+# path silently overwrite each other (cargo warns; issue rust-lang/cargo#6313
+# says it will eventually be a hard error). Renaming the *shell* binary instead
+# would change what lands inside the .app/.msi/.deb and what the updater
+# replaces — a much larger blast radius than renaming this one.
+#
+# So the rename happens at packaging time: scripts/package.{sh,ps1} put this
+# binary into the release archive as `asale`, and the installer lays it down
+# under that name. Nothing at runtime depends on argv[0].
+[[bin]]
+name = "asale-cli"
+path = "src/main.rs"
+
+# Deliberately close to dependency-free.
+#
+# This binary is what an install script drops onto a stranger's machine and what
+# a headless server runs, so it is worth keeping it small and quick to build:
+#   - it only ever talks to the loopback daemon, so a short HTTP/1.1 client over
+#     `TcpStream` replaces reqwest + tokio + rustls (see `http.rs`),
+#   - process control goes through `kill(1)` / `taskkill.exe` rather than libc or
+#     windows-sys (see `service.rs`).
+#
+# It does not depend on asale-daemon: that would drag sqlx, the embedded web UI
+# and the whole provider stack into a process manager. The two values it has to
+# agree with the daemon on — the data directory and the default bind — are
+# duplicated in `paths.rs` with a "keep in sync" note.
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
