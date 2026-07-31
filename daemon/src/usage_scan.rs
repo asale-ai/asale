@@ -29,8 +29,8 @@ struct Bucket {
 /// Scan local CLI logs and fold new usage into `usage_daily` (source="used").
 /// Returns the number of assistant messages folded this pass.
 pub async fn scan_claude_logs(store: &LocalStore) -> anyhow::Result<u64> {
-    let Some(home) = std::env::var_os("HOME") else { return Ok(0) };
-    let root = PathBuf::from(home).join(".claude").join("projects");
+    let Some(home) = crate::state::home_dir() else { return Ok(0) };
+    let root = home.join(".claude").join("projects");
     if !root.is_dir() {
         return Ok(0);
     }

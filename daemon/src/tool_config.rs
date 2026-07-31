@@ -163,7 +163,7 @@ const HERMES_API_KEY: &str = "api_key";
 const HERMES_MODEL: &str = "default";
 
 fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
+    crate::state::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// A tool's config directory (`~/.claude`, `~/.codex`, `~/.gemini`).

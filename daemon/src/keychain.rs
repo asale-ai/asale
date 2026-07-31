@@ -32,14 +32,12 @@ fn lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The app data dir — `$ASALE_DATA_DIR` if set, else `~/.asale`, matching the
-/// SQLite store's directory.
+/// The app data dir — the SQLite store's own, not a second opinion about where
+/// it is. Resolving "home" separately here once put the secrets beside the
+/// working directory while the store sat under the user's profile, which reads
+/// as "this account has no token" rather than as a missing file.
 fn data_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("ASALE_DATA_DIR") {
-        return PathBuf::from(d);
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".asale")
+    PathBuf::from(crate::state::data_dir())
 }
 
 fn key_path() -> PathBuf {

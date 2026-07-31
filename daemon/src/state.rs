@@ -141,9 +141,32 @@ pub fn data_dir() -> String {
     if let Ok(d) = std::env::var("ASALE_DATA_DIR") {
         return d;
     }
+    match home_dir() {
+        Some(home) => format!("{}/.asale", home.display()),
+        None => ".asale".to_string(),
+    }
+}
+
+/// The user's home directory, however this platform spells it.
+///
+/// Every path the daemon derives from "home" must come through here: the
+/// secret store, the tools' own config files (`~/.claude`, `~/.codex`,
+/// `~/.openclaw`), the generated codex catalog and the CLI account scan. They
+/// used to read `$HOME` each on their own and fall back to `"."`, which on
+/// Windows — where `HOME` is set only by unix-ish toolchains (git-bash, msys)
+/// and absent in PowerShell, cmd and anything launched from Explorer — put
+/// them under the *current working directory* while the SQLite store went to
+/// the real profile. One installation, two half-states: accounts listed as
+/// available whose tokens "did not exist", and a buy switch that wrote
+/// `.\.claude\settings.json` where no CLI would ever read it (and could then
+/// only be turned off again from the same directory it was turned on in).
+///
+/// `None` means the platform offers no spelling at all; callers keep their own
+/// relative last resort for that case.
+pub fn home_dir() -> Option<std::path::PathBuf> {
     for var in ["HOME", "USERPROFILE"] {
         match std::env::var(var) {
-            Ok(home) if !home.trim().is_empty() => return format!("{home}/.asale"),
+            Ok(home) if !home.trim().is_empty() => return Some(std::path::PathBuf::from(home)),
             _ => continue,
         }
     }
@@ -151,8 +174,75 @@ pub fn data_dir() -> String {
     // rather than writing state next to the executable.
     if let (Ok(drive), Ok(path)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
         if !drive.trim().is_empty() && !path.trim().is_empty() {
-            return format!("{drive}{path}/.asale");
+            return Some(std::path::PathBuf::from(format!("{drive}{path}")));
         }
     }
-    ".asale".to_string()
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codex_catalog::HOME_LOCK;
+    use std::path::PathBuf;
+
+    /// Swap the three variables that spell "home", run `f`, put them back
+    /// whatever it does. Restoring before asserting keeps one failure from
+    /// leaking a fake profile into every test that runs after it.
+    fn with_home_vars<T>(home: Option<&str>, profile: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _g = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Clearing `$ASALE_DATA_DIR` is exactly the interference the data-dir
+        // lock exists to prevent: a keychain test holding it would otherwise
+        // lose its sandbox mid-run and write to the real profile.
+        let _d = crate::testenv::lock_data_dir();
+        let saved: Vec<(&str, Option<String>)> = ["HOME", "USERPROFILE", "ASALE_DATA_DIR"]
+            .iter()
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect();
+
+        std::env::remove_var("ASALE_DATA_DIR");
+        for (key, val) in [("HOME", home), ("USERPROFILE", profile)] {
+            match val {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+        let out = f();
+        for (key, val) in saved {
+            match val {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+        out
+    }
+
+    /// A shell that does not set `HOME` — PowerShell, cmd, or anything launched
+    /// from Explorer, i.e. how the packaged Windows client is actually started
+    /// — must still resolve to the user's profile. The relative fallback put
+    /// the secret store and the tools' configs next to whatever directory the
+    /// app was launched from, so an account with a token on disk reported that
+    /// it had none.
+    #[test]
+    fn no_home_var_still_finds_the_profile() {
+        let (home, dir) = with_home_vars(None, Some("/probe/profile"), || (home_dir(), data_dir()));
+        assert_eq!(home, Some(PathBuf::from("/probe/profile")));
+        assert_eq!(dir, "/probe/profile/.asale");
+    }
+
+    /// `HOME` still wins where both exist: git-bash sets it deliberately, and
+    /// every test that sandboxes itself by repointing it relies on that.
+    #[test]
+    fn home_var_wins_over_the_profile() {
+        let home = with_home_vars(Some("/probe/home"), Some("/probe/profile"), home_dir);
+        assert_eq!(home, Some(PathBuf::from("/probe/home")));
+    }
+
+    /// An empty value is not a home. Windows leaves `HOME=` behind often enough
+    /// that treating it as one would reintroduce the split state.
+    #[test]
+    fn empty_home_var_falls_through() {
+        let home = with_home_vars(Some("   "), Some("/probe/profile"), home_dir);
+        assert_eq!(home, Some(PathBuf::from("/probe/profile")));
+    }
 }

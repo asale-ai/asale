@@ -30,7 +30,9 @@ pub struct DiscoveredCred {
 }
 
 fn home() -> String {
-    std::env::var("HOME").unwrap_or_else(|_| ".".into())
+    crate::state::home_dir()
+        .map(|h| h.display().to_string())
+        .unwrap_or_else(|| ".".into())
 }
 
 fn now_secs() -> i64 {

@@ -45,7 +45,7 @@ use std::time::{Duration, Instant};
 const DUMP_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
+    crate::state::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// Every path here derives from `$HOME`, which is process-global: tests that

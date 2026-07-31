@@ -42,6 +42,14 @@ pub(crate) mod testenv {
     static DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
     static SEQ: AtomicU32 = AtomicU32::new(0);
 
+    /// Hold the same lock without repointing anything — for the tests that
+    /// assert what `data_dir()` resolves to when `$ASALE_DATA_DIR` is *unset*.
+    /// They have to clear it, which is the same interference this lock exists
+    /// to prevent.
+    pub fn lock_data_dir() -> std::sync::MutexGuard<'static, ()> {
+        DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Run `f` with `$ASALE_DATA_DIR` pointed at a fresh empty directory,
     /// restoring the previous value (and removing the directory) afterwards.
     pub fn with_temp_data_dir<T>(tag: &str, f: impl FnOnce() -> T) -> T {
