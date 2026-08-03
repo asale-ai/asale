@@ -242,7 +242,11 @@
     "unitTokensDay": "tokens / 天",
     "unitOfList": "（佔原價）",
     "bandQuick": "快捷：",
-    "bandHintFloor": "僅當市場價不低於原價的 {{lo}}% 時賣出；低於該價格自動停售，價格回升後自動恢復。"
+    "bandHintFloor": "僅當市場價不低於原價的 {{lo}}% 時賣出；低於該價格自動停售，價格回升後自動恢復。",
+    "pasteHint": "已授權，但回呼頁面開不了？那個網址指向的是執行瀏覽器的這台機器，不是執行 Asale 的那台。從網址列複製過來貼到下面即可。",
+    "pasteLabel": "回呼網址，或者只填授權碼",
+    "pastePlaceholder": "http://localhost:37669/callback?code=…",
+    "pasteSubmit": "完成登入"
   },
   "consume": {
     "title": "買入",
@@ -781,7 +785,8 @@
       "upstreamIncomplete": "{{provider}} 回傳的帳號資訊不完整，請重試。",
       "unknownFlow": "此登入流程已結束，請重新發起。",
       "exchangeFailed": "登入未能完成：{{detail}}",
-      "timedOut": "登入逾時，請重試。"
+      "timedOut": "登入逾時，請重試。",
+      "noCodeInPaste": "貼上的內容裡沒有授權碼——請從瀏覽器網址列複製完整的回呼網址。"
     },
     "upstream": {
       "provider": "模型上游回傳錯誤（{{code}}）：{{detail}}",

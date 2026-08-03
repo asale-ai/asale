@@ -223,6 +223,21 @@ export async function runOAuthFlow<T = unknown>(
   throw new DaemonError("authorization timed out", "errors.oauth.timedOut");
 }
 
+/**
+ * Hand the daemon a code its callback could not deliver.
+ *
+ * The provider redirects to `http://localhost:<port>/callback` — on the machine
+ * running the daemon. When this UI is a browser somewhere else, that
+ * `localhost` is *this* machine, so the page fails to load and the code sits in
+ * an address bar the daemon will never see. Pasting it back finishes the flow
+ * exactly as the callback would have: same exchange, same `oauth_result` poll.
+ *
+ * `input` may be the whole URL, its query, or the bare code.
+ */
+export async function submitOAuthCode(flowId: string, input: string): Promise<void> {
+  await invoke("oauth_submit_code", { flowId, input });
+}
+
 export interface ClientConfig {
   server_api_base: string;
   gateway_api_base: string;

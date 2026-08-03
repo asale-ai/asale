@@ -73,6 +73,39 @@ ASALE_DATA_DIR=~/.asale-staging ASALE_BIND=127.0.0.1:9702 pnpm dev:app
 
 OAuth 用戶端憑證見 [`.env.example`](../.env.example)（Gemini 需要自備，Claude/Codex 有公開預設值）。
 
+### 把這份原始碼接到系統的 `asale` 指令上
+
+`pnpm dev:app` 管的是桌面視窗。想讓**終端機裡**的 `asale` 也是目前這份程式碼（改 CLI、
+調 `asale start` 的行為、在本機重現無桌面模式），用 `scripts/link.sh`：
+
+```bash
+./scripts/link.sh                 # debug 建置，軟連結到 /usr/local/bin（要 sudo）
+./scripts/link.sh --release       # 啟動快、體積小，編譯慢
+./scripts/link.sh --prefix ~/.local/bin   # 不動 /usr/local/bin，也就不用 sudo
+./scripts/link.sh --status        # 現在的 asale / asaled 指向哪裡
+./scripts/link.sh --unlink        # 撤銷：刪軟連結，把備份的正式版放回去
+```
+
+裝的是**軟連結**不是複製，所以連結完之後改程式碼只要再 `cargo build`，終端機裡的
+`asale` 立刻就是新的，不用重跑腳本。`asale` 和 `asaled` 一起連：只連前者其實也能跑
+（`paths::find_asaled()` 會先找自己旁邊的 `asaled`，而軟連結執行時已經解析到
+`target/<profile>/`），但那樣 `asaled` 這個指令本身還是舊的正式版，兩個入口報出不同
+版本，排查時非常費解。
+
+連結前會把 `/usr/local/bin` 裡正式安裝的那兩個本體備份到 `~/.asale/link-backup/`，
+`--unlink` 時原樣放回；`--unlink` 只刪指向本倉庫的軟連結，不碰別人裝的東西。
+
+編譯期注入的值跟打包同源，都讀 `./.env` —— 缺 `ASALE_QUOTA_PUBKEY` 一樣賣不出去。
+
+連結上去之後預設還是正式版那套狀態（`~/.asale`、`127.0.0.1:9700`），裝了桌面版就會
+跟它搶連接埠和資料目錄。要井水不犯河水，用上面那張表裡的變數：
+
+```bash
+ASALE_DATA_DIR=~/.asale-dev ASALE_BIND=127.0.0.1:9701 ASALE_PROXY_PORT=9788 asale start
+```
+
+Windows 上沒有對應腳本，直接 `cargo run -p asale-cli -- status`。
+
 ---
 
 ## 打包

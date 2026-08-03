@@ -163,6 +163,63 @@ pub fn gen_pkce() -> Pkce {
     Pkce { verifier, challenge }
 }
 
+/// Hands an authorization code to a flow that is waiting on its loopback
+/// callback, without the callback ever being reached.
+///
+/// The listener and this share one sender, so whichever arrives first wins and
+/// the other finds the slot empty. That is what lets a browser on *another*
+/// machine finish a login: its `localhost` is its own machine, so the redirect
+/// lands nowhere and the user pastes the address back instead.
+#[derive(Clone)]
+pub struct CodeSubmitter(Arc<std::sync::Mutex<Option<oneshot::Sender<String>>>>);
+
+impl CodeSubmitter {
+    /// False when the flow is already over — the callback beat us to it, or a
+    /// code was submitted before.
+    pub fn submit(&self, code: String) -> bool {
+        match self.0.lock().unwrap().take() {
+            Some(tx) => tx.send(code).is_ok(),
+            None => false,
+        }
+    }
+}
+
+/// Pull the authorization code out of whatever the user pasted back.
+///
+/// Three shapes reach this, because all three are what a person actually has in
+/// hand when the callback page will not open:
+///
+///   - the whole redirect URL from the address bar,
+///     `http://localhost:37669/callback?code=…&state=…`
+///   - just the query, with or without its `?`
+///   - the bare code — which is what Anthropic's authorize page shows, in the
+///     form `code#state`, when it cannot redirect
+///
+/// A URL carrying no code at all (`?error=access_denied`) is rejected rather
+/// than passed through as if the whole string were a code: the exchange would
+/// fail later with a vendor error nobody can act on.
+pub fn extract_pasted_code(input: &str) -> Option<String> {
+    let s = input.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let query = s.rsplit_once('?').map(|(_, q)| q).unwrap_or(s);
+    for pair in query.split('&') {
+        if let Some(v) = pair.trim().strip_prefix("code=") {
+            let code = urldecode(v.split('#').next().unwrap_or(v));
+            let code = code.trim().to_string();
+            return (!code.is_empty()).then_some(code);
+        }
+    }
+    // Nothing named `code`. Only a bare token can still be one — anything with
+    // a scheme or another `key=value` in it is a URL that simply lacks a code.
+    if s.contains("://") || s.contains('=') {
+        return None;
+    }
+    let bare = s.split('#').next().unwrap_or(s).trim().to_string();
+    (!bare.is_empty()).then_some(bare)
+}
+
 /// Result of an authorization: the captured code + the callback redirect uri.
 pub struct AuthCode {
     pub code: String,
@@ -210,6 +267,7 @@ pub async fn begin(p: &OAuthProvider) -> anyhow::Result<(String, AuthCodeFuture)
 
     let (tx, rx) = oneshot::channel::<String>();
     let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
+    let tx2 = tx.clone();
     let redirect2 = redirect_uri.clone();
     let verifier = pkce.verifier.clone();
 
@@ -254,7 +312,7 @@ pub async fn begin(p: &OAuthProvider) -> anyhow::Result<(String, AuthCodeFuture)
         }
     });
 
-    Ok((url, AuthCodeFuture { rx, redirect_uri: redirect2, verifier }))
+    Ok((url, AuthCodeFuture { rx, redirect_uri: redirect2, verifier, submitter: CodeSubmitter(tx2) }))
 }
 
 /// Awaitable that yields the captured auth code.
@@ -262,9 +320,17 @@ pub struct AuthCodeFuture {
     rx: oneshot::Receiver<String>,
     redirect_uri: String,
     verifier: String,
+    submitter: CodeSubmitter,
 }
 
 impl AuthCodeFuture {
+    /// The other way to finish this flow: a code pasted by the user, for when
+    /// the callback cannot reach this machine. Take it before the future is
+    /// moved into the task that awaits it.
+    pub fn submitter(&self) -> CodeSubmitter {
+        self.submitter.clone()
+    }
+
     pub async fn wait(self) -> anyhow::Result<AuthCode> {
         let code = self.rx.await.map_err(|_| anyhow::anyhow!("callback closed"))?;
         if code.is_empty() {
@@ -518,6 +584,57 @@ mod tests {
         let p = provider("codex").unwrap();
         assert_eq!(p.redirect_port, Some(1455));
         assert_eq!(p.redirect_path, "/auth/callback");
+    }
+
+    /// The whole redirect URL, straight out of the address bar of a browser
+    /// that could not load it — the shape users actually have.
+    #[test]
+    fn pasted_full_url() {
+        let url = "http://localhost:37669/callback?code=847W0rntCZdxsyYiZQhFLBHpGuC9x0dIh9vFRZz6786mGUrD&state=5275809b-5f70-4d18-9e05-d9be9901a952";
+        assert_eq!(
+            extract_pasted_code(url).as_deref(),
+            Some("847W0rntCZdxsyYiZQhFLBHpGuC9x0dIh9vFRZz6786mGUrD")
+        );
+    }
+
+    #[test]
+    fn pasted_query_or_bare_code() {
+        assert_eq!(extract_pasted_code("?code=abc&state=xyz").as_deref(), Some("abc"));
+        assert_eq!(extract_pasted_code("code=abc&state=xyz").as_deref(), Some("abc"));
+        assert_eq!(extract_pasted_code("  abc  ").as_deref(), Some("abc"));
+        // Anthropic's authorize page shows `code#state` when it cannot redirect.
+        assert_eq!(extract_pasted_code("abc#state-uuid").as_deref(), Some("abc"));
+        assert_eq!(extract_pasted_code("?code=abc#state-uuid").as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn pasted_code_is_percent_decoded() {
+        // Same decoder the loopback callback uses, so both routes yield the
+        // identical code — a mismatch here would fail only at exchange time.
+        assert_eq!(extract_pasted_code("?code=a%2Fb%2Bc").as_deref(), Some("a/b+c"));
+    }
+
+    /// A redirect that carries no code is not a code. Passing the raw string
+    /// through would trade a clear "nothing here" for a vendor error at
+    /// exchange time that says nothing about what to do.
+    #[test]
+    fn pasted_without_a_code_is_rejected() {
+        assert_eq!(extract_pasted_code("http://localhost:37669/callback?error=access_denied"), None);
+        assert_eq!(extract_pasted_code("?state=xyz"), None);
+        assert_eq!(extract_pasted_code("   "), None);
+        assert_eq!(extract_pasted_code(""), None);
+    }
+
+    /// The two routes into a flow share one sender, so the first to arrive
+    /// wins and the second is a no-op rather than a second login.
+    #[tokio::test]
+    async fn submitting_a_code_finishes_the_flow_once() {
+        let p = provider("claude").unwrap();
+        let (_url, fut) = begin(&p).await.unwrap();
+        let submitter = fut.submitter();
+        assert!(submitter.submit("pasted-code".into()));
+        assert!(!submitter.submit("second-try".into()), "a finished flow accepts nothing more");
+        assert_eq!(fut.wait().await.unwrap().code, "pasted-code");
     }
 }
 

@@ -242,7 +242,11 @@
     "unitTokensDay": "tokens / 日",
     "unitOfList": "（定価比）",
     "bandQuick": "クイック:",
-    "bandHintFloor": "市場価格が定価の {{lo}}% 以上のときだけ販売します。下回ると販売を停止し、戻れば自動で再開します。"
+    "bandHintFloor": "市場価格が定価の {{lo}}% 以上のときだけ販売します。下回ると販売を停止し、戻れば自動で再開します。",
+    "pasteHint": "認可は済んだのにコールバックページが開きませんか？その URL が指すのはこのブラウザーを動かしているマシンで、Asale を動かしているマシンではありません。アドレスバーからコピーして下に貼り付けてください。",
+    "pasteLabel": "コールバック URL、または認可コードのみ",
+    "pastePlaceholder": "http://localhost:37669/callback?code=…",
+    "pasteSubmit": "ログインを完了"
   },
   "consume": {
     "title": "購入",
@@ -781,7 +785,8 @@
       "upstreamIncomplete": "{{provider}} から返された情報が不完全です。もう一度お試しください。",
       "unknownFlow": "そのサインインは進行中ではありません。もう一度お試しください。",
       "exchangeFailed": "サインインを完了できませんでした：{{detail}}",
-      "timedOut": "サインインがタイムアウトしました。もう一度お試しください。"
+      "timedOut": "サインインがタイムアウトしました。もう一度お試しください。",
+      "noCodeInPaste": "貼り付けた内容に認可コードがありません。ブラウザーのアドレスバーからコールバック URL 全体をコピーしてください。"
     },
     "upstream": {
       "provider": "モデルのアップストリームがエラーを返しました（{{code}}）：{{detail}}",

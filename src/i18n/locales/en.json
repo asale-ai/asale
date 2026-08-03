@@ -242,7 +242,11 @@
     "unitTokensDay": "tokens / day",
     "unitOfList": "of list price",
     "bandQuick": "Quick:",
-    "bandHintFloor": "Only sells while the market pays at least {{lo}}% of the vendor's list price. Below that the model stops selling and comes back on its own."
+    "bandHintFloor": "Only sells while the market pays at least {{lo}}% of the vendor's list price. Below that the model stops selling and comes back on its own.",
+    "pasteHint": "Authorised, but the callback page will not open? That address points at the machine running this browser, not the one running Asale. Copy it from the address bar and paste it below.",
+    "pasteLabel": "Callback address, or just the code",
+    "pastePlaceholder": "http://localhost:37669/callback?code=…",
+    "pasteSubmit": "Finish sign-in"
   },
   "consume": {
     "title": "Buy",
@@ -781,7 +785,8 @@
       "upstreamIncomplete": "{{provider}} returned an incomplete profile. Please try again.",
       "unknownFlow": "That sign-in is no longer in progress. Please start again.",
       "exchangeFailed": "The sign-in could not be completed: {{detail}}",
-      "timedOut": "The sign-in timed out. Please try again."
+      "timedOut": "The sign-in timed out. Please try again.",
+      "noCodeInPaste": "No authorization code in what was pasted — copy the whole callback address from the browser's address bar."
     },
     "upstream": {
       "provider": "The model provider returned an error ({{code}}): {{detail}}",

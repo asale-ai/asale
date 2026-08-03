@@ -126,13 +126,24 @@ irm https://asale.ai/dl/install.ps1 | iex           # Windows
 
 ```sh
 curl -fsSL https://asale.ai/dl/install.sh | sh
-asale start --web          # 监听所有网卡，端口 9700
+asale start                # 启动服务
+asale expose on            # 允许其他机器访问，长期生效
 asale url                  # 要打开的网址，已带访问 token
 asale autostart enable     # 重启后自动回来
 ```
 
 用任意浏览器打开那个网址就是完整客户端。网址里的 token 就是全部访问凭证——拿到它的人能读你的
 凭据、花你的余额——所以请把端口放在防火墙或带 TLS 的反向代理后面。
+
+**如果只有你自己的浏览器要用，那根本不用开这个端口。** SSH 隧道用一条本来就加密的链路给你
+同一个界面，`expose` 保持关着：
+
+```sh
+ssh -N -L 9701:127.0.0.1:9700 user@你的服务器   # 开着别关
+ssh user@你的服务器 'asale url'                 # 拿到网址，token 已带上
+```
+
+把那个网址的端口改成 `9701` 再打开——你自己机器上的桌面版可能已经占了 9700。
 
 `asale` 在所有平台都会装上，不只是无桌面机器：`start`、`stop`、`restart`、`status`、
 `logs`、`open`、`autostart`、`update`、`uninstall`。

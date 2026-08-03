@@ -82,6 +82,43 @@ other's. Don't drive both at once.
 OAuth client credentials are documented in [`.env.example`](../.env.example) (Gemini
 requires your own; Claude/Codex have public defaults).
 
+### Pointing the system `asale` command at this checkout
+
+`pnpm dev:app` covers the desktop window. When the `asale` command **in your terminal**
+should be this code too — working on the CLI, on what `asale start` does, or reproducing
+headless mode locally — use `scripts/link.sh`:
+
+```bash
+./scripts/link.sh                 # debug build, symlinked into /usr/local/bin (needs sudo)
+./scripts/link.sh --release       # starts faster and is smaller; slower to compile
+./scripts/link.sh --prefix ~/.local/bin   # leave /usr/local/bin alone, and skip sudo
+./scripts/link.sh --status        # where asale / asaled currently point
+./scripts/link.sh --unlink        # undo: remove the symlinks, restore the backup
+```
+
+These are **symlinks, not copies**, so after linking once a plain `cargo build` is enough —
+the `asale` in your terminal is the new binary immediately. Both `asale` and `asaled` are
+linked: linking only the first would work (`paths::find_asaled()` looks next to itself, and
+by the time a symlink runs it has resolved into `target/<profile>/`), but then the `asaled`
+command itself would still be the installed release, and two entry points reporting
+different versions is a miserable thing to debug.
+
+Anything real already sitting in `/usr/local/bin` is backed up to `~/.asale/link-backup/`
+first and restored by `--unlink`, which only ever removes symlinks pointing into this repo.
+
+Compile-time values come from `./.env`, same as packaging — without `ASALE_QUOTA_PUBKEY`
+the linked build cannot sell, exactly as a packaged one couldn't.
+
+A linked build still defaults to the release state (`~/.asale`, `127.0.0.1:9700`) and will
+fight an installed desktop app over the port and the data directory. Use the variables from
+the table above to keep them apart:
+
+```bash
+ASALE_DATA_DIR=~/.asale-dev ASALE_BIND=127.0.0.1:9701 ASALE_PROXY_PORT=9788 asale start
+```
+
+There is no Windows equivalent; use `cargo run -p asale-cli -- status` there.
+
 ---
 
 ## Packaging

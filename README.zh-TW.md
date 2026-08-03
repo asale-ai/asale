@@ -126,13 +126,24 @@ irm https://asale.ai/dl/install.ps1 | iex           # Windows
 
 ```sh
 curl -fsSL https://asale.ai/dl/install.sh | sh
-asale start --web          # 監聽所有網卡，連接埠 9700
+asale start                # 啟動服務
+asale expose on            # 允許其他機器存取，長期生效
 asale url                  # 要開啟的網址，已帶存取 token
 asale autostart enable     # 重開機後自動回來
 ```
 
 用任意瀏覽器開啟那個網址就是完整用戶端。網址裡的 token 就是全部存取憑證——拿到它的人能讀你的
 憑據、花你的餘額——所以請把連接埠放在防火牆或帶 TLS 的反向代理後面。
+
+**如果只有你自己的瀏覽器要用，那根本不用開這個連接埠。** SSH 通道用一條本來就加密的鏈路給你
+同一個介面，`expose` 保持關著：
+
+```sh
+ssh -N -L 9701:127.0.0.1:9700 user@你的伺服器   # 開著別關
+ssh user@你的伺服器 'asale url'                 # 拿到網址，token 已帶上
+```
+
+把那個網址的連接埠改成 `9701` 再開啟——你自己機器上的桌面版可能已經占了 9700。
 
 `asale` 在所有平台都會裝上，不只是無桌面機器：`start`、`stop`、`restart`、`status`、
 `logs`、`open`、`autostart`、`update`、`uninstall`。

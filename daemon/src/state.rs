@@ -48,6 +48,11 @@ pub struct AppState {
     /// In-flight browser OAuth flows: flow_id → status. Entries are removed
     /// when the frontend collects a terminal result.
     pub oauth_flows: Arc<RwLock<HashMap<String, FlowStatus>>>,
+    /// The pasted-code entrance to those flows: flow_id → submitter. Only
+    /// provider logins with a loopback callback have one, and only until the
+    /// flow ends — a browser on another machine cannot reach that callback, so
+    /// the user hands the code over through `oauth_submit_code` instead.
+    pub oauth_submitters: Arc<RwLock<HashMap<String, crate::oauth::CodeSubmitter>>>,
     /// Lane state changes posted from the executor's hot path (which holds the
     /// pool's sync lock and cannot await), drained by `spawn_lane_loop`.
     pub lane_tx: crate::publisher::LaneSender,
@@ -107,6 +112,7 @@ impl AppState {
             pool,
             limits_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             oauth_flows: Arc::new(RwLock::new(HashMap::new())),
+            oauth_submitters: Arc::new(RwLock::new(HashMap::new())),
             lane_tx,
             lane_rx: std::sync::Mutex::new(Some(lane_rx)),
         })

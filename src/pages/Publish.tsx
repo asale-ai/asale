@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  invoke, inTauri, runOAuthFlow, fmtTokens,
+  invoke, inTauri, realTauri, runOAuthFlow, submitOAuthCode, fmtTokens,
   type AccountStatus, type ClientStatus, type ImportAllResult, type Lane,
 } from "../lib";
 import { Card, Ok, Err, SkeletonRows, PageHead, IconAction, Empty, Mark, CopyChip } from "../ui";
@@ -268,6 +268,10 @@ export function Publish() {
 
   // The code a device-code login is waiting on, shown until it completes.
   const [deviceCode, setDeviceCode] = useState<{ provider: string; code: string; url: string } | null>(null);
+  /** The in-flight loopback login, so its code can be pasted back when the
+   *  callback lands on a machine that is not the daemon's. */
+  const [pasteFlow, setPasteFlow] = useState<{ provider: string; flowId: string } | null>(null);
+  const [pasteDraft, setPasteDraft] = useState("");
 
   // API-key connect: which vendor's form is open, and its draft.
   const [keyProvider, setKeyProvider] = useState("");
@@ -431,14 +435,30 @@ export function Publish() {
   }
 
   async function connect(provider: string) {
-    setErr(""); setMsg(""); setBusy(true);
+    setErr(""); setMsg(""); setBusy(true); setPasteDraft("");
     try {
       // Two-step: the daemon opens/returns the authorize URL, we poll for the
       // loopback callback + token exchange to finish.
-      const r = await runOAuthFlow<{ account_id: string }>("oauth_login", { provider });
+      const r = await runOAuthFlow<{ account_id: string }>(
+        "oauth_login",
+        { provider },
+        (start) => setPasteFlow({ provider, flowId: start.flow_id }),
+      );
       setMsg(t("publish.connected", { provider, account: r.account_id }));
       loadAccounts();
-    } catch (e) { setErr(errText(e)); } finally { setBusy(false); }
+    } catch (e) { setErr(errText(e)); } finally { setBusy(false); setPasteFlow(null); }
+  }
+
+  /** Finish a login whose callback never arrived, from what the user copied out
+   *  of the browser's address bar. The daemon takes it from there — the poll in
+   *  `connect` above is still running and picks up the result. */
+  async function submitPastedCode() {
+    if (!pasteFlow || !pasteDraft.trim()) return;
+    setErr("");
+    try {
+      await submitOAuthCode(pasteFlow.flowId, pasteDraft.trim());
+      setPasteDraft("");
+    } catch (e) { setErr(errText(e)); }
   }
 
   /** Device-code login. Identical two-step flow, except the user confirms a
@@ -546,6 +566,34 @@ export function Publish() {
           </button>
         ))}
       </div>
+
+      {/* Only in a browser: the desktop shell's callback is on the same machine
+          as the daemon, so it always arrives. */}
+      {pasteFlow && !realTauri && (
+        <div className="keyform fade-in">
+          <div className="callout info">
+            <IconInfo />
+            <span>{t("publish.pasteHint")}</span>
+          </div>
+          <div className="field">
+            <label htmlFor="oauthpaste">{t("publish.pasteLabel")}</label>
+            <input
+              id="oauthpaste"
+              autoComplete="off"
+              spellCheck={false}
+              value={pasteDraft}
+              placeholder={t("publish.pastePlaceholder")}
+              onChange={(e) => setPasteDraft(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && pasteDraft.trim()) submitPastedCode(); }}
+            />
+          </div>
+          <div className="keyform-actions">
+            <button className="btn sm" onClick={submitPastedCode} disabled={!pasteDraft.trim()}>
+              {t("publish.pasteSubmit")}
+            </button>
+          </div>
+        </div>
+      )}
 
       {deviceCode && (
         <div className="keyform fade-in">

@@ -61,14 +61,18 @@ pub(crate) fn open_local_browser(url: &str) {
 /// background; the frontend polls `oauth_result`. `open_local=true` also opens
 /// the URL in the daemon machine's browser (used by the desktop shell).
 ///
-/// Note (remote B/S): the callback listens on this machine's loopback. When the
-/// UI runs in a browser on a *different* machine, complete the authorization
-/// through an SSH port-forward, or use `import_from_cli` instead.
+/// Note (remote B/S): the callback listens on this machine's loopback, which a
+/// browser on another machine cannot reach — its `localhost` is its own. That
+/// case finishes through `oauth_submit_code` (the user pastes the redirect URL
+/// back), or through an SSH port-forward, or `import_from_cli`.
 pub async fn oauth_login(state: &Arc<AppState>, provider: String, open_local: bool) -> R<Value> {
     let p = oauth::provider(&provider).ok_or("unknown provider")?;
     let (url, fut) = oauth::begin(&p).await.map_err(err)?;
     let flow_id = uuid::Uuid::new_v4().simple().to_string();
     flow_set(state, &flow_id, FlowStatus::Pending).await;
+    // Taken before the future is moved into the task below; this is what
+    // `oauth_submit_code` needs when the callback cannot be reached.
+    state.oauth_submitters.write().await.insert(flow_id.clone(), fut.submitter());
 
     if open_local {
         open_local_browser(&url);
@@ -79,6 +83,7 @@ pub async fn oauth_login(state: &Arc<AppState>, provider: String, open_local: bo
     let prov = provider.clone();
     tokio::spawn(async move {
         let outcome = finish_provider_oauth(&st, &p, &prov, fut).await;
+        st.oauth_submitters.write().await.remove(&fid);
         match outcome {
             Ok(v) => flow_set(&st, &fid, FlowStatus::Done(v)).await,
             Err(e) => flow_set(&st, &fid, FlowStatus::Failed(e)).await,
@@ -86,6 +91,37 @@ pub async fn oauth_login(state: &Arc<AppState>, provider: String, open_local: bo
     });
 
     Ok(json!({ "flow_id": flow_id, "auth_url": url, "provider": provider }))
+}
+
+/// Finish a login with a code the user pasted, for when the callback cannot
+/// reach this machine.
+///
+/// The redirect goes to `http://localhost:<port>/callback`, and when the UI is
+/// a browser on another machine that `localhost` is *that* machine — the page
+/// fails to load and the code sits in an address bar the daemon will never see.
+/// So the user copies it back here. `input` may be the whole URL, its query, or
+/// the bare code; see [`oauth::extract_pasted_code`].
+///
+/// The flow then completes exactly as if the callback had fired: same token
+/// exchange, same polling, same result. The frontend keeps polling
+/// `oauth_result` either way.
+pub async fn oauth_submit_code(state: &Arc<AppState>, flow_id: String, input: String) -> R<Value> {
+    let Some(code) = oauth::extract_pasted_code(&input) else {
+        return Err(cmd_err!(
+            "errors.oauth.noCodeInPaste",
+            "no authorization code in what was pasted"
+        ));
+    };
+    let submitter = state.oauth_submitters.read().await.get(&flow_id).cloned();
+    let Some(submitter) = submitter else {
+        return Err(cmd_err!("errors.oauth.unknownFlow", "unknown flow"));
+    };
+    // False means the flow ended between the lookup and now — the callback got
+    // through after all, or it timed out. Either way there is nothing to feed.
+    if !submitter.submit(code) {
+        return Err(cmd_err!("errors.oauth.unknownFlow", "unknown flow"));
+    }
+    Ok(json!({ "ok": true }))
 }
 
 /// Wait for the provider callback, exchange the code, persist tokens + tool row.

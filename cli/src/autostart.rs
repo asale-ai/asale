@@ -128,6 +128,13 @@ fn launchctl(args: &[&str], path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// launchd already re-read the definition: `enable_impl` unloads and loads it,
+/// which stops the old process and starts one on the new address.
+#[cfg(target_os = "macos")]
+fn reload_impl() -> Result<bool> {
+    Ok(true)
+}
+
 #[cfg(target_os = "macos")]
 fn disable_impl() -> Result<()> {
     let path = plist_path().context("no home directory")?;
@@ -235,6 +242,14 @@ fn enable_impl(bind: &str) -> Result<State> {
     Ok(State::Enabled { mechanism: mechanism.into(), path: path.display().to_string() })
 }
 
+/// `enable --now` starts a unit that is stopped, but leaves a running one on its
+/// old command line, so a bind change needs the restart spelled out.
+#[cfg(target_os = "linux")]
+fn reload_impl() -> Result<bool> {
+    systemctl(&["restart", "asaled"])?;
+    Ok(true)
+}
+
 #[cfg(target_os = "linux")]
 fn disable_impl() -> Result<()> {
     let path = if system_scope() { PathBuf::from(SYSTEM_UNIT) } else { user_unit().context("no home directory")? };
@@ -286,6 +301,13 @@ fn enable_impl(bind: &str) -> Result<State> {
     Ok(State::Enabled { mechanism: "Windows Run key".into(), path: format!("{WIN_RUN_KEY}\\{WIN_RUN_VALUE}") })
 }
 
+/// The Run key is a logon action, not a supervisor: there is no running service
+/// for it to restart, so the caller still has to bounce the process itself.
+#[cfg(windows)]
+fn reload_impl() -> Result<bool> {
+    Ok(false)
+}
+
 #[cfg(windows)]
 fn disable_impl() -> Result<()> {
     let _ = Command::new("reg")
@@ -319,6 +341,10 @@ fn enable_impl(_bind: &str) -> Result<State> {
     bail!("asale does not know how to register a boot service on this platform")
 }
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn reload_impl() -> Result<bool> {
+    Ok(false)
+}
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn disable_impl() -> Result<()> {
     Ok(())
 }
@@ -344,4 +370,20 @@ pub fn enable(explicit_bind: Option<&str>) -> Result<State> {
 
 pub fn disable() -> Result<()> {
     disable_impl()
+}
+
+/// Point a registered boot service at a different address.
+///
+/// The address is baked into the definition — `ExecStart=… --bind …` in the
+/// systemd unit, `ProgramArguments` in the plist, the command line in the Run
+/// key — so changing where the service listens *is* a rewrite of that
+/// definition. Skipping it would work until the next reboot and then quietly
+/// undo itself, which is the worst shape a settings change can have.
+///
+/// Returns whether the currently running service was moved too. False means the
+/// mechanism only launches things at logon and supervises nothing (the Windows
+/// Run key), so the caller still has to restart the process.
+pub fn rebind(bind: &str) -> Result<bool> {
+    enable(Some(bind))?;
+    reload_impl()
 }
