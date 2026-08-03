@@ -73,6 +73,7 @@ fn run(args: &[String]) -> Result<u8> {
         "logs" | "log" => cmd_logs(&rest),
         "url" => cmd_url(&rest),
         "open" | "web" => cmd_open(&rest),
+        "expose" | "public" | "access" => cmd_expose(&rest),
         "desktop" | "app" => {
             service::open_desktop()?;
             println!("Opening the Asale desktop app…");
@@ -206,6 +207,7 @@ fn cmd_status(args: &[&str]) -> Result<u8> {
             "version": s.version,
             "data_dir": paths::data_dir().display().to_string(),
             "url": service::web_url(&s.bind, None),
+            "public": service::is_remote(&s.bind),
             "autostart": s.autostart.describe(),
             "client": s.client,
         });
@@ -223,6 +225,14 @@ fn cmd_status(args: &[&str]) -> Result<u8> {
     };
     row("state", &state);
     row("listening", &s.bind);
+    row(
+        "access",
+        if service::is_remote(&s.bind) {
+            "public — any machine that can reach this port"
+        } else {
+            "local only (open it up with `asale expose on`)"
+        },
+    );
     if s.running {
         row("web ui", &service::web_url(&s.bind, None));
     }
@@ -293,6 +303,132 @@ fn cmd_open(args: &[&str]) -> Result<u8> {
     let url = service::web_url(&bind, flag_value(args, &["--host"])?);
     service::open_url(&url)?;
     println!("Opened {url}");
+    Ok(0)
+}
+
+/// The address `asale expose` should switch to, given where the install is now.
+///
+/// The port is carried over rather than reset, so opening an install that was
+/// moved to 8080 does not silently put it back on 9700. `--host` is the setting
+/// the on/off switch cannot express: bound to one specific interface — a VPN or
+/// private-network address — which is remote enough to be useful and narrow
+/// enough not to be on the internet.
+fn exposed_bind(current: &str, public: bool, port: Option<u16>, host: Option<&str>) -> String {
+    let port = match port {
+        Some(p) => p.to_string(),
+        None => current.rsplit_once(':').map(|(_, p)| p.to_string()).unwrap_or_else(|| "9700".into()),
+    };
+    let host = match (host, public) {
+        (Some(h), _) => h.to_string(),
+        (None, true) => "0.0.0.0".into(),
+        (None, false) => "127.0.0.1".into(),
+    };
+    // A bare IPv6 literal has colons of its own; without brackets the port
+    // appended below would just look like another group.
+    let host = if host.contains(':') && !host.starts_with('[') { format!("[{host}]") } else { host };
+    format!("{host}:{port}")
+}
+
+/// `asale expose <on | off | status>` — who is allowed to reach the web UI.
+///
+/// This exists because "make it reachable from my laptop" was previously a fact
+/// about how the service happened to be started (`asale start --web`), which a
+/// plain `asale restart`, a reboot, or the autostart definition could each undo
+/// independently. Here it is a setting: written down, applied to the running
+/// service, and pushed into the boot definition so it survives the reboot.
+fn cmd_expose(args: &[&str]) -> Result<u8> {
+    let action = args.first().copied().unwrap_or("status");
+    let rest = if args.is_empty() { args } else { &args[1..] };
+
+    let public = match action {
+        "on" | "enable" | "yes" | "open" => true,
+        "off" | "disable" | "no" | "local" => false,
+        "status" | "show" => return cmd_expose_status(),
+        other => bail!("unknown expose action `{other}` (on | off | status)"),
+    };
+
+    let port = match flag_value(rest, &["--port", "-p"])? {
+        Some(v) => Some(v.parse::<u16>().map_err(|_| anyhow::anyhow!("--port must be a number 1-65535, got `{v}`"))?),
+        None => None,
+    };
+    let host = flag_value(rest, &["--host", "-H"])?;
+    if host.is_some() && !public {
+        bail!("--host only makes sense with `expose on`; `expose off` is always 127.0.0.1");
+    }
+
+    let current = service::resolve_bind(None);
+    let bind = exposed_bind(&current, public, port, host);
+
+    // The setting lives in a file, and the environment outranks it. Applying the
+    // change and then having it not take effect is worse than not applying it.
+    if let Ok(env) = std::env::var("ASALE_BIND") {
+        let env = env.trim().to_string();
+        if !env.is_empty() && env != bind {
+            bail!(
+                "ASALE_BIND is set to `{env}`, and it wins over this setting — the service\n\
+                 would come back on that address anyway.\n\
+                 Unset it (or change it to `{bind}`) where it is defined, then run this again."
+            );
+        }
+    }
+
+    // The boot definition holds its own copy of the address, so leaving it alone
+    // would make this change last exactly until the next reboot.
+    let registered = matches!(autostart::state(), autostart::State::Enabled { .. });
+    let moved_by_init = if registered { autostart::rebind(&bind)? } else { false };
+
+    if moved_by_init {
+        println!("Now listening on {bind}.");
+    } else {
+        match service::rebind(&bind, public)? {
+            service::Rebind::Unchanged => println!("Already listening on {bind} — left it running."),
+            service::Rebind::Restarted => println!("Service restarted on {bind}."),
+            service::Rebind::Started => println!("Service started on {bind}."),
+            service::Rebind::Saved => println!("Saved. The service is not running; the next `asale start` uses {bind}."),
+            service::Rebind::Foreign => {
+                println!(
+                    "Saved, but the service on {current} was not started by this CLI — the desktop\n\
+                     app runs one inside itself. Quit it from the tray icon and run `asale start`,\n\
+                     or restart the app, for {bind} to take effect."
+                );
+                return Ok(1);
+            }
+        }
+    }
+    if registered {
+        row("boot", &format!("autostart definition updated to {bind}"));
+    }
+
+    if public {
+        print_access(&bind);
+        let port = bind.rsplit_once(':').map(|(_, p)| p).unwrap_or("9700");
+        println!(
+            "\nTwo things outside asale can still block it:\n  \
+             - this machine's firewall  (ufw allow {port}/tcp · firewall-cmd --add-port={port}/tcp)\n  \
+             - your provider's security group, on a cloud VM — the public address is on their\n    \
+               NAT, so open the port there too and use `asale url --host <public-ip>`."
+        );
+    } else {
+        println!("Only this machine can reach the service now.");
+    }
+    Ok(0)
+}
+
+fn cmd_expose_status() -> Result<u8> {
+    let bind = service::resolve_bind(None);
+    let public = service::is_remote(&bind);
+    row("listening", &bind);
+    row("access", if public { "public — any machine that can reach this port" } else { "local only — 127.0.0.1" });
+    if let autostart::State::Enabled { mechanism, .. } = autostart::state() {
+        row("boot", &format!("{mechanism}, same address"));
+    }
+    if public {
+        if let Some(ip) = service::lan_ip() {
+            row("from lan", &service::web_url(&bind, Some(&ip.to_string())));
+        }
+    } else {
+        println!("\nOpen it up with:  asale expose on");
+    }
     Ok(0)
 }
 
@@ -422,7 +558,14 @@ fn print_access(bind: &str) {
     row("web ui", &service::web_url(bind, None));
     if service::is_remote(bind) {
         let port = bind.rsplit_once(':').map(|(_, p)| p).unwrap_or("9700");
-        row("remote", &format!("http://<this-host>:{port}/?token=<token from the URL above>"));
+        // A usable URL when this host is on the network the user is on, and the
+        // command to build one when it is not — a cloud VM's public address is
+        // on the provider's NAT and cannot be read from here.
+        match service::lan_ip() {
+            Some(ip) => row("from lan", &service::web_url(bind, Some(&ip.to_string()))),
+            None => row("remote", &format!("http://<this-host>:{port}/?token=<token from the URL above>")),
+        }
+        row("elsewhere", "asale url --host <this machine's public address>");
         println!(
             "\nThis service is reachable from other machines. The token in that URL is the\n\
              only thing protecting it — it can spend your balance and read your credentials.\n\
@@ -460,6 +603,9 @@ SERVICE
 ACCESS
   open                 Open the app in a browser (starts the service if needed)
   url                  Print the app URL, including the access token
+  expose on | off      Allow (or stop allowing) access from other machines —
+                       applies immediately and survives reboots. `asale help expose`
+  expose status        Who can reach the service right now
   desktop              Launch the Asale desktop app, if it is installed
 
 SYSTEM
@@ -472,6 +618,8 @@ SYSTEM
 OPTIONS
   -b, --bind <ip:port> Address to listen on (default {default})
   -p, --port <n>       Just change the port
+  -H, --host <ip>      expose only: bind one interface (e.g. a VPN address)
+      --host <name>    url/open only: build the URL with this hostname
       --web            Listen on every interface, for browser access from
                        another machine. Requires the token; see `asale help web`
   -f, --foreground     start only: run in this terminal instead of detaching
@@ -498,10 +646,11 @@ fn help_topic(topic: &str) -> Option<&'static str> {
   Asale's whole app is served by the local service, so a machine with no desktop
   is not a limitation: put the service on a port and use it from any browser.
 
-    asale start --web              listen on every interface (port 9700)
-    asale start --web --port 8080  a different port
-    asale url                      print the URL, token included
-    asale autostart enable         come back automatically after a reboot
+    asale expose on               allow access from other machines, for good
+    asale expose on --port 8080   and move it to another port
+    asale start --web             the same thing for one launch only
+    asale url                     print the URL, token included
+    asale autostart enable        come back automatically after a reboot
 
   The token in that URL is the entire authorization. Anyone who has it can read
   your credentials and spend your balance, so:
@@ -512,6 +661,31 @@ fn help_topic(topic: &str) -> Option<&'static str> {
       token travels in the URL, and plain HTTP hands it to the network,
     - the token is in ~/.asale/daemon.token; delete that file and restart the
       service to invalidate every URL you have shared."
+        }
+        "expose" | "public" | "access" => {
+            "asale expose <on | off | status> [--port n] [--host ip]
+
+  Who is allowed to reach the web UI. Unlike `asale start --web`, this is a
+  setting rather than a property of one launch: it is written down, applied to
+  the running service right away, and pushed into the autostart definition, so
+  a restart or a reboot does not quietly put the service back on loopback.
+
+    asale expose on               every interface, port unchanged
+    asale expose on --port 8080   and move it
+    asale expose on --host 10.0.0.5   one interface only — a VPN address
+    asale expose off              back to 127.0.0.1
+    asale expose status           where it listens and who can get there
+
+  `on` starts the service if it is stopped, since being reachable is the point.
+  `off` does not — it only narrows what an already-running service accepts.
+
+  Being reachable is not the same as being reached: the host firewall and, on a
+  cloud VM, the provider's security group still have to allow the port. The
+  public address of such a machine lives on the provider's NAT and cannot be
+  read from inside it, so build that URL with `asale url --host <public-ip>`.
+
+  What this does *not* do is add a second lock. The token is still the entire
+  authorization — read `asale help web` before pointing this at the internet."
         }
         "start" => {
             "asale start [--bind ip:port | --port n | --web] [--foreground]
@@ -564,4 +738,46 @@ fn help_topic(topic: &str) -> Option<&'static str> {
         }
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expose_on_opens_every_interface_and_keeps_the_port() {
+        assert_eq!(exposed_bind("127.0.0.1:9700", true, None, None), "0.0.0.0:9700");
+        assert_eq!(exposed_bind("127.0.0.1:8080", true, None, None), "0.0.0.0:8080");
+    }
+
+    #[test]
+    fn expose_off_returns_to_loopback() {
+        assert_eq!(exposed_bind("0.0.0.0:9700", false, None, None), "127.0.0.1:9700");
+        // An install moved to another port stays there: `off` narrows who can
+        // reach it, it does not undo unrelated settings.
+        assert_eq!(exposed_bind("0.0.0.0:8080", false, None, None), "127.0.0.1:8080");
+    }
+
+    #[test]
+    fn port_and_host_override() {
+        assert_eq!(exposed_bind("127.0.0.1:9700", true, Some(8080), None), "0.0.0.0:8080");
+        assert_eq!(exposed_bind("127.0.0.1:9700", true, None, Some("10.0.0.5")), "10.0.0.5:9700");
+        assert_eq!(exposed_bind("127.0.0.1:9700", true, Some(8080), Some("10.0.0.5")), "10.0.0.5:8080");
+    }
+
+    #[test]
+    fn ipv6_keeps_its_brackets() {
+        assert_eq!(exposed_bind("[::1]:9700", true, None, Some("::")), "[::]:9700");
+        assert_eq!(exposed_bind("[::1]:9700", true, None, Some("[fd00::1]")), "[fd00::1]:9700");
+    }
+
+    /// The whole point of the command: what it produces has to read back as
+    /// reachable (or not) through the same predicate the rest of the CLI uses.
+    #[test]
+    fn the_result_agrees_with_is_remote() {
+        assert!(service::is_remote(&exposed_bind("127.0.0.1:9700", true, None, None)));
+        assert!(service::is_remote(&exposed_bind("127.0.0.1:9700", true, None, Some("10.0.0.5"))));
+        assert!(!service::is_remote(&exposed_bind("0.0.0.0:9700", false, None, None)));
+        assert!(!service::is_remote(&exposed_bind("[::]:9700", false, None, None)));
+    }
 }

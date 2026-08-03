@@ -247,7 +247,12 @@
     "lanesLabel": "Requests served at once",
     "lanesEdit": "Edit concurrency",
     "unitRequests": "at a time",
-    "lanesHint": "The market sends this account at most {{n}} requests at the same time. Raise it to earn more from one subscription; lower it if the vendor starts rate-limiting you."
+    "lanesHint": "The market sends this account at most {{n}} requests at the same time. Raise it to earn more from one subscription; lower it if the vendor starts rate-limiting you.",
+    "pasteHint": "Authorised, but the callback page will not open? That address points at the machine running this browser, not the one running Asale. Copy it from the address bar and paste it below.",
+    "pasteHintDesktop": "Authorised, but nothing came back? Copy the callback address out of your browser's address bar and paste it below to finish the sign-in by hand.",
+    "pasteLabel": "Callback address, or just the code",
+    "pastePlaceholder": "http://localhost:37669/callback?code=…",
+    "pasteSubmit": "Finish sign-in"
   },
   "consume": {
     "title": "Buy",
@@ -786,7 +791,8 @@
       "upstreamIncomplete": "{{provider}} returned an incomplete profile. Please try again.",
       "unknownFlow": "That sign-in is no longer in progress. Please start again.",
       "exchangeFailed": "The sign-in could not be completed: {{detail}}",
-      "timedOut": "The sign-in timed out. Please try again."
+      "timedOut": "The sign-in timed out. Please try again.",
+      "noCodeInPaste": "No authorization code in what was pasted — copy the whole callback address from the browser's address bar."
     },
     "upstream": {
       "provider": "The model provider returned an error ({{code}}): {{detail}}",

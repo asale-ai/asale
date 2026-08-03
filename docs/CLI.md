@@ -25,7 +25,8 @@ you having to remember the URL.
 
 ```sh
 curl -fsSL https://asale.ai/dl/install.sh | sh
-asale start --web          # listen on every interface, port 9700
+asale start                # start the service
+asale expose on            # allow access from other machines, for good
 asale url                  # the URL to open — access token included
 asale autostart enable     # come back automatically after a reboot
 ```
@@ -40,6 +41,11 @@ subscriptions, turn the sell switches on, watch the wallet.
 > To invalidate every URL you have handed out, delete `~/.asale/daemon.token`
 > and restart the service.
 
+Being reachable and being *reached* are different: the host firewall and, on a
+cloud VM, the provider's security group still have to allow the port. A cloud
+machine's public address lives on the provider's NAT rather than on any local
+interface, so build that URL with `asale url --host <public-ip>`.
+
 ---
 
 ## Commands
@@ -53,6 +59,7 @@ subscriptions, turn the sell switches on, watch the wallet.
 | `asale logs [-f] [-n N]` | Show or follow the service log |
 | `asale open` | Open the app in a browser, starting the service first if needed |
 | `asale url` | Print the app URL without opening it |
+| `asale expose on\|off\|status` | Who may reach the service — applied now, and kept across reboots |
 | `asale desktop` | Launch the desktop app, if it is installed |
 | `asale autostart enable\|disable\|status` | Register the service to start with the machine |
 | `asale update` | Re-run the online installer |
@@ -64,7 +71,9 @@ subscriptions, turn the sell switches on, watch the wallet.
 | Flag | Applies to | Meaning |
 |---|---|---|
 | `-b`, `--bind <ip:port>` | start / restart / autostart | Address to listen on (default `127.0.0.1:9700`) |
-| `-p`, `--port <n>` | start / restart | Change only the port |
+| `-p`, `--port <n>` | start / restart / expose | Change only the port |
+| `-H`, `--host <ip>` | expose | Bind one interface only — e.g. a VPN address |
+| `--host <name>` | url / open | Build the printed URL with this hostname |
 | `--web` | start / restart | Listen on every interface — browser access from other machines |
 | `-f`, `--foreground` | start | Run in this terminal instead of detaching (containers, debugging) |
 | `--json` | status | Machine-readable output |
@@ -83,6 +92,47 @@ The address is remembered in `~/.asale/asaled.bind`, so a later `asale start` or
 
 ---
 
+## Who can reach it
+
+`--web` describes one launch. `asale expose` is the setting behind it: written
+down, applied to the running service immediately, and pushed into the autostart
+definition so a restart or a reboot cannot quietly undo it.
+
+```sh
+asale expose on                  # every interface, port unchanged
+asale expose on --port 8080      # and move it
+asale expose on --host 10.0.0.5  # one interface only — a VPN address
+asale expose off                 # back to 127.0.0.1
+asale expose status              # where it listens, and who can get there
+```
+
+`on` starts the service if it is stopped, since being reachable is the point of
+asking. `off` does not — it only narrows what an already-running service
+accepts. Either way the service is restarted only when the address actually
+changes, so re-running `expose on` will not drop a session that is mid-sale.
+
+Two things it deliberately does not touch: `ASALE_BIND` outranks the stored
+setting, so if that variable is set the command refuses rather than pretending
+to have worked; and the firewall is not asale's to open.
+
+### The case for leaving it off
+
+When the browser is your own, an SSH tunnel beats opening the port — the link is
+already encrypted, so the token never crosses the network in the clear:
+
+```sh
+ssh -N -L 9800:127.0.0.1:9700 user@your-server   # leave this running
+ssh user@your-server 'asale url'                 # the URL, token included
+```
+
+Open that URL with the port changed to `9800` — the desktop app may already hold
+9700 on your own machine.
+
+`expose on` is for what a tunnel cannot cover: a shared team box, a phone, a
+machine with no SSH client.
+
+---
+
 ## Autostart
 
 `asale autostart enable` registers the **headless service** with the mechanism
@@ -97,6 +147,10 @@ each platform's users would look in to remove it:
 This is **not** the same switch as the desktop app's "launch at login", which
 starts the window. On a server you want this one; on a laptop you probably want
 that one. They can both be on.
+
+Each definition carries its own copy of the bind address (`ExecStart=… --bind
+…`), which is why `asale expose` rewrites it as part of the change — otherwise
+the setting would hold until the next boot and then revert.
 
 ---
 

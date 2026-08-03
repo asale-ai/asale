@@ -247,7 +247,12 @@
     "lanesLabel": "同时服务的请求数",
     "lanesEdit": "修改并发上限",
     "unitRequests": "个并发",
-    "lanesHint": "市场最多同时向该账号派发 {{n}} 个请求。想让一个订阅多赚就调高；上游开始限流就调低。"
+    "lanesHint": "市场最多同时向该账号派发 {{n}} 个请求。想让一个订阅多赚就调高；上游开始限流就调低。",
+    "pasteHint": "已授权，但回调页面打不开？那个地址指向的是运行浏览器的这台机器，不是运行 Asale 的那台。从地址栏复制过来粘贴到下面即可。",
+    "pasteHintDesktop": "已授权，但迟迟没跳回来？把浏览器地址栏里的回调地址复制过来粘贴到下面，即可手动完成登录。",
+    "pasteLabel": "回调地址，或者只填授权码",
+    "pastePlaceholder": "http://localhost:37669/callback?code=…",
+    "pasteSubmit": "完成登录"
   },
   "consume": {
     "title": "买入",
@@ -786,7 +791,8 @@
       "upstreamIncomplete": "{{provider}} 返回的账号信息不完整，请重试。",
       "unknownFlow": "该登录流程已结束，请重新发起。",
       "exchangeFailed": "登录未能完成：{{detail}}",
-      "timedOut": "登录超时，请重试。"
+      "timedOut": "登录超时，请重试。",
+      "noCodeInPaste": "粘贴的内容里没有授权码——请从浏览器地址栏复制完整的回调地址。"
     },
     "upstream": {
       "provider": "模型上游返回错误（{{code}}）：{{detail}}",

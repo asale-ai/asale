@@ -83,6 +83,43 @@ ASALE_DATA_DIR=~/.asale-staging ASALE_BIND=127.0.0.1:9702 pnpm dev:app
 OAuth のクライアント認証情報は [`.env.example`](../.env.example) を参照
 （Gemini は自前で用意が必要、Claude/Codex は公開のデフォルト値あり）。
 
+### システムの `asale` コマンドをこのソースに向ける
+
+`pnpm dev:app` が面倒を見るのはデスクトップウィンドウです。**ターミナルの** `asale` も
+このコードにしたいとき（CLI の開発、`asale start` の挙動の確認、ヘッドレスモードの
+ローカル再現）は `scripts/link.sh` を使います:
+
+```bash
+./scripts/link.sh                 # debug ビルドを /usr/local/bin にシンボリックリンク（sudo が要る）
+./scripts/link.sh --release       # 起動が速く小さい。コンパイルは遅い
+./scripts/link.sh --prefix ~/.local/bin   # /usr/local/bin を触らない＝sudo も不要
+./scripts/link.sh --status        # 今 asale / asaled がどこを指しているか
+./scripts/link.sh --unlink        # 取り消し: リンクを削除し、バックアップした正式版を戻す
+```
+
+コピーではなく**シンボリックリンク**なので、一度リンクすれば後は `cargo build` するだけで
+ターミナルの `asale` が即座に新しいバイナリになります。`asale` と `asaled` の両方を
+リンクします。前者だけでも動きます（`paths::find_asaled()` は自分の隣を先に見ますし、
+シンボリックリンクは実行時点で `target/<profile>/` に解決済みです）が、それだと
+`asaled` コマンド自体は正式版のままで、2 つの入口が別のバージョンを名乗ることになり
+調査が非常につらくなります。
+
+`/usr/local/bin` にインストール済みの実体は `~/.asale/link-backup/` に退避され、
+`--unlink` で元に戻ります。`--unlink` が消すのはこのリポジトリを指すリンクだけです。
+
+コンパイル時に埋め込む値はパッケージングと同じ `./.env` から読みます。
+`ASALE_QUOTA_PUBKEY` が無ければリンクしたビルドも販売できません。
+
+リンクしたビルドの既定は正式版と同じ状態（`~/.asale`、`127.0.0.1:9700`）なので、
+デスクトップ版が入っているとポートとデータディレクトリを取り合います。上の表の
+変数で分けてください:
+
+```bash
+ASALE_DATA_DIR=~/.asale-dev ASALE_BIND=127.0.0.1:9701 ASALE_PROXY_PORT=9788 asale start
+```
+
+Windows 版のスクリプトはありません。`cargo run -p asale-cli -- status` を使ってください。
+
 ---
 
 ## パッケージング

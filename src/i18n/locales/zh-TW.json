@@ -247,7 +247,12 @@
     "lanesLabel": "同時服務的請求數",
     "lanesEdit": "修改並行上限",
     "unitRequests": "個並行",
-    "lanesHint": "市場最多同時向該帳號派發 {{n}} 個請求。想讓一個訂閱多賺就調高；上游開始限流就調低。"
+    "lanesHint": "市場最多同時向該帳號派發 {{n}} 個請求。想讓一個訂閱多賺就調高；上游開始限流就調低。",
+    "pasteHint": "已授權，但回呼頁面開不了？那個網址指向的是執行瀏覽器的這台機器，不是執行 Asale 的那台。從網址列複製過來貼到下面即可。",
+    "pasteHintDesktop": "已授權，但遲遲沒跳回來？把瀏覽器網址列裡的回呼網址複製過來貼到下面，即可手動完成登入。",
+    "pasteLabel": "回呼網址，或者只填授權碼",
+    "pastePlaceholder": "http://localhost:37669/callback?code=…",
+    "pasteSubmit": "完成登入"
   },
   "consume": {
     "title": "買入",
@@ -786,7 +791,8 @@
       "upstreamIncomplete": "{{provider}} 回傳的帳號資訊不完整，請重試。",
       "unknownFlow": "此登入流程已結束，請重新發起。",
       "exchangeFailed": "登入未能完成：{{detail}}",
-      "timedOut": "登入逾時，請重試。"
+      "timedOut": "登入逾時，請重試。",
+      "noCodeInPaste": "貼上的內容裡沒有授權碼——請從瀏覽器網址列複製完整的回呼網址。"
     },
     "upstream": {
       "provider": "模型上游回傳錯誤（{{code}}）：{{detail}}",

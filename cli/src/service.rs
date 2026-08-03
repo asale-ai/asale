@@ -122,6 +122,23 @@ pub fn is_remote(bind: &str) -> bool {
     }
 }
 
+/// The address another machine on the same network would reach this host at, as
+/// far as this host can tell.
+///
+/// A UDP socket sends nothing when it is "connected" — it only makes the kernel
+/// pick a route — so this reads the interface that faces the network without
+/// enumerating interfaces or taking a dependency to do it.
+///
+/// On a cloud VM the answer is the *private* address: the public one lives on
+/// the provider's NAT, not on any local interface. So this is printed as a hint
+/// next to `asale url --host …`, never as the address to share.
+pub fn lan_ip() -> Option<std::net::IpAddr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("1.1.1.1:80").ok()?;
+    let ip = sock.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
+
 pub struct StartOutcome {
     pub bind: String,
     pub already_running: bool,
@@ -267,6 +284,66 @@ pub fn stop() -> Result<StopOutcome> {
     }
     let _ = std::fs::remove_file(paths::pid_file());
     Ok(StopOutcome::Stopped)
+}
+
+/// What [`rebind`] had to do to put the service on a different address.
+pub enum Rebind {
+    /// Already there and answering. Restarting would have dropped the market
+    /// session for no gain, so it did not.
+    Unchanged,
+    Restarted,
+    /// It was not running, and being reachable was the point of the change.
+    Started,
+    /// It was not running and starting it was not asked for; the address is
+    /// recorded for the next start.
+    Saved,
+    /// The port is served by a daemon this CLI did not start — the desktop app
+    /// runs one in-process. The address is recorded, but only whoever owns that
+    /// daemon can put it into effect.
+    Foreign,
+}
+
+/// Record the address the service should listen on, and make it true now rather
+/// than at some later start.
+///
+/// The write and the stop are ordered, not incidental: [`stop`] waits for the
+/// *recorded* address to go quiet, so the file has to keep naming the old one
+/// until the old daemon is actually gone. Writing it first would leave `stop`
+/// watching a port nothing is listening on — it would return immediately, and
+/// the new daemon would race a process still holding the port, which for the
+/// usual change (127.0.0.1:9700 → 0.0.0.0:9700, same port) means the new one
+/// fails to bind.
+pub fn rebind(bind: &str, start_if_stopped: bool) -> Result<Rebind> {
+    let current = resolve_bind(None);
+    let live = http::healthy(http::dial_addr(&current));
+
+    if live && current == bind {
+        save_bind(bind)?;
+        return Ok(Rebind::Unchanged);
+    }
+    if !live {
+        save_bind(bind)?;
+        if !start_if_stopped {
+            return Ok(Rebind::Saved);
+        }
+        start(Some(bind))?;
+        return Ok(Rebind::Started);
+    }
+    let stopped = stop()?;
+    save_bind(bind)?;
+    if let StopOutcome::Foreign = stopped {
+        return Ok(Rebind::Foreign);
+    }
+    start(Some(bind))?;
+    Ok(Rebind::Restarted)
+}
+
+/// Persist the bind address `resolve_bind` will read back.
+pub fn save_bind(bind: &str) -> Result<()> {
+    let dir = paths::data_dir();
+    std::fs::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
+    std::fs::write(paths::bind_file(), bind)
+        .with_context(|| format!("could not write {}", paths::bind_file().display()))
 }
 
 pub struct Status {

@@ -187,6 +187,10 @@ rpc_args! {
     ProviderArgs   { provider: String }
     OauthLoginArgs { provider: String, #[serde(default, alias = "open_local")] open_local: Option<bool> }
     OauthResultArgs{ #[serde(alias = "flow_id")] flow_id: String }
+    // `input` is whatever the user had in hand: the redirect URL, its query, or
+    // the bare code. Aliased to `code` so a caller that already split it out —
+    // a script, a future device flow — does not have to know the difference.
+    OauthCodeArgs { #[serde(alias = "flow_id")] flow_id: String, #[serde(alias = "code")] input: String }
     PlatformOauthArgs {
         provider: String,
         #[serde(default)] link: Option<bool>,
@@ -366,6 +370,13 @@ async fn rpc(
         "oauth_result" => {
             let p: OauthResultArgs = args(&a)?;
             commands::oauth_result(st, p.flow_id).await?
+        },
+        // The way out when the loopback callback cannot be reached: the UI is a
+        // browser on another machine, so the redirect lands on *its* localhost
+        // and the user pastes the address back here.
+        "oauth_submit_code" => {
+            let p: OauthCodeArgs = args(&a)?;
+            commands::oauth_submit_code(st, p.flow_id, p.input).await?
         },
         "platform_oauth_login" => {
             let p: PlatformOauthArgs = args(&a)?;

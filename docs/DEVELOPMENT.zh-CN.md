@@ -73,6 +73,39 @@ ASALE_DATA_DIR=~/.asale-staging ASALE_BIND=127.0.0.1:9702 pnpm dev:app
 
 OAuth 客户端凭证见 [`.env.example`](../.env.example)（Gemini 需要自备，Claude/Codex 有公开默认值）。
 
+### 把这份源码接到系统的 `asale` 命令上
+
+`pnpm dev:app` 管的是桌面窗口。想让**终端里**的 `asale` 也是当前代码（改 CLI、调
+`asale start` 的行为、在本机复现无桌面模式），用 `scripts/link.sh`：
+
+```bash
+./scripts/link.sh                 # debug 构建，软链到 /usr/local/bin（要 sudo）
+./scripts/link.sh --release       # 启动快、体积小，编译慢
+./scripts/link.sh --prefix ~/.local/bin   # 不想动 /usr/local/bin，也就不用 sudo
+./scripts/link.sh --status        # 现在的 asale / asaled 指向哪里
+./scripts/link.sh --unlink        # 撤销：删软链，把备份的正式版放回去
+```
+
+装的是**软链**不是拷贝，所以链完之后改代码只要再 `cargo build`，终端里的 `asale`
+立刻就是新的，不用重跑脚本。`asale` 和 `asaled` 一起链：只链前者其实也能跑
+（`paths::find_asaled()` 会先找自己旁边的 `asaled`，而软链执行时已经解析到
+`target/<profile>/`），但那样 `asaled` 这个命令本身还是旧的正式版，两个入口给出
+不同版本，排查时非常费解。
+
+链接前会把 `/usr/local/bin` 里正式安装的那两个真身备份到 `~/.asale/link-backup/`，
+`--unlink` 时原样放回；`--unlink` 只删指向本仓库的软链，不碰别人装的东西。
+
+编译期注入的值跟打包同源，都读 `./.env` —— 缺 `ASALE_QUOTA_PUBKEY` 一样卖不出去。
+
+链上去之后默认还是正式版那套状态（`~/.asale`、`127.0.0.1:9700`），装了桌面版就会
+跟它抢端口和数据目录。要井水不犯河水，用上面那张表里的变量：
+
+```bash
+ASALE_DATA_DIR=~/.asale-dev ASALE_BIND=127.0.0.1:9701 ASALE_PROXY_PORT=9788 asale start
+```
+
+Windows 上没有对应脚本，直接 `cargo run -p asale-cli -- status`。
+
 ---
 
 ## 打包
