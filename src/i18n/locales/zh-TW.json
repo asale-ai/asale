@@ -244,6 +244,7 @@
     "bandQuick": "快捷：",
     "bandHintFloor": "僅當市場價不低於原價的 {{lo}}% 時賣出；低於該價格自動停售，價格回升後自動恢復。",
     "pasteHint": "已授權，但回呼頁面開不了？那個網址指向的是執行瀏覽器的這台機器，不是執行 Asale 的那台。從網址列複製過來貼到下面即可。",
+    "pasteHintDesktop": "已授權，但遲遲沒跳回來？把瀏覽器網址列裡的回呼網址複製過來貼到下面，即可手動完成登入。",
     "pasteLabel": "回呼網址，或者只填授權碼",
     "pastePlaceholder": "http://localhost:37669/callback?code=…",
     "pasteSubmit": "完成登入"

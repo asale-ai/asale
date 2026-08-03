@@ -692,6 +692,16 @@ select.input {
 .keyform .callout { margin: 0; }
 .keyform .callout a { color: var(--accent); word-break: break-all; }
 .keyform-actions { display: flex; gap: var(--s2); }
+/* The pasted callback URL is the longest thing anyone types into this app, so
+   it takes the whole row and its one action rides alongside instead of below. */
+/* `stretch` rather than `center`: the button then takes the input's exact
+   height, so the pair reads as one control instead of two stacked sizes. */
+.paste-row { display: flex; align-items: stretch; gap: var(--s2); }
+.paste-row .input { flex: 1 1 auto; min-width: 0; }
+.paste-row .btn { flex-shrink: 0; white-space: nowrap; }
+@media (max-width: 520px) {
+  .paste-row { flex-direction: column; align-items: stretch; }
+}
 /* The device code is the one thing on this panel the user has to read and
    retype, so it is set apart from the prose rather than inlined into it. */
 .devicecode { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }

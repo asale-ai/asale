@@ -244,6 +244,7 @@
     "bandQuick": "快捷：",
     "bandHintFloor": "仅当市场价不低于原价的 {{lo}}% 时卖出；低于该价格自动停售，价格回升后自动恢复。",
     "pasteHint": "已授权，但回调页面打不开？那个地址指向的是运行浏览器的这台机器，不是运行 Asale 的那台。从地址栏复制过来粘贴到下面即可。",
+    "pasteHintDesktop": "已授权，但迟迟没跳回来？把浏览器地址栏里的回调地址复制过来粘贴到下面，即可手动完成登录。",
     "pasteLabel": "回调地址，或者只填授权码",
     "pastePlaceholder": "http://localhost:37669/callback?code=…",
     "pasteSubmit": "完成登录"

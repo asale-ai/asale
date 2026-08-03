@@ -567,30 +567,36 @@ export function Publish() {
         ))}
       </div>
 
-      {/* Only in a browser: the desktop shell's callback is on the same machine
-          as the daemon, so it always arrives. */}
-      {pasteFlow && !realTauri && (
+      {/* Offered in the desktop shell too. Its callback lands on the same
+          machine as the daemon so it usually arrives on its own — but "usually"
+          is not "always" (a blocked loopback port, a browser that swallowed the
+          redirect), and a login with no way to finish it is a dead end. Only the
+          reason it can fail differs, so only the hint does. */}
+      {pasteFlow && (
         <div className="keyform fade-in">
           <div className="callout info">
             <IconInfo />
-            <span>{t("publish.pasteHint")}</span>
+            <span>{t(realTauri ? "publish.pasteHintDesktop" : "publish.pasteHint")}</span>
           </div>
+          {/* The callback URL is long, so it gets the full row and the submit
+              button sits beside it rather than on a line of its own. */}
           <div className="field">
             <label htmlFor="oauthpaste">{t("publish.pasteLabel")}</label>
-            <input
-              id="oauthpaste"
-              autoComplete="off"
-              spellCheck={false}
-              value={pasteDraft}
-              placeholder={t("publish.pastePlaceholder")}
-              onChange={(e) => setPasteDraft(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && pasteDraft.trim()) submitPastedCode(); }}
-            />
-          </div>
-          <div className="keyform-actions">
-            <button className="btn sm" onClick={submitPastedCode} disabled={!pasteDraft.trim()}>
-              {t("publish.pasteSubmit")}
-            </button>
+            <div className="paste-row">
+              <input
+                id="oauthpaste"
+                className="input mono"
+                autoComplete="off"
+                spellCheck={false}
+                value={pasteDraft}
+                placeholder={t("publish.pastePlaceholder")}
+                onChange={(e) => setPasteDraft(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && pasteDraft.trim()) submitPastedCode(); }}
+              />
+              <button className="btn" onClick={submitPastedCode} disabled={!pasteDraft.trim()}>
+                {t("publish.pasteSubmit")}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -627,6 +633,7 @@ export function Publish() {
             <label htmlFor="apikey">{t("publish.keyLabel", { provider: open.label })}</label>
             <input
               id="apikey"
+              className="input"
               type="password"
               autoComplete="off"
               spellCheck={false}
@@ -640,6 +647,7 @@ export function Publish() {
             <label htmlFor="apikeylabel">{t("publish.keyName")}</label>
             <input
               id="apikeylabel"
+              className="input"
               value={keyLabel}
               placeholder={t("publish.keyNamePlaceholder")}
               onChange={(e) => setKeyLabel(e.target.value)}

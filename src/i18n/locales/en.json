@@ -244,6 +244,7 @@
     "bandQuick": "Quick:",
     "bandHintFloor": "Only sells while the market pays at least {{lo}}% of the vendor's list price. Below that the model stops selling and comes back on its own.",
     "pasteHint": "Authorised, but the callback page will not open? That address points at the machine running this browser, not the one running Asale. Copy it from the address bar and paste it below.",
+    "pasteHintDesktop": "Authorised, but nothing came back? Copy the callback address out of your browser's address bar and paste it below to finish the sign-in by hand.",
     "pasteLabel": "Callback address, or just the code",
     "pastePlaceholder": "http://localhost:37669/callback?code=…",
     "pasteSubmit": "Finish sign-in"

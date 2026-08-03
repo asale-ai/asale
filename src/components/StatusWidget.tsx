@@ -68,6 +68,18 @@ export function StatusWidget() {
   const [hovering, setHovering] = useState(false);
   const [pinned, setPinned] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  // Closing lags the pointer by a beat. The panel hangs below the chip with a
+  // gap between them, so a straight line from chip to panel leaves `.sw` for a
+  // few pixels; without the delay that reads as a flicker. It also gives the
+  // "did it say 9700 or 9701" glance a second to become a deliberate move onto
+  // the panel, which cancels the close outright.
+  const closeTimer = useRef<ReturnType<typeof setTimeout>>();
+  const openNow = () => { clearTimeout(closeTimer.current); setHovering(true); };
+  const closeSoon = () => {
+    clearTimeout(closeTimer.current);
+    closeTimer.current = setTimeout(() => setHovering(false), 1000);
+  };
+  useEffect(() => () => clearTimeout(closeTimer.current), []);
 
   useEffect(() => {
     let alive = true;
@@ -141,14 +153,14 @@ export function StatusWidget() {
     <div
       className="sw"
       ref={ref}
-      onMouseEnter={() => setHovering(true)}
-      onMouseLeave={() => setHovering(false)}
+      onMouseEnter={openNow}
+      onMouseLeave={closeSoon}
     >
       <button
         className={`sw-chip tone-${v.tone}${open ? " open" : ""}`}
         onClick={() => setPinned((p) => !p)}
-        onFocus={() => setHovering(true)}
-        onBlur={() => setHovering(false)}
+        onFocus={openNow}
+        onBlur={closeSoon}
         aria-expanded={open}
         type="button"
       >
