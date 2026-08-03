@@ -36,11 +36,14 @@ if (process.argv.includes("--check")) {
   process.exit(0);
 }
 
-const command = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+// Windows: Node >= 18.20.2 拒绝直接 spawn .cmd/.bat (CVE-2024-27980), 会抛 EINVAL,
+// 所以那边必须走 shell。参数里没有空格, 不用额外加引号。
+const isWindows = process.platform === "win32";
+const command = isWindows ? "pnpm.cmd" : "pnpm";
 const child = spawn(
   command,
   ["tauri", "dev", "--config", "src-tauri/tauri.dev.conf.json"],
-  { cwd: root, env, stdio: "inherit" },
+  { cwd: root, env, stdio: "inherit", shell: isWindows },
 );
 child.on("exit", (code, signal) => {
   if (signal) process.kill(process.pid, signal);
