@@ -139,11 +139,11 @@ asale autostart enable     # 重启后自动回来
 同一个界面，`expose` 保持关着：
 
 ```sh
-ssh -N -L 9701:127.0.0.1:9700 user@你的服务器   # 开着别关
+ssh -N -L 9800:127.0.0.1:9700 user@你的服务器   # 开着别关
 ssh user@你的服务器 'asale url'                 # 拿到网址，token 已带上
 ```
 
-把那个网址的端口改成 `9701` 再打开——你自己机器上的桌面版可能已经占了 9700。
+把那个网址的端口改成 `9800` 再打开——你自己机器上的桌面版可能已经占了 9700。
 
 `asale` 在所有平台都会装上，不只是无桌面机器：`start`、`stop`、`restart`、`status`、
 `logs`、`open`、`autostart`、`update`、`uninstall`。

@@ -172,11 +172,11 @@ keep the port behind a firewall or a TLS reverse proxy.
 you the same UI over an already-encrypted link, with `expose` left off:
 
 ```sh
-ssh -N -L 9701:127.0.0.1:9700 user@your-server   # leave this running
+ssh -N -L 9800:127.0.0.1:9700 user@your-server   # leave this running
 ssh user@your-server 'asale url'                 # the URL, token included
 ```
 
-Open that URL with the port changed to `9701` — the desktop app may already hold 9700 on
+Open that URL with the port changed to `9800` — the desktop app may already hold 9700 on
 your own machine.
 
 `asale` is installed on every platform, not just headless ones: `start`, `stop`, `restart`,

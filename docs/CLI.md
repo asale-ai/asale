@@ -121,11 +121,11 @@ When the browser is your own, an SSH tunnel beats opening the port — the link 
 already encrypted, so the token never crosses the network in the clear:
 
 ```sh
-ssh -N -L 9701:127.0.0.1:9700 user@your-server   # leave this running
+ssh -N -L 9800:127.0.0.1:9700 user@your-server   # leave this running
 ssh user@your-server 'asale url'                 # the URL, token included
 ```
 
-Open that URL with the port changed to `9701` — the desktop app may already hold
+Open that URL with the port changed to `9800` — the desktop app may already hold
 9700 on your own machine.
 
 `expose on` is for what a tunnel cannot cover: a shared team box, a phone, a

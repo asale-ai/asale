@@ -139,11 +139,11 @@ asale autostart enable     # 重開機後自動回來
 同一個介面，`expose` 保持關著：
 
 ```sh
-ssh -N -L 9701:127.0.0.1:9700 user@你的伺服器   # 開著別關
+ssh -N -L 9800:127.0.0.1:9700 user@你的伺服器   # 開著別關
 ssh user@你的伺服器 'asale url'                 # 拿到網址，token 已帶上
 ```
 
-把那個網址的連接埠改成 `9701` 再開啟——你自己機器上的桌面版可能已經占了 9700。
+把那個網址的連接埠改成 `9800` 再開啟——你自己機器上的桌面版可能已經占了 9700。
 
 `asale` 在所有平台都會裝上，不只是無桌面機器：`start`、`stop`、`restart`、`status`、
 `logs`、`open`、`autostart`、`update`、`uninstall`。
