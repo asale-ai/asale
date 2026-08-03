@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { invoke, inTauri, isDaemonDown, waitForDaemon, type Profile } from "./lib";
 import {
   IconDashboard, IconPublish, IconConsume, IconWallet,
-  IconRecords, IconUsage, IconGauge, IconAccount, IconSettings, IconChip,
+  IconRecords, IconUsage, IconGauge, IconAccount, IconSettings,
 } from "./icons";
 import { StatusWidget } from "./components/StatusWidget";
 import { Skeleton, PageSkeleton } from "./ui";
@@ -18,17 +18,13 @@ const Usage = lazy(() => import("./pages/Usage").then((m) => ({ default: m.Usage
 const Limits = lazy(() => import("./pages/Limits").then((m) => ({ default: m.Limits })));
 const Account = lazy(() => import("./pages/Account").then((m) => ({ default: m.Account })));
 const Settings = lazy(() => import("./pages/Settings").then((m) => ({ default: m.Settings })));
-const Endpoints = lazy(() => import("./pages/Endpoints").then((m) => ({ default: m.Endpoints })));
 
-type Tab =
-  | "dashboard" | "publish" | "consume" | "endpoints"
-  | "usage" | "limits" | "wallet" | "records" | "account" | "settings";
+type Tab = "dashboard" | "publish" | "consume" | "usage" | "limits" | "wallet" | "records" | "account" | "settings";
 
 const ICONS: Record<Tab, JSX.Element> = {
   dashboard: <IconDashboard />,
   publish: <IconPublish />,
   consume: <IconConsume />,
-  endpoints: <IconChip />,
   usage: <IconUsage />,
   limits: <IconGauge />,
   wallet: <IconWallet />,
@@ -42,17 +38,13 @@ const ICONS: Record<Tab, JSX.Element> = {
 // bottom of the sidebar (see App below).
 const NAV: Array<{ label?: string; items: Tab[] } | "spacer"> = [
   { items: ["dashboard"] },
-  { label: "groupTrade", items: ["publish", "consume", "endpoints"] },
+  { label: "groupTrade", items: ["publish", "consume"] },
   { label: "groupUsage", items: ["usage", "limits"] },
   { label: "groupFinance", items: ["wallet", "records"] },
   "spacer",
   { items: ["settings"] },
 ];
 
-/// Tabs that are not part of the product: shown only when the daemon says it is
-/// running the feature behind them. Filtered out of `NAV` rather than hidden by
-/// CSS, so an install that is not running them has no way to reach the page.
-const INTERNAL_TABS: Tab[] = ["endpoints"];
 
 export function App() {
   const { t } = useTranslation();
@@ -64,9 +56,6 @@ export function App() {
   // Pages mount only once the daemon has answered — otherwise every one of
   // them renders its "daemon down" / "signed out" branch for a second first.
   const [booted, setBooted] = useState(false);
-  // Internal features this daemon is running. Empty until asked, so nothing
-  // internal is offered on an ordinary install even for the first frame.
-  const [internal, setInternal] = useState<Tab[]>([]);
 
   useEffect(() => {
     if (!inTauri) { setBooted(true); return; }
@@ -92,18 +81,6 @@ export function App() {
     poll();
     const id = setInterval(poll, 4000);
     return () => { alive = false; clearInterval(id); };
-  }, [booted]);
-
-  // Custom endpoints are platform machinery, armed by an env var on the daemon
-  // (`ASALE_CUSTOM_ENDPOINTS`). Asked once per launch: it cannot change while
-  // the daemon is up, and the tab must not flicker in and out on a poll.
-  useEffect(() => {
-    if (!inTauri || !booted) return;
-    let alive = true;
-    invoke<{ enabled: boolean }>("custom_endpoints_status")
-      .then((r) => { if (alive && r.enabled) setInternal(["endpoints"]); })
-      .catch(() => {});
-    return () => { alive = false; };
   }, [booted]);
 
   // Allow any page to request navigation (e.g. "manage limits" from Publish).
@@ -168,7 +145,7 @@ export function App() {
           ) : (
             <div key={i}>
               {g.label && <div className="nav-group-label">{t(`nav.${g.label}`)}</div>}
-              {g.items.filter((id) => !INTERNAL_TABS.includes(id) || internal.includes(id)).map(navBtn)}
+              {g.items.map(navBtn)}
             </div>
           ),
         )}
@@ -191,7 +168,6 @@ export function App() {
               {tab === "dashboard" && <Dashboard onNavigate={setTab} region={profile?.region ?? ""} />}
               {tab === "publish" && <Publish />}
               {tab === "consume" && <Consume />}
-              {tab === "endpoints" && <Endpoints />}
               {tab === "usage" && <Usage />}
               {tab === "limits" && <Limits />}
               {tab === "wallet" && <WalletPage />}

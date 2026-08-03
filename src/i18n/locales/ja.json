@@ -12,8 +12,7 @@
     "browserPreview": "ブラウザプレビュー",
     "groupTrade": "シェア",
     "groupUsage": "統計",
-    "groupFinance": "資金",
-    "endpoints": "カスタムエンドポイント"
+    "groupFinance": "資金"
   },
   "dashboard": {
     "title": "ダッシュボード",
@@ -252,7 +251,13 @@
     "pasteHintDesktop": "認可は済んだのに戻ってきませんか？ブラウザーのアドレスバーからコールバック URL をコピーして下に貼り付ければ、手動でサインインを完了できます。",
     "pasteLabel": "コールバック URL、または認可コードのみ",
     "pastePlaceholder": "http://localhost:37669/callback?code=…",
-    "pasteSubmit": "ログインを完了"
+    "pasteSubmit": "ログインを完了",
+    "connectViaEndpoint": "プラットフォーム接続先",
+    "endpointHint": "{{provider}} のキーを貼り付けてください。発行はこちら:",
+    "endpointFloor": "価格の下限",
+    "endpointTermsHint": "下限は定価に対する割合で、市場価格がこれを下回ると販売を停止します。この接続先はトークンごとに実費がかかるため、原価割れを防ぐための設定です。キー 1 本につき 1 アカウント：同じ提供元の複数キーは別々の名前で接続してください（同名だと上書きされます）。どちらも後から下のアカウントで変更できます。",
+    "endpointChecking": "確認中…",
+    "endpointConnected": "{{account}} を接続しました：{{served}} 個のモデルを提供し、うち {{selling}} 個が取引可能です。"
   },
   "consume": {
     "title": "購入",
@@ -873,38 +878,5 @@
     "quitNote": "終了すると販売が止まります。ウィンドウを閉じるだけならここに残ります。",
     "earnedToday": "本日の収入",
     "calls": "{{n}} 件のリクエスト"
-  },
-  "endpoints": {
-    "title": "カスタムエンドポイント",
-    "sub": "内部機能：OpenAI 互換エンドポイントをサブスクと同じように販売します。",
-    "reload": "再読み込み",
-    "addTitle": "エンドポイントを追加",
-    "addDesc": "保存する前に、base URL とキーをエンドポイントで検証します。",
-    "internalNote": "販売者向けの機能ではなくプラットフォーム側の仕組みです。サブスク販売者が扱わないモデルの供給を補います。",
-    "baseLabel": "Base URL",
-    "keyLabel": "API キー",
-    "nameLabel": "名前",
-    "namePlaceholder": "省略可 — 空ならホスト名を使います",
-    "floorLabel": "定価比がこの割合以上のときだけ販売",
-    "floorHint": "従量課金のエンドポイントはトークンごとに実費がかかります。原価割れを防ぐための下限です。",
-    "slotsLabel": "同時に処理するリクエスト数",
-    "slotsHint": "マーケットがこのエンドポイントに同時に送るリクエストの上限です。",
-    "connect": "接続して販売を開始",
-    "connecting": "エンドポイントを確認中…",
-    "connected": "{{account}} を接続しました：{{served}} 個のモデルを提供し、うち {{selling}} 個が取引可能です。",
-    "refreshed": "{{account}} を再確認しました：{{served}} 個のモデルを提供し、うち {{selling}} 個が取引可能です。",
-    "listTitle": "接続済みのエンドポイント",
-    "listDesc": "サブスクと同じく、それぞれ自分の条件で販売します。",
-    "emptyTitle": "エンドポイントはまだありません",
-    "emptyDesc": "上から追加して、誰も売っていないモデルの供給を補ってください。",
-    "sellSwitch": "このエンドポイントから販売",
-    "refresh": "モデル一覧を再取得",
-    "remove": "このエンドポイントを削除",
-    "removeConfirm": "{{account}} を削除しますか？キーもこの端末から削除されます。",
-    "floorFact": "価格の下限",
-    "slotsFact": "同時実行数",
-    "sellingFact": "販売中のモデル",
-    "modelsSummary": "{{n}} 個のモデルがマーケットに出ています",
-    "noOverlap": "このエンドポイントが提供するモデルはどれも取引対象ではないため、何も売れていません。"
   }
 }

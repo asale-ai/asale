@@ -12,8 +12,7 @@
     "browserPreview": "浏览器预览",
     "groupTrade": "共享",
     "groupUsage": "统计",
-    "groupFinance": "资金",
-    "endpoints": "自定义端点"
+    "groupFinance": "资金"
   },
   "dashboard": {
     "title": "概览",
@@ -252,7 +251,13 @@
     "pasteHintDesktop": "已授权，但迟迟没跳回来？把浏览器地址栏里的回调地址复制过来粘贴到下面，即可手动完成登录。",
     "pasteLabel": "回调地址，或者只填授权码",
     "pastePlaceholder": "http://localhost:37669/callback?code=…",
-    "pasteSubmit": "完成登录"
+    "pasteSubmit": "完成登录",
+    "connectViaEndpoint": "平台端点",
+    "endpointHint": "粘贴 {{provider}} 的 key，在这里创建：",
+    "endpointFloor": "价格底线",
+    "endpointTermsHint": "底价是占原价的百分比，市场价低于它就自动停售——这个端点每个 token 都是真金白银，底价就是防止亏本卖的那道闸。一个 key 一个账号：同一家的多个 key 请用不同名称连接，重名会互相覆盖。两项之后都能在下面的账号里改。",
+    "endpointChecking": "验证中…",
+    "endpointConnected": "{{account}} 已连接：端点提供 {{served}} 个模型，其中 {{selling}} 个平台在交易。"
   },
   "consume": {
     "title": "买入",
@@ -873,38 +878,5 @@
     "quitNote": "退出后停止出售；关闭窗口只是收进托盘。",
     "earnedToday": "今日收入",
     "calls": "{{n}} 次请求"
-  },
-  "endpoints": {
-    "title": "自定义端点",
-    "sub": "内部功能：把任意 OpenAI 兼容端点当作订阅账号来卖。",
-    "reload": "刷新",
-    "addTitle": "添加端点",
-    "addDesc": "保存之前会先拿 base URL 和 key 去端点验证一次。",
-    "internalNote": "这是平台自用的机制，不是给卖家的功能：用来给订阅卖家覆盖不到的模型补供给。",
-    "baseLabel": "Base URL",
-    "keyLabel": "API Key",
-    "nameLabel": "名称",
-    "namePlaceholder": "可留空，默认用域名",
-    "floorLabel": "市场价 ≥ 此百分比时才卖出（占原价）",
-    "floorHint": "计费端点每个 token 都是真金白银，这个底价是防止亏本卖的那道闸。",
-    "slotsLabel": "同时服务的请求数",
-    "slotsHint": "市场最多同时向该端点派发这么多请求。",
-    "connect": "连接并开始卖出",
-    "connecting": "正在验证端点…",
-    "connected": "{{account}} 已连接：端点提供 {{served}} 个模型，其中 {{selling}} 个平台在交易。",
-    "refreshed": "{{account}} 已重新检查：端点提供 {{served}} 个模型，其中 {{selling}} 个平台在交易。",
-    "listTitle": "已连接的端点",
-    "listDesc": "每个端点按自己的条件卖出，和订阅账号一样。",
-    "emptyTitle": "还没有端点",
-    "emptyDesc": "在上面添加一个，给没人卖的模型补上供给。",
-    "sellSwitch": "从该端点卖出",
-    "refresh": "重新读取模型列表",
-    "remove": "删除该端点",
-    "removeConfirm": "删除 {{account}}？它的 key 会从本机一并删除。",
-    "floorFact": "价格底线",
-    "slotsFact": "并发上限",
-    "sellingFact": "在卖模型",
-    "modelsSummary": "{{n}} 个模型在市场上",
-    "noOverlap": "该端点提供的模型平台都不交易，所以它一个也卖不出去。"
   }
 }

@@ -348,19 +348,72 @@ fn market_id_of(endpoint_id: &str) -> String {
     }
 }
 
-/// Index an endpoint's model list by market id.
+/// The market ids one endpoint id could plausibly be, most literal first.
 ///
-/// Collisions are possible in principle — two vendor-prefixed ids normalising to
-/// one market id — and the first wins, sorted, so the choice is at least stable
-/// across rebuilds rather than depending on the endpoint's ordering.
-pub fn index_custom_models(endpoint_ids: &[String]) -> std::collections::BTreeMap<String, String> {
+/// Endpoints spell the same model in several ways and none of them is wrong:
+/// an aggregator prefixes the vendor (`anthropic/claude-haiku-4.5`), a gateway
+/// that fronts one account does not (`claude-haiku-4.5`, `gpt-5.2`), and
+/// Anthropic's own published versions are dotted while its API — and therefore
+/// the platform's catalog — is hyphenated (`claude-haiku-4-5`).
+///
+/// Guessing the vendor from the id is what this replaces, and it was wrong in a
+/// way that lost a whole family: an unprefixed `claude-opus-4.5` looks like no
+/// vendor at all, so the dot rule never fired and every Claude model on such an
+/// endpoint failed to match the catalog. Trying the forms and letting the
+/// catalog decide needs no guess.
+fn market_candidates(endpoint_id: &str) -> Vec<String> {
+    let bare = endpoint_id.split_once('/').map(|(_, m)| m).unwrap_or(endpoint_id);
+    let mut out = vec![endpoint_id.to_string(), bare.to_string()];
+    if bare.contains('.') {
+        out.push(bare.replace('.', "-"));
+    }
+    out.dedup();
+    out
+}
+
+/// Index an endpoint's model list by the id the market knows each model as.
+///
+/// `tradable` is what the platform actually prices — the catalog — and it is
+/// the judge: the first candidate spelling that appears in it wins, and an id
+/// with no match is left out entirely, because a lane for a model the market
+/// does not trade can never earn.
+///
+/// Before the first catalog pull `tradable` is empty and there is nothing to
+/// judge against. The list is kept anyway, under the best guess ([`market_id_of`]),
+/// rather than dropped: `sellable_models` intersects with the catalog again once
+/// there is one, so a wrong guess costs nothing, while dropping everything would
+/// leave a freshly connected endpoint advertising nothing until the next hourly
+/// refresh.
+///
+/// Collisions are possible in principle — two endpoint ids normalising to one
+/// market id — and the first wins, sorted, so the choice is stable across
+/// rebuilds rather than depending on the endpoint's ordering.
+pub fn index_custom_models(
+    endpoint_ids: &[String],
+    tradable: &[String],
+) -> std::collections::BTreeMap<String, String> {
     let mut sorted: Vec<&String> = endpoint_ids.iter().collect();
     sorted.sort();
     let mut out = std::collections::BTreeMap::new();
     for id in sorted {
-        out.entry(market_id_of(id)).or_insert_with(|| id.clone());
+        let market = match market_candidates(id).into_iter().find(|c| tradable.iter().any(|t| t == c)) {
+            Some(m) => m,
+            None if tradable.is_empty() => market_id_of(id),
+            None => continue,
+        };
+        out.entry(market).or_insert_with(|| id.clone());
     }
     out
+}
+
+/// Every model the platform trades, from the cached catalog. Empty before the
+/// first pull, which callers read as "no opinion" rather than "nothing".
+async fn tradable_models(store: &LocalStore) -> Vec<String> {
+    let Some(c) = load_catalog(store).await else { return Vec::new() };
+    let mut all: Vec<String> = c.by_provider.values().flatten().cloned().collect();
+    all.sort();
+    all.dedup();
+    all
 }
 
 /// Record what a custom endpoint serves, as of now.
@@ -374,7 +427,9 @@ pub async fn store_custom_models(
     account_id: &str,
     endpoint_ids: &[String],
 ) -> anyhow::Result<CustomListing> {
-    let listing = CustomListing { fetched_at: now_secs(), aliases: index_custom_models(endpoint_ids) };
+    let tradable = tradable_models(store).await;
+    let listing =
+        CustomListing { fetched_at: now_secs(), aliases: index_custom_models(endpoint_ids, &tradable) };
     store.set_setting(&custom_models_key(account_id), &serde_json::to_string(&listing)?).await?;
     Ok(listing)
 }
@@ -1522,6 +1577,45 @@ mod tests {
         assert!(sellable_models(&None, CUSTOM_PROVIDER, Some(&["gpt-5.5".to_string()])).is_empty());
     }
 
+    /// What the platform prices, in the catalog's own spelling.
+    fn tradable() -> Vec<String> {
+        ["claude-haiku-4-5", "claude-opus-4-5", "gpt-5.5", "gpt-5.2", "grok-4.5"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn an_unprefixed_dotted_anthropic_id_still_finds_its_catalog_row() {
+        // The b.ai shape: no vendor prefix, and Anthropic's published dotted
+        // version. Guessing the vendor from the id cannot work here — there is
+        // nothing to guess from — so the catalog decides, and a whole family
+        // stops being invisible.
+        let ids: Vec<String> =
+            ["claude-opus-4.5", "gpt-5.2"].iter().map(|s| s.to_string()).collect();
+        let idx = index_custom_models(&ids, &tradable());
+        assert_eq!(idx.get("claude-opus-4-5").map(String::as_str), Some("claude-opus-4.5"));
+        // An id the vendor already publishes dotted is left alone — OpenAI's
+        // real API id *is* `gpt-5.2`.
+        assert_eq!(idx.get("gpt-5.2").map(String::as_str), Some("gpt-5.2"));
+    }
+
+    #[test]
+    fn a_model_the_platform_does_not_price_is_left_out() {
+        let ids: Vec<String> = ["meta/llama-4", "some-local-model"].iter().map(|s| s.to_string()).collect();
+        assert!(index_custom_models(&ids, &tradable()).is_empty());
+    }
+
+    #[test]
+    fn before_the_first_catalog_pull_the_best_guess_is_kept() {
+        // Dropping everything would leave an endpoint connected a minute ago
+        // advertising nothing until the next hourly refresh; `sellable_models`
+        // intersects with the catalog again anyway, so a wrong guess is free.
+        let ids = vec!["anthropic/claude-haiku-4.5".to_string()];
+        let idx = index_custom_models(&ids, &[]);
+        assert_eq!(idx.get("claude-haiku-4-5").map(String::as_str), Some("anthropic/claude-haiku-4.5"));
+    }
+
     #[test]
     fn an_aggregators_ids_are_indexed_under_the_names_the_market_trades() {
         // The case that decides whether this feature works at all: an
@@ -1532,7 +1626,9 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let idx = index_custom_models(&ids);
+        let catalog: Vec<String> =
+            ["claude-haiku-4-5", "gpt-5.5", "grok-4.5"].iter().map(|s| s.to_string()).collect();
+        let idx = index_custom_models(&ids, &catalog);
         // Anthropic is the one vendor whose published id is not its API id.
         assert_eq!(idx.get("claude-haiku-4-5").map(String::as_str), Some("anthropic/claude-haiku-4.5"));
         // Everyone else publishes the dotted name as the real id, so only the
@@ -1545,7 +1641,10 @@ mod tests {
     fn an_unprefixed_id_is_already_a_market_id() {
         // A vendor's own API — and most self-hosted gateways — list models
         // without a vendor prefix, and those ids need no translation at all.
-        let idx = index_custom_models(&["claude-opus-5".to_string(), "gpt-5.5".to_string()]);
+        let idx = index_custom_models(
+            &["claude-opus-5".to_string(), "gpt-5.5".to_string()],
+            &["claude-opus-5".to_string(), "gpt-5.5".to_string()],
+        );
         assert_eq!(idx.get("claude-opus-5").map(String::as_str), Some("claude-opus-5"));
         assert_eq!(idx.len(), 2);
     }

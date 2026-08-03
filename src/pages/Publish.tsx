@@ -24,6 +24,39 @@ const DEVICE_PROVIDERS = [
   { id: "xai", label: "Grok CLI" },
 ];
 
+/** Platform endpoints — internal.
+ *
+ * An OpenAI-compatible endpoint the platform buys from and resells: same lanes,
+ * same terms, same metering as a subscription, and it appears in the account
+ * list below like any other. It differs only in where the requests go, which is
+ * why the base URL is fixed here rather than typed: these two are the endpoints
+ * the platform actually has an account with, and a free-text URL would be a way
+ * to point a key at the wrong host.
+ *
+ * Only rendered when the daemon is running the feature (`ASALE_CUSTOM_ENDPOINTS`).
+ */
+const ENDPOINT_PROVIDERS = [
+  {
+    id: "openrouter",
+    label: "OpenRouter",
+    base: "https://openrouter.ai/api/v1",
+    keyUrl: "https://openrouter.ai/settings/keys",
+    namePlaceholder: "openrouter",
+  },
+  // One base URL, many keys: B.AI's own docs say switching access method only
+  // means replacing the key, the URL and paths do not change. Each key is a
+  // different tier with a different cost, so each is its own account here —
+  // hence a placeholder that suggests naming them apart rather than the bare
+  // vendor id, which would have the second key overwrite the first.
+  {
+    id: "bai",
+    label: "BAI",
+    base: "https://api.b.ai/v1",
+    keyUrl: "https://chat.b.ai/key",
+    namePlaceholder: "bai-mix2",
+  },
+];
+
 /** The metered platform APIs, which issue keys rather than subscriptions.
  *  `keyUrl` is where the key is issued. */
 const KEY_PROVIDERS = [
@@ -298,6 +331,16 @@ export function Publish() {
   const [pasteFlow, setPasteFlow] = useState<{ provider: string; flowId: string } | null>(null);
   const [pasteDraft, setPasteDraft] = useState("");
 
+  // Platform endpoints: whether the daemon runs the feature at all, which
+  // endpoint's form is open, and the terms being typed into it.
+  const [endpointsOn, setEndpointsOn] = useState(false);
+  const [epProvider, setEpProvider] = useState("");
+  const [epKey, setEpKey] = useState("");
+  const [epName, setEpName] = useState("");
+  const [epFloor, setEpFloor] = useState("");
+  const [epSlots, setEpSlots] = useState(String(SLOTS_DEFAULT));
+  const [epBusy, setEpBusy] = useState(false);
+
   // API-key connect: which vendor's form is open, and its draft.
   const [keyProvider, setKeyProvider] = useState("");
   const [keyDraft, setKeyDraft] = useState("");
@@ -314,15 +357,21 @@ export function Publish() {
   const [buyingTools, setBuyingTools] = useState<string[]>([]);
   const [importErr, setImportErr] = useState("");
 
+  // Asked once: it is an env var on the daemon, so it cannot change while the
+  // app is up, and the two tiles must not flicker in and out on a poll.
+  useEffect(() => {
+    if (!inTauri) return;
+    let alive = true;
+    invoke<{ enabled: boolean }>("custom_endpoints_status")
+      .then((r) => { if (alive) setEndpointsOn(r.enabled); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
+
   const loadAccounts = useCallback(() => {
     if (!inTauri) return;
     invoke<AccountStatus[]>("list_accounts")
-      .then((all) => {
-        // Custom endpoints are accounts too, but they are internal machinery
-        // with a page of their own — listing them here would put a row with no
-        // plan, no window and no vendor next to the subscriptions this page is
-        // about, and offer two places to edit one thing.
-        const list = all.filter((a) => a.provider !== "custom");
+      .then((list) => {
         setAccounts(list);
         setAcctErr("");
         // Seed each account's cap input once; don't clobber an in-progress edit.
@@ -565,10 +614,52 @@ export function Publish() {
     } catch (e) { setImportErr(errText(e)); } finally { setRescanning(false); }
   }
 
+  /** Connect one of the platform endpoints. The base URL comes from the tile,
+   *  not from a field: these are the two endpoints the platform has an account
+   *  with, and a typed host is a way to send a key somewhere it should not go.
+   *  The daemon probes `GET {base}/models` before storing anything, so a dead
+   *  key fails here rather than on the first buyer. */
+  async function connectEndpoint(ep: { id: string; label: string; base: string }) {
+    setErr(""); setMsg(""); setEpBusy(true);
+    try {
+      const r = await invoke<{ account_id: string; endpoint_models: number; sellable_models: string[] }>(
+        "connect_custom_endpoint",
+        {
+          baseUrl: ep.base,
+          apiKey: epKey.trim(),
+          label: epName.trim() || ep.id,
+          // Empty floor means "any price"; the daemon clamps it either way.
+          minRatio: epFloor.trim() ? clampRatio(parseInt(epFloor, 10) || RATIO_MIN) : RATIO_MIN,
+          concurrency: clampSlots(parseInt(epSlots, 10) || SLOTS_DEFAULT),
+        },
+      );
+      setMsg(t("publish.endpointConnected", {
+        account: r.account_id,
+        served: r.endpoint_models,
+        selling: r.sellable_models.length,
+      }));
+      // The key is never read back; clear the form rather than leave a secret
+      // sitting in a field the next submit would resend.
+      setEpProvider(""); setEpKey(""); setEpName(""); setEpFloor("");
+      loadAccounts();
+    } catch (e) {
+      setErr(errText(e));
+    } finally {
+      setEpBusy(false);
+    }
+  }
+
   async function removeAccount(a: AccountStatus) {
     setAcctErr("");
-    try { await invoke<boolean>("remove_account", { provider: a.provider, accountId: a.account_id }); loadAccounts(); }
-    catch (e) { setAcctErr(errText(e)); }
+    try {
+      // A platform endpoint carries two settings no other account has (its base
+      // URL and its cached model list); its own command takes those with it, so
+      // a re-added endpoint never inherits a stale list.
+      await (a.provider === "custom"
+        ? invoke<boolean>("remove_custom_endpoint", { accountId: a.account_id })
+        : invoke<boolean>("remove_account", { provider: a.provider, accountId: a.account_id }));
+      loadAccounts();
+    } catch (e) { setAcctErr(errText(e)); }
   }
 
   const statusPill = (s: AccountStatus["status"]) => {
@@ -577,6 +668,7 @@ export function Publish() {
   };
 
   const open = KEY_PROVIDERS.find((p) => p.id === keyProvider);
+  const openEp = ENDPOINT_PROVIDERS.find((p) => p.id === epProvider);
 
   const connectGrid = (
     <>
@@ -615,6 +707,25 @@ export function Publish() {
             <span>
               <span className="pick-title">{p.label}</span>
               <span className="pick-sub">{t("publish.connectViaKey")}</span>
+            </span>
+          </button>
+        ))}
+        {/* Internal: only when the daemon runs the feature. */}
+        {endpointsOn && ENDPOINT_PROVIDERS.map((p) => (
+          <button
+            key={p.id}
+            className={`pick ${epProvider === p.id ? "active" : ""}`}
+            onClick={() => {
+              setEpProvider(epProvider === p.id ? "" : p.id);
+              setEpKey(""); setEpName(""); setEpFloor("");
+              setEpSlots(String(SLOTS_DEFAULT));
+            }}
+            disabled={busy || !inTauri}
+          >
+            <span className="pick-ico"><Mark id={p.id} /></span>
+            <span>
+              <span className="pick-title">{p.label}</span>
+              <span className="pick-sub">{t("publish.connectViaEndpoint")}</span>
             </span>
           </button>
         ))}
@@ -716,6 +827,95 @@ export function Publish() {
           </div>
         </div>
       )}
+
+      {/* A platform endpoint takes its terms up front, unlike a subscription:
+          it costs real money per token, so the floor that keeps it from selling
+          under cost is part of connecting it, not something to remember to set
+          afterwards. Both terms are editable later on the account row, like any
+          other account's. */}
+      {openEp && (
+        <div className="keyform fade-in">
+          <div className="callout info">
+            <IconInfo />
+            <span>
+              {t("publish.endpointHint", { provider: openEp.label })}{" "}
+              <a href={openEp.keyUrl} target="_blank" rel="noreferrer">{openEp.keyUrl}</a>
+            </span>
+          </div>
+          <div className="field">
+            <label htmlFor="ep-key">{t("publish.keyLabel", { provider: openEp.label })}</label>
+            <input
+              id="ep-key"
+              className="input mono"
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              value={epKey}
+              placeholder={t("publish.keyPlaceholder")}
+              onChange={(e) => setEpKey(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && epKey.trim()) connectEndpoint(openEp); }}
+            />
+            <div className="hint mono">{openEp.base}</div>
+          </div>
+          <div className="ep-terms">
+            <div className="field">
+              <label htmlFor="ep-name">{t("publish.keyName")}</label>
+              <input
+                id="ep-name"
+                className="input"
+                value={epName}
+                placeholder={openEp.namePlaceholder}
+                onChange={(e) => setEpName(e.target.value)}
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="ep-floor">{t("publish.endpointFloor")}</label>
+              <div className="input-row">
+                <span className="band-cap">≥</span>
+                <input
+                  id="ep-floor"
+                  className="input mono band-input"
+                  type="number"
+                  min={RATIO_MIN}
+                  max={RATIO_MAX}
+                  value={epFloor}
+                  placeholder={String(RATIO_MIN)}
+                  onChange={(e) => setEpFloor(e.target.value)}
+                />
+                <span className="unit">%</span>
+              </div>
+            </div>
+            <div className="field">
+              <label htmlFor="ep-slots">{t("publish.lanesLabel")}</label>
+              <div className="input-row">
+                <input
+                  id="ep-slots"
+                  className="input mono band-input"
+                  type="number"
+                  min={SLOTS_MIN}
+                  max={SLOTS_MAX}
+                  value={epSlots}
+                  onChange={(e) => setEpSlots(e.target.value)}
+                />
+                <span className="unit">{t("publish.unitRequests")}</span>
+              </div>
+            </div>
+          </div>
+          <div className="hint">{t("publish.endpointTermsHint")}</div>
+          <div className="keyform-actions">
+            <button
+              className="btn sm"
+              onClick={() => connectEndpoint(openEp)}
+              disabled={epBusy || !epKey.trim()}
+            >
+              {epBusy ? t("publish.endpointChecking") : t("publish.keyConnect")}
+            </button>
+            <button className="btn sm ghost" onClick={() => setEpProvider("")} disabled={epBusy}>
+              {t("publish.keyCancel")}
+            </button>
+          </div>
+        </div>
+      )}
     </>
   );
 
@@ -804,7 +1004,10 @@ export function Publish() {
               return (
                 <div key={k} className={`acct ${a.sell_enabled ? "selling" : ""}`}>
                   <div className="acct-head">
-                    <Mark id={a.provider} />
+                    {/* Every platform endpoint is booked under `custom`, so the
+                        provider would give all of them the same glyph; their
+                        own name is what tells OpenRouter from BAI. */}
+                    <Mark id={a.provider === "custom" ? a.account_id : a.provider} />
                     <div className="acct-id">
                       <div className="acct-name">
                         {a.account_id}

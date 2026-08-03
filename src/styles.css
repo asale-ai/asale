@@ -1927,11 +1927,17 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .tp-quit:disabled { opacity: 0.5; cursor: default; background: transparent; color: var(--fg-2); }
 .tp-quit svg { width: 14px; height: 14px; }
 
-/* Custom endpoints (internal): the model list one endpoint has in common with
-   the platform's catalog. Collapsed by default — an aggregator can share
-   dozens, and the count above is the number that actually answers "why is this
-   earning nothing". */
-.ep-models { margin-top: var(--s2); }
-.ep-models summary { cursor: pointer; font-size: 12px; color: var(--muted); }
-.ep-models summary:hover { color: var(--text); }
-.ep-model-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--s2); }
+/* Custom endpoints (internal). The three terms of the sale ride on one row:
+   a name, a price floor and a concurrency ceiling are each a few characters,
+   and stacked they turn a five-field form into a scrolling page. The name takes
+   the slack because it is the only one whose length is not known. */
+.ep-terms { display: grid; grid-template-columns: 1fr 132px 148px; gap: var(--s3); align-items: end; }
+.ep-terms .field { margin-bottom: 0; }
+.ep-terms .band-input { width: 100%; }
+@media (max-width: 720px) { .ep-terms { grid-template-columns: 1fr; } }
+
+/* `.hint` is styled as `.field .hint`, which is where every other page puts
+   it. This one sits directly in the connect form, explaining the whole terms
+   row rather than one field of it. */
+.keyform > .hint { color: var(--fg-3); font-size: var(--fs-meta); line-height: 1.5; }
+
