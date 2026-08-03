@@ -163,7 +163,20 @@ fn produces_text(modality: &str) -> bool {
 /// entitlement means.
 fn sellable_models(catalog: &Option<SellableCatalog>, provider: &str, entitled: Option<&[String]>) -> Vec<String> {
     let listed: Vec<String> = match catalog {
+        // A custom endpoint is not tied to one vendor's credential family, so
+        // the catalog has no column for it: what it *may* sell is everything the
+        // platform trades, and what it *can* sell is narrowed by the endpoint's
+        // own model list, which arrives as `entitled` below.
+        Some(c) if provider == CUSTOM_PROVIDER => {
+            let mut all: Vec<String> = c.by_provider.values().flatten().cloned().collect();
+            all.sort();
+            all.dedup();
+            all
+        }
         Some(c) => c.by_provider.get(provider).cloned().unwrap_or_default(),
+        // A custom endpoint has no built-in model set to fall back on — its
+        // models are whatever its operator's endpoint serves — so before the
+        // first catalog pull it advertises nothing rather than guessing.
         None => fallback_models(provider).iter().map(|s| s.to_string()).collect(),
     };
     let listed: Vec<String> = match entitled {
@@ -181,10 +194,25 @@ fn codex_entitlement_key(account_id: &str) -> String {
     format!("codexmodels:{account_id}")
 }
 
+/// Settings key holding when this account's last entitlement lookup failed.
+fn codex_entitlement_retry_key(account_id: &str) -> String {
+    format!("codexmodels:failed:{account_id}")
+}
+
 /// How stale a cached entitlement may get. The set changes when OpenAI ships a
 /// Codex release or the owner's plan changes, so an hour is soon enough — and
 /// it keeps this off the hot path of the periodic pool rebuild.
 const CODEX_ENTITLEMENT_TTL: i64 = 3600;
+
+/// How long a *failed* lookup suppresses the next attempt.
+///
+/// The sell page rebuilds the pool on every `list_accounts` / `list_lanes`, so
+/// on a network that cannot reach the Codex backend at all, every render used to
+/// add one more upstream call that had to time out before the page could finish
+/// — which is what the user sees as a sell page stuck on its skeleton. A minute
+/// is short enough that a proxy coming up is picked up promptly, and long enough
+/// that the UI stops paying for the outage.
+const CODEX_ENTITLEMENT_RETRY_BACKOFF: i64 = 60;
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct CodexEntitlement {
@@ -220,6 +248,17 @@ async fn codex_entitlement(store: &LocalStore, tool: &asale_client_core::store::
         }
     }
     let stale = || cached.clone().map(|c| c.models).unwrap_or_default();
+    let retry_key = codex_entitlement_retry_key(&tool.account_id);
+    let failed_at = store
+        .get_setting(&retry_key)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .unwrap_or(0);
+    if now_secs() - failed_at < CODEX_ENTITLEMENT_RETRY_BACKOFF {
+        return stale();
+    }
     let Some(token) = keychain::get(&tool.keychain_ref).ok().flatten() else {
         tracing::warn!(account = %tool.account_id, "codex entitlement: no token in the secret store");
         return stale();
@@ -241,10 +280,161 @@ async fn codex_entitlement(store: &LocalStore, tool: &asale_client_core::store::
             if let Ok(raw) = serde_json::to_string(&fresh) {
                 let _ = store.set_setting(&key, &raw).await;
             }
+            let _ = store.set_setting(&retry_key, "0").await;
             fresh.models
         }
         Err(e) => {
             tracing::warn!(account = %tool.account_id, "codex entitlement lookup failed: {e}");
+            let _ = store.set_setting(&retry_key, &now_secs().to_string()).await;
+            stale()
+        }
+    }
+}
+
+/// The provider id a custom endpoint account is stored under.
+pub const CUSTOM_PROVIDER: &str = "custom";
+
+/// Settings key holding one custom account's endpoint.
+///
+/// The base URL lives beside the account rather than in the `tools` row because
+/// it is not a property every account has — every other provider's upstream is
+/// the vendor's and is known at compile time.
+pub fn custom_base_key(account_id: &str) -> String {
+    format!("custombase:{account_id}")
+}
+
+/// Settings key holding the model list one custom endpoint last reported.
+fn custom_models_key(account_id: &str) -> String {
+    format!("custommodels:{account_id}")
+}
+
+/// What one custom endpoint serves, keyed the way the market names it.
+///
+/// The two spellings are rarely the same. An aggregator lists
+/// `anthropic/claude-haiku-4.5`; the platform trades `claude-haiku-4-5`, because
+/// that is the id a vendor's own API answers to and the catalog stores the
+/// native form (server `catalog::native_model_name`). So the market id is what
+/// the lane is declared under and matched on, and the endpoint id is what has to
+/// travel in the request body — hence a map rather than a list.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CustomListing {
+    pub fetched_at: i64,
+    /// market model id -> the id this endpoint knows it by.
+    pub aliases: std::collections::BTreeMap<String, String>,
+}
+
+impl CustomListing {
+    /// The market ids this endpoint can serve, for the catalog intersection.
+    fn market_ids(&self) -> Vec<String> {
+        self.aliases.keys().cloned().collect()
+    }
+}
+
+/// The market id for a model as one endpoint spells it.
+///
+/// Mirrors the server's own normalisation so the two sides agree on what a model
+/// is called: the vendor prefix is dropped (the catalog stores the right-hand
+/// half), and Anthropic's dotted versions become hyphenated, which is the only
+/// vendor whose published id and API id differ that way.
+///
+/// A plain id with no prefix is already a market id — that is how a vendor's own
+/// API and most self-hosted gateways list their models.
+fn market_id_of(endpoint_id: &str) -> String {
+    match endpoint_id.split_once('/') {
+        // `~anthropic` is the catalog's alias row for the same vendor.
+        Some((vendor, model)) if vendor.trim_start_matches('~') == "anthropic" => model.replace('.', "-"),
+        Some((_, model)) => model.to_string(),
+        None => endpoint_id.to_string(),
+    }
+}
+
+/// Index an endpoint's model list by market id.
+///
+/// Collisions are possible in principle — two vendor-prefixed ids normalising to
+/// one market id — and the first wins, sorted, so the choice is at least stable
+/// across rebuilds rather than depending on the endpoint's ordering.
+pub fn index_custom_models(endpoint_ids: &[String]) -> std::collections::BTreeMap<String, String> {
+    let mut sorted: Vec<&String> = endpoint_ids.iter().collect();
+    sorted.sort();
+    let mut out = std::collections::BTreeMap::new();
+    for id in sorted {
+        out.entry(market_id_of(id)).or_insert_with(|| id.clone());
+    }
+    out
+}
+
+/// Record what a custom endpoint serves, as of now.
+///
+/// Called when an endpoint is connected, so the account is sellable from the
+/// probe's answer instead of only after the next rebuild goes and asks again.
+/// It writes the same cache [`custom_endpoint_models`] reads, so the TTL and the
+/// staleness rules stay in one place.
+pub async fn store_custom_models(
+    store: &LocalStore,
+    account_id: &str,
+    endpoint_ids: &[String],
+) -> anyhow::Result<CustomListing> {
+    let listing = CustomListing { fetched_at: now_secs(), aliases: index_custom_models(endpoint_ids) };
+    store.set_setting(&custom_models_key(account_id), &serde_json::to_string(&listing)?).await?;
+    Ok(listing)
+}
+
+/// How stale a custom endpoint's model list may get before it is re-read. The
+/// same hour Codex's entitlement uses, for the same reason: the set moves when
+/// somebody reconfigures the endpoint, which is not something to ask about on
+/// every pool rebuild.
+const CUSTOM_MODELS_TTL: i64 = 3600;
+
+/// The models one custom endpoint currently serves.
+///
+/// Cached and refreshed on the same terms as [`codex_entitlement`]: a stale list
+/// outlives a failed call, because a network blip must not take a working
+/// publisher off the market, while an empty *answer* is taken at face value.
+async fn custom_endpoint_models(store: &LocalStore, tool: &asale_client_core::store::ToolRow) -> CustomListing {
+    let key = custom_models_key(&tool.account_id);
+    let cached: Option<CustomListing> = store
+        .get_setting(&key)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).ok());
+    if let Some(c) = &cached {
+        if now_secs() - c.fetched_at < CUSTOM_MODELS_TTL {
+            return c.clone();
+        }
+    }
+    let stale = || cached.clone().unwrap_or_default();
+    let base = match store.get_setting(&custom_base_key(&tool.account_id)).await.ok().flatten() {
+        Some(b) if !b.is_empty() => b,
+        _ => {
+            tracing::warn!(account = %tool.account_id, "custom account has no base URL recorded");
+            return stale();
+        }
+    };
+    let Some(key_value) = keychain::get(&tool.keychain_ref).ok().flatten() else {
+        tracing::warn!(account = %tool.account_id, "custom account: no key in the secret store");
+        return stale();
+    };
+    match asale_client_core::discovery::custom_endpoint_models(&base, &key_value).await {
+        Ok(models) => match store_custom_models(store, &tool.account_id, &models).await {
+            Ok(fresh) => {
+                if cached.as_ref().map(|c| &c.aliases) != Some(&fresh.aliases) {
+                    tracing::info!(
+                        account = %tool.account_id,
+                        "custom endpoint serves {} models ({} usable ids)",
+                        models.len(),
+                        fresh.aliases.len()
+                    );
+                }
+                fresh
+            }
+            Err(e) => {
+                tracing::warn!(account = %tool.account_id, "storing the custom model list failed: {e}");
+                stale()
+            }
+        },
+        Err(e) => {
+            tracing::warn!(account = %tool.account_id, "custom endpoint model lookup failed: {e}");
             stale()
         }
     }
@@ -578,7 +768,12 @@ pub async fn build_supply_items(store: &LocalStore, pool: &StdMutex<AccountPool>
             // `rebuild_pool` computed each figure from that account's own
             // usage and its own daily cap.
             offer.window_remaining += v.quota_remaining as i64;
-            offer.concurrency_free += 4;
+            // The seller's own ceiling, not a constant: the gateway declines to
+            // send an account more than this many tasks at once, which is what
+            // makes the setting binding rather than advisory — enforcing it only
+            // here would mean refusing work already routed to us, and the market
+            // charges that to the lane's reputation.
+            offer.concurrency_free += v.concurrency_max as i32;
         } else {
             let reason = v.paused_reason.clone().unwrap_or_else(|| match v.status.as_str() {
                 "cooldown" => "cooldown".into(),
@@ -706,6 +901,8 @@ impl TokenProvider for PoolTokens {
                 token,
                 account_id: picked.account_id,
                 upstream_account_id: picked.upstream_account_id,
+                upstream_base: picked.upstream_base,
+                upstream_model: picked.upstream_model,
             }),
             None => {
                 // Keychain entry vanished — release the lease and flag the account.
@@ -857,8 +1054,19 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
         // Codex is the one family whose upstream serves a narrower set than the
         // catalog lists, and the set belongs to the account rather than to the
         // provider — so it is resolved per account, here.
+        // The endpoint's own `/models`, indexed by market id. Only a custom
+        // account has one; the aliases ride onto the account below so the
+        // executor can put the endpoint's own spelling back into the body.
+        let listing = match tool.provider.as_str() {
+            CUSTOM_PROVIDER => Some(custom_endpoint_models(store, tool).await),
+            _ => None,
+        };
         let entitled = match tool.provider.as_str() {
             "codex" => Some(codex_entitlement(store, tool).await),
+            // Same contract as Codex's entitlement: an empty answer means
+            // advertise nothing, because a model the endpoint will refuse costs a
+            // consumer a failed turn and this device its reputation.
+            CUSTOM_PROVIDER => Some(listing.as_ref().map(|l| l.market_ids()).unwrap_or_default()),
             _ => None,
         };
         let mut a = AccountRuntime::new(&tool.provider, &tool.account_id, &tool.keychain_ref)
@@ -878,6 +1086,19 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
         a.sell_daily_limit = tool.sell_daily_limit;
         a.sell_min_ratio = tool.sell_min_ratio;
         a.sell_max_ratio = tool.sell_max_ratio;
+        a.concurrency_max = tool.sell_concurrency as u32;
+        // Only a custom account has one, and without it the executor would send
+        // its traffic to the gateway's placeholder host — which is exactly the
+        // failure the placeholder is chosen to make loud.
+        a.upstream_base = store
+            .get_setting(&custom_base_key(&tool.account_id))
+            .await
+            .ok()
+            .flatten()
+            .filter(|s| !s.is_empty());
+        // Empty for every other provider: their model ids are the market's
+        // already, so there is nothing to translate on the way out.
+        a.model_aliases = listing.map(|l| l.aliases).unwrap_or_default();
         fresh.push(a);
     }
     // Pauses that need a person outlive the process: without this a restart
@@ -1266,6 +1487,75 @@ fn now_secs() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A catalog with two vendors' models under their credential families.
+    fn catalog() -> Option<SellableCatalog> {
+        let mut by_provider = std::collections::BTreeMap::new();
+        by_provider.insert("claude".to_string(), vec!["claude-opus-5".to_string()]);
+        by_provider.insert("codex".to_string(), vec!["gpt-5.5".to_string(), "gpt-5.4".to_string()]);
+        Some(SellableCatalog { fetched_at: 1, by_provider, ..Default::default() })
+    }
+
+    #[test]
+    fn a_custom_endpoint_sells_the_catalog_narrowed_to_what_it_serves() {
+        // The endpoint's own list is usually far wider than the catalog — it is
+        // an aggregator's whole menu — and the platform can only trade models it
+        // prices. The intersection is the lane set, in both directions:
+        let endpoint = ["gpt-5.5".to_string(), "claude-opus-5".to_string(), "some-model".to_string()];
+        let mut sold = sellable_models(&catalog(), CUSTOM_PROVIDER, Some(&endpoint));
+        sold.sort();
+        assert_eq!(sold, vec!["claude-opus-5".to_string(), "gpt-5.5".to_string()]);
+        // `some-model` is not traded here, and `gpt-5.4` is traded but not
+        // served by this endpoint; neither may be advertised.
+        assert!(!sold.contains(&"some-model".to_string()));
+        assert!(!sold.contains(&"gpt-5.4".to_string()));
+    }
+
+    #[test]
+    fn a_custom_endpoint_that_serves_nothing_advertises_nothing() {
+        // Same contract as Codex's entitlement: an empty answer is a real one,
+        // and a lane the upstream will refuse costs a buyer a turn and this
+        // device its reputation.
+        assert!(sellable_models(&catalog(), CUSTOM_PROVIDER, Some(&[])).is_empty());
+        // Nothing pulled yet: a custom endpoint has no built-in fallback set,
+        // because its models are its operator's, not a vendor's.
+        assert!(sellable_models(&None, CUSTOM_PROVIDER, Some(&["gpt-5.5".to_string()])).is_empty());
+    }
+
+    #[test]
+    fn an_aggregators_ids_are_indexed_under_the_names_the_market_trades() {
+        // The case that decides whether this feature works at all: an
+        // aggregator lists vendor-prefixed, dotted ids, and the catalog trades
+        // the bare hyphenated ones. Without the mapping the intersection is
+        // empty and the endpoint sells nothing.
+        let ids: Vec<String> = ["anthropic/claude-haiku-4.5", "openai/gpt-5.5", "x-ai/grok-4.5"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let idx = index_custom_models(&ids);
+        // Anthropic is the one vendor whose published id is not its API id.
+        assert_eq!(idx.get("claude-haiku-4-5").map(String::as_str), Some("anthropic/claude-haiku-4.5"));
+        // Everyone else publishes the dotted name as the real id, so only the
+        // vendor prefix comes off.
+        assert_eq!(idx.get("gpt-5.5").map(String::as_str), Some("openai/gpt-5.5"));
+        assert_eq!(idx.get("grok-4.5").map(String::as_str), Some("x-ai/grok-4.5"));
+    }
+
+    #[test]
+    fn an_unprefixed_id_is_already_a_market_id() {
+        // A vendor's own API — and most self-hosted gateways — list models
+        // without a vendor prefix, and those ids need no translation at all.
+        let idx = index_custom_models(&["claude-opus-5".to_string(), "gpt-5.5".to_string()]);
+        assert_eq!(idx.get("claude-opus-5").map(String::as_str), Some("claude-opus-5"));
+        assert_eq!(idx.len(), 2);
+    }
+
+    #[test]
+    fn a_subscription_is_unaffected_by_the_custom_arm() {
+        // The catalog column still decides for every ordinary provider, and a
+        // custom endpoint's presence does not widen it.
+        assert_eq!(sellable_models(&catalog(), "claude", None), vec!["claude-opus-5".to_string()]);
+    }
 
     #[test]
     fn only_the_vendors_a_subscription_can_serve_are_mapped() {

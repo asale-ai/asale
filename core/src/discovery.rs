@@ -141,8 +141,20 @@ pub fn plan_window_cap(provider: Provider, plan: Option<&str>) -> u64 {
         // conservative window; the per-account daily cap on the Sell page is
         // the control that actually matters for these four.
         Provider::Kimi | Provider::KimiApi | Provider::Xai | Provider::XaiApi => 500_000,
+        // A custom endpoint has no rolling window to estimate: it is a metered
+        // key against somebody's balance, and the estimate exists to keep a
+        // *subscription* from over-declaring what its plan allows. A realistic
+        // number here would take the account off the market after an afternoon
+        // for a limit that does not exist, so the window is effectively open and
+        // the per-account daily cap is the control that bounds it.
+        Provider::Custom => CUSTOM_WINDOW_TOKENS,
     }
 }
+
+/// The window declared for a custom endpoint. Large enough to never be the
+/// binding constraint, finite so the lane still declares a number the market can
+/// reason about rather than an unbounded one.
+pub const CUSTOM_WINDOW_TOKENS: u64 = 100_000_000;
 
 /// Build a rolling-window quota estimate from the plan cap and locally measured
 /// usage in the window. This is the real §P0-1 estimate: cap − used.
@@ -420,6 +432,54 @@ pub async fn codex_servable_models(token: &str, chatgpt_account_id: &str) -> any
                 .collect()
         })
         .unwrap_or_default())
+}
+
+// ── Custom endpoint ─────────────────────────────────────────────────────────
+
+/// The models an OpenAI-compatible endpoint says it serves.
+///
+/// `GET {base}/models` is the one call every such endpoint answers — it is what
+/// makes "OpenAI-compatible" checkable rather than asserted — so this doubles as
+/// the credential check when an account is connected: a base URL that is not one
+/// of these, or a key the endpoint refuses, fails here rather than on the first
+/// consumer request.
+///
+/// Ids are returned exactly as the endpoint spells them. Deciding which of them
+/// the market can actually trade is the caller's job: that answer belongs to the
+/// platform's catalog, not to the endpoint.
+pub async fn custom_endpoint_models(base_url: &str, api_key: &str) -> anyhow::Result<Vec<String>> {
+    let base = base_url.trim().trim_end_matches('/');
+    anyhow::ensure!(
+        base.starts_with("http://") || base.starts_with("https://"),
+        "base URL must start with http:// or https://"
+    );
+    let resp = crate::http::upstream()
+        .get(format!("{base}/models"))
+        .header("authorization", format!("Bearer {api_key}"))
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    if !status.is_success() {
+        anyhow::bail!("{base}/models returned {status}: {body}");
+    }
+    // `{"data":[{"id":…}]}` is the OpenAI shape; a bare array is what a few
+    // proxies answer with, and taking both costs one line.
+    let items = body
+        .get("data")
+        .and_then(|d| d.as_array())
+        .or_else(|| body.as_array())
+        .ok_or_else(|| anyhow::anyhow!("{base}/models did not return a model list"))?;
+    let mut models: Vec<String> = items
+        .iter()
+        .filter_map(|m| m.get("id").and_then(|i| i.as_str()).or_else(|| m.as_str()))
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    models.sort();
+    models.dedup();
+    Ok(models)
 }
 
 // ── Gemini adapter ──────────────────────────────────────────────────────────

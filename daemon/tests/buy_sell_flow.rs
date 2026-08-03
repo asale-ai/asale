@@ -202,7 +202,7 @@ async fn selling_intent_follows_the_account_switches() {
 
     // Switching the first account on is the whole gesture: nothing else has to
     // be armed for this device to want to be selling.
-    commands::set_account_sell(&state, "claude".into(), "a@x.com".into(), true, None, None, None).await.unwrap();
+    commands::set_account_sell(&state, "claude".into(), "a@x.com".into(), true, None, None, None, None).await.unwrap();
     assert!(commands::publish_wanted(&state).await);
     assert_eq!(commands::proxy_status(&state).await.unwrap()["publish_wanted"], true);
     assert_eq!(
@@ -212,7 +212,7 @@ async fn selling_intent_follows_the_account_switches() {
 
     // Switching the last one off takes the device back off the market, session
     // included — a device with nothing to sell must not hold a live session.
-    commands::set_account_sell(&state, "claude".into(), "a@x.com".into(), false, None, None, None).await.unwrap();
+    commands::set_account_sell(&state, "claude".into(), "a@x.com".into(), false, None, None, None, None).await.unwrap();
     assert!(!commands::publish_wanted(&state).await);
     assert_eq!(commands::client_status(&state).await.unwrap()["publish_state"], "offline");
 }
@@ -245,10 +245,10 @@ async fn selling_is_per_account_and_isolated_from_the_local_cli() {
     );
 
     // Switch on exactly one, with its own daily cap; leave the other off.
-    commands::set_account_sell(&state, "claude".into(), "owned@x.com".into(), true, Some(500_000), None, None)
+    commands::set_account_sell(&state, "claude".into(), "owned@x.com".into(), true, Some(500_000), None, None, None)
         .await
         .unwrap();
-    commands::set_account_sell(&state, "claude".into(), "shared@x.com".into(), false, None, None, None)
+    commands::set_account_sell(&state, "claude".into(), "shared@x.com".into(), false, None, None, None, None)
         .await
         .unwrap();
 
@@ -477,7 +477,7 @@ async fn a_tool_that_is_buying_is_not_a_source_of_sellable_accounts() {
 
     let r = commands::import_from_cli(&state, "claude".into()).await.expect("import");
     assert_eq!(r["accounts"].as_array().unwrap().len(), 1);
-    commands::set_account_sell(&state, "claude".into(), "me@x.com".into(), true, Some(500_000), None, None)
+    commands::set_account_sell(&state, "claude".into(), "me@x.com".into(), true, Some(500_000), None, None, None)
         .await
         .unwrap();
 
@@ -547,7 +547,7 @@ async fn daily_cap_stops_only_the_account_that_hit_it() {
             .await
             .unwrap();
         state.store.set_setting(&format!("plan:claude:{account}"), "max_20x").await.unwrap();
-        commands::set_account_sell(&state, "claude".into(), account.into(), true, Some(1_000), None, None).await.unwrap();
+        commands::set_account_sell(&state, "claude".into(), account.into(), true, Some(1_000), None, None, None).await.unwrap();
     }
 
     // Account "a" blows through its 1k daily cap.
@@ -622,7 +622,7 @@ async fn invalid_input_is_rejected_before_touching_anything() {
     assert!(commands::set_buy_tool(&state, "claude".into(), true, None).await.is_err());
     assert!(!path.exists(), "a refused buy-on never creates a config file");
     // Unknown account.
-    assert!(commands::set_account_sell(&state, "claude".into(), "nobody@x".into(), true, None, None, None)
+    assert!(commands::set_account_sell(&state, "claude".into(), "nobody@x".into(), true, None, None, None, None)
         .await
         .is_err());
 
@@ -647,7 +647,7 @@ async fn a_broken_model_stops_selling_and_waits_for_the_operator() {
         .await
         .unwrap();
     state.store.set_setting(&format!("plan:claude:{account}"), "max_20x").await.unwrap();
-    commands::set_account_sell(&state, "claude".into(), account.into(), true, None, None, None).await.unwrap();
+    commands::set_account_sell(&state, "claude".into(), account.into(), true, None, None, None, None).await.unwrap();
 
     let opus = "claude-opus-5";
     let haiku = "claude-haiku-4-5";
@@ -847,7 +847,7 @@ async fn a_model_priced_outside_the_band_leaves_the_market() {
         .unwrap();
 
     // Sell, but never below 60% of list price.
-    commands::set_account_sell(&state, "claude".into(), account.into(), true, None, Some(60), Some(100))
+    commands::set_account_sell(&state, "claude".into(), account.into(), true, None, Some(60), Some(100), None)
         .await
         .unwrap();
 
@@ -879,10 +879,228 @@ async fn a_model_priced_outside_the_band_leaves_the_market() {
 
     // Widening the band puts it straight back on: raising your own floor is a
     // decision, not a market move, so it does not wait out the re-entry dwell.
-    commands::set_account_sell(&state, "claude".into(), account.into(), true, None, Some(20), Some(100))
+    commands::set_account_sell(&state, "claude".into(), account.into(), true, None, Some(20), Some(100), None)
         .await
         .unwrap();
     let items = asale_daemon::publisher::build_supply_items(&state.store, &state.pool).await;
     let opus_item = items.as_array().unwrap().iter().find(|i| i["model"] == opus).cloned().unwrap();
     assert_eq!(opus_item["available"], true, "a widened band sells again at once");
+}
+
+// ── Internal custom endpoints ──────────────────────────────────────────────
+
+/// A one-shot HTTP stub that answers `GET /models` with an OpenAI-style list,
+/// then keeps serving until the test drops it. Returns its base URL.
+///
+/// Real socket rather than a mocked client: the point of the probe is that it
+/// talks to something that answers like an OpenAI-compatible endpoint, and a
+/// stubbed transport would assert the code against itself.
+async fn models_stub(ids: &[&str]) -> String {
+    let body = format!(
+        "{{\"data\":[{}]}}",
+        ids.iter().map(|id| format!("{{\"id\":\"{id}\"}}")).collect::<Vec<_>>().join(",")
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else { return };
+            let body = body.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 2048];
+                let _ = sock.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}/v1")
+}
+
+/// Seed the catalog the pool builds lanes from, as a market pull would have.
+async fn seed_catalog(store: &LocalStore, by_provider: serde_json::Value) {
+    let catalog = serde_json::json!({"fetched_at": 1, "by_provider": by_provider});
+    store.set_setting("sellable_catalog", &catalog.to_string()).await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_custom_endpoint_sells_the_catalog_it_can_serve_under_market_ids() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let _sb = Sandbox::new("custom");
+    std::env::set_var("ASALE_CUSTOM_ENDPOINTS", "1");
+    let state = signed_in_state().await;
+    // What the platform trades. `claude-haiku-4-5` is the interesting one: the
+    // endpoint below spells it `anthropic/claude-haiku-4.5`.
+    seed_catalog(
+        &state.store,
+        serde_json::json!({"claude": ["claude-haiku-4-5"], "codex": ["gpt-5.5"]}),
+    )
+    .await;
+    let base = models_stub(&["anthropic/claude-haiku-4.5", "openai/gpt-5.5", "meta/llama-4"]).await;
+
+    // Floor at the bottom of the range — "sell at whatever the market pays".
+    // A real floor would make this test depend on the live price of a real
+    // model: the daemon's price loop pulls the market's actual ratios in the
+    // background, and a lane priced under its floor is *correctly* withheld,
+    // which has nothing to do with what this test is about. The floor's own
+    // behaviour is covered where it belongs, by the price-band tests.
+    let r = commands::connect_custom_endpoint(
+        &state,
+        base.clone(),
+        "sk-endpoint-key".into(),
+        Some("house".into()),
+        Some(10),
+        Some(12),
+        None,
+    )
+    .await
+    .expect("connect");
+
+    assert_eq!(r["provider"], "custom");
+    assert_eq!(r["account_id"], "house");
+    assert_eq!(r["endpoint_models"], 3, "the probe saw the whole menu");
+    assert_eq!(r["sell_enabled"], true);
+    let sellable: Vec<String> = serde_json::from_value(r["sellable_models"].clone()).unwrap();
+    // Traded *and* served, under the market's spelling. `llama-4` is served and
+    // not traded; nothing else in the catalog is traded and not served.
+    assert_eq!(sellable, vec!["claude-haiku-4-5".to_string(), "gpt-5.5".to_string()]);
+
+    // The terms landed on the account exactly as a subscription's would.
+    let tool = state
+        .store
+        .list_tools()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|t| t.provider == "custom" && t.account_id == "house")
+        .expect("account row");
+    assert_eq!(tool.sell_min_ratio, 10, "price floor");
+    assert_eq!(tool.sell_concurrency, 12, "concurrency ceiling");
+    assert!(tool.sell_enabled);
+
+    // And the declaration the market would receive carries that ceiling, under
+    // the market's model ids.
+    let items = asale_daemon::publisher::build_supply_items(&state.store, &state.pool).await;
+    let items = items.as_array().unwrap();
+    let haiku = items
+        .iter()
+        .find(|i| i["model"] == "claude-haiku-4-5")
+        .expect("the lane is declared");
+    assert_eq!(haiku["provider"], "custom");
+    assert_eq!(haiku["concurrency_free"], 12, "the seller's own ceiling, not a constant");
+    assert_eq!(haiku["available"], true);
+
+    std::env::remove_var("ASALE_CUSTOM_ENDPOINTS");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn custom_endpoints_are_refused_unless_the_daemon_was_armed_for_them() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let _sb = Sandbox::new("custom-off");
+    std::env::remove_var("ASALE_CUSTOM_ENDPOINTS");
+    let state = signed_in_state().await;
+
+    // Internal machinery: knowing the RPC name is not enough to reach it, and
+    // the endpoint is never probed on the way to the refusal.
+    let e = commands::connect_custom_endpoint(
+        &state,
+        "https://example.invalid/v1".into(),
+        "sk-x".into(),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("must be refused");
+    assert!(e.message.contains("internal feature"), "got: {}", e.message);
+    assert!(commands::list_custom_endpoints(&state).await.is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_endpoint_can_be_re_read_switched_and_removed() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let _sb = Sandbox::new("custom-manage");
+    std::env::set_var("ASALE_CUSTOM_ENDPOINTS", "1");
+    let state = signed_in_state().await;
+    seed_catalog(&state.store, serde_json::json!({"claude": ["claude-haiku-4-5"]})).await;
+    let base = models_stub(&["anthropic/claude-haiku-4.5"]).await;
+
+    // The UI asks this before it offers the tab at all.
+    let status = commands::custom_endpoints_status(&state).await.unwrap();
+    assert_eq!(status["enabled"], true);
+
+    commands::connect_custom_endpoint(
+        &state,
+        base,
+        "sk-endpoint-key".into(),
+        Some("house".into()),
+        Some(60),
+        Some(8),
+        None,
+    )
+    .await
+    .expect("connect");
+
+    // Listed with its terms and what it is actually selling.
+    let listed = commands::list_custom_endpoints(&state).await.unwrap();
+    let row = &listed["endpoints"][0];
+    assert_eq!(row["account_id"], "house");
+    assert_eq!(row["concurrency"], 8);
+    assert_eq!(row["min_ratio"], 60);
+    assert_eq!(row["sellable_models"][0], "claude-haiku-4-5");
+
+    // Re-reading the model list is the button next to an endpoint whose
+    // operator just added a model upstream.
+    let r = commands::refresh_custom_endpoint(&state, "house".into()).await.expect("refresh");
+    assert_eq!(r["endpoint_models"], 1);
+    assert_eq!(r["sellable_models"][0], "claude-haiku-4-5");
+
+    // The switch is the ordinary per-account one, and an endpoint that is off
+    // keeps its terms rather than losing them.
+    commands::set_account_sell(
+        &state, "custom".into(), "house".into(), false, None, None, None, None,
+    )
+    .await
+    .unwrap();
+    let listed = commands::list_custom_endpoints(&state).await.unwrap();
+    assert_eq!(listed["endpoints"][0]["sell_enabled"], false);
+    assert_eq!(listed["endpoints"][0]["concurrency"], 8, "terms survive the switch");
+    // Off the market entirely: nothing of this endpoint is declared. (Unlike a
+    // withheld lane, which stays in the snapshot with a reason — a switch that
+    // is off is not on the market at all.)
+    let items = asale_daemon::publisher::build_supply_items(&state.store, &state.pool).await;
+    assert!(items.as_array().unwrap().is_empty(), "a switched-off endpoint declares nothing");
+
+    // Removal takes the row, the key and the two settings only this kind of
+    // account has — a re-added endpoint must not inherit a stale model list.
+    assert!(commands::remove_custom_endpoint(&state, "house".into()).await.unwrap());
+    let listed = commands::list_custom_endpoints(&state).await.unwrap();
+    assert!(listed["endpoints"].as_array().unwrap().is_empty());
+    assert_eq!(
+        state.store.get_setting("custombase:house").await.unwrap().unwrap_or_default(),
+        "",
+        "the endpoint URL went with it"
+    );
+
+    std::env::remove_var("ASALE_CUSTOM_ENDPOINTS");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn the_status_probe_says_no_on_an_ordinary_install() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let _sb = Sandbox::new("custom-status-off");
+    std::env::remove_var("ASALE_CUSTOM_ENDPOINTS");
+    let state = signed_in_state().await;
+    // Answerable even when the feature is off — that is the whole point: the
+    // sidebar has to know whether to render the tab, and a refusal would be
+    // indistinguishable from a daemon that is simply too old to know the
+    // command.
+    let status = commands::custom_endpoints_status(&state).await.expect("always answerable");
+    assert_eq!(status["enabled"], false);
 }

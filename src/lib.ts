@@ -450,6 +450,22 @@ export interface Lane {
   max_ratio: number;
 }
 
+/** One custom endpoint (internal): an OpenAI-compatible base URL sold as if it
+ *  were a subscription. `sellable_models` is the part of what the endpoint
+ *  serves that the platform actually trades — an endpoint can offer hundreds of
+ *  models and share none with the catalog, which is the one thing that explains
+ *  a connected endpoint earning nothing. */
+export interface CustomEndpoint {
+  account_id: string;
+  base_url: string;
+  sell_enabled: boolean;
+  /** Price floor, whole percent *of* list price (see `AccountStatus`). */
+  min_ratio: number;
+  /** Requests served at once, declared to the market as the lane's ceiling. */
+  concurrency: number;
+  sellable_models: string[];
+}
+
 export interface AccountStatus {
   provider: string;
   account_id: string;
@@ -471,6 +487,10 @@ export interface AccountStatus {
    *  price is too good to accept, so it stays at list price. */
   sell_min_ratio: number;
   sell_max_ratio: number;
+  /** How many requests this account serves at once. Declared to the market as
+   *  the lane's concurrency ceiling, so the gateway stops routing work here
+   *  past it rather than this device refusing what it was already sent. */
+  sell_concurrency: number;
   /** Tokens this account served today / in the current 5h window. */
   used_today: number;
   used_window: number;

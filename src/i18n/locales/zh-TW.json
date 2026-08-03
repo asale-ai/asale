@@ -12,7 +12,8 @@
     "browserPreview": "瀏覽器預覽",
     "groupTrade": "共享",
     "groupUsage": "統計",
-    "groupFinance": "資金"
+    "groupFinance": "資金",
+    "endpoints": "自訂端點"
   },
   "dashboard": {
     "title": "總覽",
@@ -242,7 +243,11 @@
     "unitTokensDay": "tokens / 天",
     "unitOfList": "（佔原價）",
     "bandQuick": "快捷：",
-    "bandHintFloor": "僅當市場價不低於原價的 {{lo}}% 時賣出；低於該價格自動停售，價格回升後自動恢復。"
+    "bandHintFloor": "僅當市場價不低於原價的 {{lo}}% 時賣出；低於該價格自動停售，價格回升後自動恢復。",
+    "lanesLabel": "同時服務的請求數",
+    "lanesEdit": "修改並行上限",
+    "unitRequests": "個並行",
+    "lanesHint": "市場最多同時向該帳號派發 {{n}} 個請求。想讓一個訂閱多賺就調高；上游開始限流就調低。"
   },
   "consume": {
     "title": "買入",
@@ -862,5 +867,38 @@
     "quitNote": "結束後停止出售；關閉視窗只是收進系統列。",
     "earnedToday": "今日收入",
     "calls": "{{n}} 次請求"
+  },
+  "endpoints": {
+    "title": "自訂端點",
+    "sub": "內部功能：把任意 OpenAI 相容端點當作訂閱帳號來賣。",
+    "reload": "重新整理",
+    "addTitle": "新增端點",
+    "addDesc": "儲存之前會先拿 base URL 和 key 去端點驗證一次。",
+    "internalNote": "這是平台自用的機制，不是給賣家的功能：用來給訂閱賣家涵蓋不到的模型補供給。",
+    "baseLabel": "Base URL",
+    "keyLabel": "API Key",
+    "nameLabel": "名稱",
+    "namePlaceholder": "可留空，預設用網域",
+    "floorLabel": "市場價 ≥ 此百分比時才賣出（佔原價）",
+    "floorHint": "計費端點每個 token 都是真金白銀，這個底價是防止虧本賣的那道閘。",
+    "slotsLabel": "同時服務的請求數",
+    "slotsHint": "市場最多同時向該端點派發這麼多請求。",
+    "connect": "連接並開始賣出",
+    "connecting": "正在驗證端點…",
+    "connected": "{{account}} 已連接：端點提供 {{served}} 個模型，其中 {{selling}} 個平台在交易。",
+    "refreshed": "{{account}} 已重新檢查：端點提供 {{served}} 個模型，其中 {{selling}} 個平台在交易。",
+    "listTitle": "已連接的端點",
+    "listDesc": "每個端點按自己的條件賣出，和訂閱帳號一樣。",
+    "emptyTitle": "還沒有端點",
+    "emptyDesc": "在上面新增一個，給沒人賣的模型補上供給。",
+    "sellSwitch": "從該端點賣出",
+    "refresh": "重新讀取模型清單",
+    "remove": "刪除該端點",
+    "removeConfirm": "刪除 {{account}}？它的 key 會從本機一併刪除。",
+    "floorFact": "價格底線",
+    "slotsFact": "並行上限",
+    "sellingFact": "在賣模型",
+    "modelsSummary": "{{n}} 個模型在市場上",
+    "noOverlap": "該端點提供的模型平台都不交易，所以它一個也賣不出去。"
   }
 }

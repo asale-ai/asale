@@ -289,6 +289,19 @@ pub struct AccountRuntime {
     /// secret, and not the same thing as `account_id` — that one is asale's own
     /// key for the account, usually an email.
     pub upstream_account_id: Option<String>,
+    /// Where this account's requests actually go, for the one provider whose
+    /// host is not known at compile time (`custom`). `None` everywhere else:
+    /// every other provider's upstream is the vendor's, and the gateway builds
+    /// the URL for it.
+    pub upstream_base: Option<String>,
+    /// market model id -> the id this account's upstream knows it by.
+    ///
+    /// Only a `custom` account has any: an aggregator lists
+    /// `anthropic/claude-haiku-4.5` for what the market trades as
+    /// `claude-haiku-4-5`, so the lane is declared under the market id and the
+    /// endpoint's own spelling is put back when the request is sent. Empty
+    /// everywhere else, where the two ids are the same string.
+    pub model_aliases: BTreeMap<String, String>,
     pub plan: Option<String>,
     /// Estimated serviceable tokens remaining in the account's window.
     pub quota_remaining: u64,
@@ -315,6 +328,9 @@ pub struct AccountRuntime {
     pub auth_failed: bool,
     pub last_used: i64,
     pub in_use: u32,
+    /// How many requests this account serves at once — the local lease ceiling,
+    /// and the number declared to the market as the lane's concurrency total.
+    /// Set from the account's `sell_concurrency` on every pool rebuild.
     pub concurrency_max: u32,
     /// Per-model serving state, keyed by model id. The key set is this
     /// account's model catalogue: a model with no entry here is not sold.
@@ -328,6 +344,8 @@ impl AccountRuntime {
             account_id: account_id.to_string(),
             keychain_ref: keychain_ref.to_string(),
             upstream_account_id: None,
+            upstream_base: None,
+            model_aliases: BTreeMap::new(),
             plan: None,
             quota_remaining: 0,
             expires_at: None,
@@ -341,7 +359,7 @@ impl AccountRuntime {
             auth_failed: false,
             last_used: 0,
             in_use: 0,
-            concurrency_max: 4,
+            concurrency_max: crate::store::DEFAULT_SELL_CONCURRENCY as u32,
             lanes: BTreeMap::new(),
         }
     }
@@ -406,6 +424,13 @@ pub struct PickedAccount {
     /// See [`AccountRuntime::upstream_account_id`]. Carried on the pick because
     /// the caller that injects the bearer is the same one that has to send it.
     pub upstream_account_id: Option<String>,
+    /// See [`AccountRuntime::upstream_base`]. Carried for the same reason: the
+    /// executor that sends the request is the only place that knows which
+    /// account — and therefore which endpoint — the task was leased against.
+    pub upstream_base: Option<String>,
+    /// The id this account's upstream knows the leased model by, when it differs
+    /// from the market's. `None` means "send the model id as it arrived".
+    pub upstream_model: Option<String>,
 }
 
 /// Serializable status view for `list_accounts`.
@@ -424,6 +449,8 @@ pub struct AccountStatusView {
     pub sell_daily_limit: i64,
     pub sell_min_ratio: i64,
     pub sell_max_ratio: i64,
+    /// Requests this account serves at once (see `AccountRuntime::concurrency_max`).
+    pub sell_concurrency: i64,
 }
 
 /// One `(account, model)` lane, as the UI and the declaration builder see it.
@@ -452,6 +479,11 @@ pub struct LaneStatusView {
     /// lane so the chart can draw the threshold next to the bar it explains.
     pub min_ratio: i64,
     pub max_ratio: i64,
+    /// The account's concurrency ceiling, carried on the lane because that is
+    /// the granularity the declaration is built at: one market lane is every
+    /// account of a provider that sells this model, and what it may run at once
+    /// is those accounts' ceilings added up.
+    pub concurrency_max: u32,
 }
 
 pub struct AccountPool {
@@ -599,6 +631,12 @@ impl AccountPool {
             account_id: a.account_id.clone(),
             keychain_ref: a.keychain_ref.clone(),
             upstream_account_id: a.upstream_account_id.clone(),
+            upstream_base: a.upstream_base.clone(),
+            // Only when this account spells the model differently from the
+            // market. `pick` (the local, non-sale route) passes no model, and
+            // there is nothing to translate for it either — a local caller is
+            // talking to its own vendor with its own ids.
+            upstream_model: model.and_then(|m| a.model_aliases.get(m)).filter(|id| *id != model.unwrap_or("")).cloned(),
         })
     }
 
@@ -828,6 +866,7 @@ impl AccountPool {
                     ratio: lane.ratio,
                     min_ratio: a.sell_min_ratio,
                     max_ratio: a.sell_max_ratio,
+                    concurrency_max: a.concurrency_max,
                 });
             }
         }
@@ -852,6 +891,7 @@ impl AccountPool {
                 sell_daily_limit: a.sell_daily_limit,
                 sell_min_ratio: a.sell_min_ratio,
                 sell_max_ratio: a.sell_max_ratio,
+                sell_concurrency: a.concurrency_max as i64,
             })
             .collect()
     }

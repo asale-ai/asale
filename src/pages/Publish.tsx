@@ -68,6 +68,25 @@ const floorOf = (a: { sell_min_ratio?: number | null }) => clampRatio(a.sell_min
 /** Floors worth one click. */
 const BAND_PRESETS = [RATIO_MIN, 50, 60, 70, 80];
 
+/** How many requests one subscription serves at once. The market is told this
+ *  number and stops offering the lane work past it, so it is a ceiling the
+ *  gateway honours rather than one this device has to enforce by refusing.
+ *
+ *  The range mirrors the daemon's own (`store::SELL_CONCURRENCY_RANGE`): a
+ *  floor of 1, because "serve nothing" is the sell switch's job, and a ceiling
+ *  that is a sanity bound on a typed number rather than a vendor limit. */
+const SLOTS_MIN = 1;
+const SLOTS_MAX = 64;
+const SLOTS_DEFAULT = 5;
+const clampSlots = (n: number) => Math.min(SLOTS_MAX, Math.max(SLOTS_MIN, n));
+/** The value in force, with a 0 from a row written before the setting existed
+ *  reading as the default rather than as "one at a time". */
+const slotsOf = (a: { sell_concurrency?: number | null }) =>
+  a.sell_concurrency && a.sell_concurrency > 0 ? clampSlots(a.sell_concurrency) : SLOTS_DEFAULT;
+
+/** Concurrency values worth one click. */
+const SLOT_PRESETS = [1, 3, 5, 10, 20];
+
 /** Why a lane is or is not on the market, collapsed to the four cases the
  *  ranking chart draws differently.
  *
@@ -266,6 +285,12 @@ export function Publish() {
   const [bandSaved, setBandSaved] = useState("");
   const [bandEditing, setBandEditing] = useState("");
 
+  // Per-account concurrency drafts, same pencil pattern again: how many
+  // requests this subscription is willing to have in flight at once.
+  const [slotsDraft, setSlotsDraft] = useState<Record<string, string>>({});
+  const [slotsSaved, setSlotsSaved] = useState("");
+  const [slotsEditing, setSlotsEditing] = useState("");
+
   // The code a device-code login is waiting on, shown until it completes.
   const [deviceCode, setDeviceCode] = useState<{ provider: string; code: string; url: string } | null>(null);
 
@@ -288,7 +313,12 @@ export function Publish() {
   const loadAccounts = useCallback(() => {
     if (!inTauri) return;
     invoke<AccountStatus[]>("list_accounts")
-      .then((list) => {
+      .then((all) => {
+        // Custom endpoints are accounts too, but they are internal machinery
+        // with a page of their own — listing them here would put a row with no
+        // plan, no window and no vendor next to the subscriptions this page is
+        // about, and offer two places to edit one thing.
+        const list = all.filter((a) => a.provider !== "custom");
         setAccounts(list);
         setAcctErr("");
         // Seed each account's cap input once; don't clobber an in-progress edit.
@@ -351,10 +381,10 @@ export function Publish() {
   async function setSell(
     a: AccountStatus,
     enabled: boolean,
-    terms: { dailyLimit?: number; minRatio?: number; maxRatio?: number } = {},
+    terms: { dailyLimit?: number; minRatio?: number; maxRatio?: number; concurrency?: number } = {},
   ) {
     const k = keyOf(a);
-    const { dailyLimit, minRatio, maxRatio } = terms;
+    const { dailyLimit, minRatio, maxRatio, concurrency } = terms;
     setAcctErr("");
     setPending((p) => ({ ...p, [k]: true }));
     // Optimistic: the list refreshes on a 4s poll, too slow for a toggle.
@@ -366,6 +396,7 @@ export function Publish() {
             sell_daily_limit: dailyLimit ?? x.sell_daily_limit,
             sell_min_ratio: minRatio ?? x.sell_min_ratio,
             sell_max_ratio: maxRatio ?? x.sell_max_ratio,
+            sell_concurrency: concurrency ?? x.sell_concurrency,
           }
         : x)),
     );
@@ -377,6 +408,7 @@ export function Publish() {
         ...(dailyLimit === undefined ? {} : { dailyLimit }),
         ...(minRatio === undefined ? {} : { minRatio }),
         ...(maxRatio === undefined ? {} : { maxRatio }),
+        ...(concurrency === undefined ? {} : { concurrency }),
       });
       loadAccounts();
     } catch (e) {
@@ -420,6 +452,27 @@ export function Publish() {
     const k = keyOf(a);
     setBandDraft((d) => ({ ...d, [k]: String(floorOf(a)) }));
     setBandEditing(k);
+  }
+
+  /** Save one account's concurrency. An unreadable number falls back to the
+   *  default rather than to the floor: a half-typed form must not quietly take
+   *  four fifths of the subscription's capacity off the market. */
+  async function saveSlots(a: AccountStatus) {
+    const raw = parseInt(slotsDraft[keyOf(a)] ?? "", 10);
+    const concurrency = Number.isFinite(raw) ? clampSlots(raw) : SLOTS_DEFAULT;
+    setSlotsEditing("");
+    setSlotsDraft((d) => ({ ...d, [keyOf(a)]: String(concurrency) }));
+    await setSell(a, a.sell_enabled, { concurrency });
+    setSlotsSaved(keyOf(a));
+    setTimeout(() => setSlotsSaved(""), 2000);
+  }
+
+  /** Open the concurrency editor on the value currently in force, for the same
+   *  reason `editLimit` does. */
+  function editSlots(a: AccountStatus) {
+    const k = keyOf(a);
+    setSlotsDraft((d) => ({ ...d, [k]: String(slotsOf(a)) }));
+    setSlotsEditing(k);
   }
 
   /** Open the cap editor on the value currently in force (so cancelling an edit
@@ -682,6 +735,10 @@ export function Publish() {
               // worth being able to answer *before* flipping the switch.
               const own = lanes.filter((l) => l.provider === a.provider && l.account_id === a.account_id);
               const floor = floorOf(a);
+              // How many requests this subscription serves at once, as declared
+              // to the market. Named `slots` here because `lanes` in this scope
+              // is already the account's (account, model) rows.
+              const slots = slotsOf(a);
               // The daily cap is spent: `rebuild_pool` has already clamped this
               // account's quota to zero, so every one of its models is off the
               // market until the UTC rollover. That is a whole-subscription
@@ -887,6 +944,71 @@ export function Publish() {
                           ? t("publish.bandHintOff")
                           : t("publish.bandHintFloor", { lo: floor })}
                       </div>
+
+                      {/* How much of this subscription is on offer at any one
+                          moment. Declared to the market, so the gateway stops
+                          handing this account work past the number rather than
+                          this device having to refuse it — a refusal costs the
+                          lane's reputation, a ceiling does not. */}
+                      <label className="acct-sub-label after">{t("publish.lanesLabel")}</label>
+                      {slotsEditing === k ? (
+                        <div className="band-edit">
+                          <div className="input-row">
+                            <input
+                              className="input mono band-input"
+                              type="number"
+                              min={SLOTS_MIN}
+                              max={SLOTS_MAX}
+                              autoFocus
+                              aria-label={t("publish.lanesLabel")}
+                              value={slotsDraft[k] ?? ""}
+                              onChange={(e) => setSlotsDraft((d) => ({ ...d, [k]: e.target.value }))}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") saveSlots(a);
+                                if (e.key === "Escape") setSlotsEditing("");
+                              }}
+                              placeholder={String(SLOTS_DEFAULT)}
+                            />
+                            <span className="unit">{t("publish.unitRequests")}</span>
+                          </div>
+                          <div className="band-presets">
+                            <span className="band-cap">{t("publish.bandQuick")}</span>
+                            {SLOT_PRESETS.map((preset) => (
+                              <button
+                                key={preset}
+                                className={`chip${Number(slotsDraft[k]) === preset ? " on" : ""}`}
+                                onClick={() => setSlotsDraft((d) => ({ ...d, [k]: String(preset) }))}
+                              >
+                                {preset}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="input-row">
+                            <button className="btn sm" onClick={() => saveSlots(a)} disabled={!inTauri || !!pending[k]}>
+                              {t("publish.limitSave")}
+                            </button>
+                            <button className="btn sm ghost" onClick={() => setSlotsEditing("")}>
+                              {t("publish.limitCancel")}
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="value-row">
+                          <span className="value-strong mono tabular">{slots}</span>
+                          <span className="unit">{t("publish.unitRequests")}</span>
+                          <button
+                            className="icon-btn sm"
+                            onClick={() => editSlots(a)}
+                            disabled={!inTauri || !!pending[k]}
+                            title={t("publish.lanesEdit")}
+                            aria-label={t("publish.lanesEdit")}
+                          >
+                            <IconPencil />
+                          </button>
+                          {slotsSaved === k && <span className="value-note ok">{t("publish.limitSaved")}</span>}
+                        </div>
+                      )}
+                      <div className="hint">{t("publish.lanesHint", { n: slots })}</div>
                     </div>
 
                     {/* No expiry here: the only timestamp we hold is the access

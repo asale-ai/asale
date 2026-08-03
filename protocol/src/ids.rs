@@ -44,6 +44,17 @@ pub enum Provider {
     KimiApi,
     Xai,
     XaiApi,
+    /// An OpenAI-compatible endpoint reached with a pasted key and a base URL
+    /// the operator supplies — the one provider whose upstream is not known at
+    /// compile time.
+    ///
+    /// Internal: no vendor maps to it (so it is absent from
+    /// [`SUBSCRIBABLE_PROVIDERS`] and never offered as a connectable account),
+    /// and the platform runs these itself to put supply behind models its
+    /// subscription sellers happen not to cover. Everything downstream —
+    /// matching, metering, settlement, reputation — treats it as an ordinary
+    /// publisher, because that is exactly what it is.
+    Custom,
 }
 
 impl Provider {
@@ -57,6 +68,7 @@ impl Provider {
             Provider::KimiApi => "kimi_api",
             Provider::Xai => "xai",
             Provider::XaiApi => "xai_api",
+            Provider::Custom => "custom",
         }
     }
 
@@ -72,6 +84,7 @@ impl Provider {
             "kimi_api" => Provider::KimiApi,
             "xai" => Provider::Xai,
             "xai_api" => Provider::XaiApi,
+            "custom" => Provider::Custom,
             _ => return None,
         })
     }
@@ -99,10 +112,11 @@ impl Provider {
             Provider::KimiApi => "Moonshot API",
             Provider::Xai => "Grok CLI",
             Provider::XaiApi => "xAI API",
+            Provider::Custom => "Custom endpoint",
         }
     }
 
-    pub const ALL: [Provider; 8] = [
+    pub const ALL: [Provider; 9] = [
         Provider::Claude,
         Provider::ClaudeWork,
         Provider::Codex,
@@ -111,6 +125,7 @@ impl Provider {
         Provider::KimiApi,
         Provider::Xai,
         Provider::XaiApi,
+        Provider::Custom,
     ];
 }
 
@@ -199,7 +214,7 @@ pub const SUBSCRIBABLE_PROVIDERS: &[Provider] = &[
 /// skipped by the refresh loop. Everything downstream (injection, metering, the
 /// sell switch) is identical to an OAuth account.
 pub fn is_api_key_provider(p: Provider) -> bool {
-    matches!(p, Provider::KimiApi | Provider::XaiApi)
+    matches!(p, Provider::KimiApi | Provider::XaiApi | Provider::Custom)
 }
 
 /// Whether connecting this provider runs an RFC 8628 device-code flow rather
@@ -248,6 +263,25 @@ impl TokenType {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn custom_is_sellable_but_never_offered_as_a_subscription() {
+        use super::*;
+        // It round-trips like any other provider — supply frames, task rows and
+        // metering all carry it as a string.
+        assert_eq!(Provider::from_str_opt("custom"), Some(Provider::Custom));
+        assert_eq!(Provider::Custom.as_str(), "custom");
+        // Its credential is a pasted key, so the refresh loop leaves it alone.
+        assert!(is_api_key_provider(Provider::Custom));
+        assert!(!is_device_flow_provider(Provider::Custom));
+        // No vendor maps to it: it is internal, and the account list the UI
+        // offers to connect is built from the vendor map.
+        assert!(!SUBSCRIBABLE_PROVIDERS.contains(&Provider::Custom));
+        assert!(Vendor::ALL.iter().all(|v| !v.providers().contains(&Provider::Custom)));
+        // Its upstream is its own — collapsing it into another family would
+        // send an operator's key to that vendor's host.
+        assert_eq!(Provider::Custom.upstream_family(), Provider::Custom);
+    }
+
     use super::*;
 
     #[test]

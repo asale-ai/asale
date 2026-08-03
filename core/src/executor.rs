@@ -13,6 +13,31 @@ use tokio::sync::mpsc;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
+/// The same request body with its `model` replaced.
+///
+/// `None` when the body is not a JSON object — which would mean the gateway
+/// built something this path cannot speak for, and guessing at it is worse than
+/// saying so.
+fn with_model(body: &[u8], model_id: &str) -> Option<Vec<u8>> {
+    let mut v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    v.as_object_mut()?.insert("model".into(), serde_json::Value::String(model_id.to_string()));
+    serde_json::to_vec(&v).ok()
+}
+
+/// The chat-completions endpoint under a custom account's base URL.
+///
+/// The base is what its operator pasted, so both spellings people actually use
+/// are accepted: with the `/v1` suffix (`https://host/api/v1`, what a vendor's
+/// docs print) and without it. A base that already names the endpoint is left
+/// alone rather than having a second copy appended.
+fn custom_chat_url(base: &str) -> String {
+    let base = base.trim().trim_end_matches('/');
+    if base.ends_with("/chat/completions") {
+        return base.to_string();
+    }
+    format!("{base}/chat/completions")
+}
+
 /// The line Anthropic requires at the head of a subscription request's system
 /// prompt (see `with_claude_code_system`).
 const CLAUDE_CODE_SYSTEM: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -30,6 +55,14 @@ pub struct LeasedToken {
     /// that id next to the bearer. Only Codex uses it so far — see the
     /// `chatgpt-account-id` block in [`execute`].
     pub upstream_account_id: Option<String>,
+    /// The endpoint this account's requests go to, for a `custom` account whose
+    /// host the gateway cannot know. `None` means "use the URL the gateway
+    /// built", which is every other provider.
+    pub upstream_base: Option<String>,
+    /// The id this account's upstream knows the requested model by, when it
+    /// differs from the market's. `None` means "send the model id as it
+    /// arrived" — true of every provider whose ids the catalog stores natively.
+    pub upstream_model: Option<String>,
 }
 
 /// Outcome of one upstream call, reported back so a pool can release the
@@ -140,7 +173,16 @@ pub async fn execute(
     let token = lease.token.clone();
 
     let method = reqwest::Method::from_bytes(req.upstream.method.as_bytes()).unwrap_or(reqwest::Method::POST);
-    let mut builder = http.request(method, &req.upstream.url);
+    // A `custom` account's endpoint belongs to whoever configured it, so the
+    // gateway sends a placeholder and the real URL is assembled here — the one
+    // side that knows which account this task was leased against. Everything
+    // else uses the URL as built: those hosts are the vendors' and are settled
+    // at compile time.
+    let url = match lease.upstream_base.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+        Some(base) => custom_chat_url(base),
+        None => req.upstream.url.clone(),
+    };
+    let mut builder = http.request(method, &url);
     for (k, v) in &req.upstream.headers {
         if let Some(s) = v.as_str() {
             builder = builder.header(k, s);
@@ -157,6 +199,29 @@ pub async fn execute(
         }
         if let Some(patched) = with_claude_code_system(&body) {
             body = patched;
+        }
+    }
+    // A custom endpoint may know this model by another name — an aggregator
+    // lists `anthropic/claude-haiku-4.5` for what the market trades as
+    // `claude-haiku-4-5`. The lane was declared, matched and metered under the
+    // market id, so only the outgoing body is rewritten, and only here: the
+    // account is what decides the spelling, and this is where the account is
+    // known.
+    if let Some(id) = lease.upstream_model.as_deref().filter(|s| !s.is_empty()) {
+        match with_model(&body, id) {
+            Some(patched) => body = patched,
+            // A body whose model could not be replaced would reach the upstream
+            // asking for an id it does not publish, and come back as a 400 that
+            // reads like a broken account. Failing here says what is wrong.
+            None => {
+                tokens.report(&provider, &lease.account_id, &model, TaskOutcome::ServerError);
+                send_error(out, &task_id, "UPSTREAM_5XX", "could not set the upstream model id", false);
+                if let Some(r) = records {
+                    r.record(&task_id, &provider, &lease.account_id, &model, &Usage::default(), "model_rewrite_failed")
+                        .await;
+                }
+                return;
+            }
         }
     }
     // Kimi Code identifies the calling installation, not just the calling
@@ -702,6 +767,44 @@ fn send_error(out: &mpsc::UnboundedSender<Envelope>, task_id: &str, code: &str, 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_upstream_model_id_replaces_the_markets_in_the_body() {
+        use super::with_model;
+        // The lane is declared and metered under the market id; only what goes
+        // out is rewritten, and the rest of the body is left exactly as the
+        // gateway built it.
+        let body = br#"{"model":"claude-haiku-4-5","messages":[{"role":"user","content":"hi"}],"stream":true}"#;
+        let patched = with_model(body, "anthropic/claude-haiku-4.5").expect("object body");
+        let v: serde_json::Value = serde_json::from_slice(&patched).unwrap();
+        assert_eq!(v["model"], "anthropic/claude-haiku-4.5");
+        assert_eq!(v["stream"], true);
+        assert_eq!(v["messages"][0]["content"], "hi");
+        // Not an object: better to fail loudly than to send a body this path
+        // does not understand.
+        assert!(with_model(b"[1,2]", "x").is_none());
+    }
+
+    #[test]
+    fn a_custom_base_reaches_chat_completions_however_it_was_pasted() {
+        use super::custom_chat_url;
+        // The two spellings people actually paste: a vendor's documented base
+        // (which ends in /v1) and the same thing with a trailing slash.
+        assert_eq!(
+            custom_chat_url("https://openrouter.ai/api/v1"),
+            "https://openrouter.ai/api/v1/chat/completions"
+        );
+        assert_eq!(
+            custom_chat_url("https://openrouter.ai/api/v1/"),
+            "https://openrouter.ai/api/v1/chat/completions"
+        );
+        // Already the endpoint: appending a second copy would 404 an otherwise
+        // correct configuration.
+        assert_eq!(
+            custom_chat_url("https://host/v1/chat/completions"),
+            "https://host/v1/chat/completions"
+        );
+    }
+
     use super::*;
     use crate::protocol::UpstreamPayload;
     use std::sync::Arc;
@@ -1112,6 +1215,8 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
                 token: "k".into(),
                 account_id: "dev@example.com".into(),
                 upstream_account_id: self.0.map(String::from),
+                upstream_base: None,
+                upstream_model: None,
             })
         }
     }
@@ -1143,6 +1248,8 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
                 token: self.0.clone(),
                 account_id: "dev@example.com".into(),
                 upstream_account_id: None,
+                upstream_base: None,
+                upstream_model: None,
             })
         }
     }
@@ -1204,6 +1311,8 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
                     token: self.0.clone(),
                     account_id: "dev@example.com".into(),
                     upstream_account_id: Some("acc-stored".into()),
+                upstream_base: None,
+                upstream_model: None,
                 })
             }
         }

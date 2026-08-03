@@ -1916,3 +1916,12 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .tp-quit:hover { color: var(--danger); background: var(--danger-soft); }
 .tp-quit:disabled { opacity: 0.5; cursor: default; background: transparent; color: var(--fg-2); }
 .tp-quit svg { width: 14px; height: 14px; }
+
+/* Custom endpoints (internal): the model list one endpoint has in common with
+   the platform's catalog. Collapsed by default — an aggregator can share
+   dozens, and the count above is the number that actually answers "why is this
+   earning nothing". */
+.ep-models { margin-top: var(--s2); }
+.ep-models summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.ep-models summary:hover { color: var(--text); }
+.ep-model-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--s2); }

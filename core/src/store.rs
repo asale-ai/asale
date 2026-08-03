@@ -70,6 +70,14 @@ pub struct ToolRow {
     /// `mkt_ratio`, which is clamped to `[0.10, 1.00]`.
     pub sell_min_ratio: i64,
     pub sell_max_ratio: i64,
+    /// How many requests this account will serve at once.
+    ///
+    /// Declared to the market as the lane's `concurrency_total`, so it is the
+    /// seller's own ceiling on how much work the gateway may have in flight
+    /// against this subscription — matching stops offering the lane once that
+    /// many tasks are outstanding, rather than the client having to refuse them
+    /// after the fact. Per account, because the vendor's own rate limit is.
+    pub sell_concurrency: i64,
 }
 
 /// The band's legal range, and the widest one there is: the server clamps
@@ -78,6 +86,33 @@ pub struct ToolRow {
 /// which is what keeps a fresh account — and an upgraded database — selling
 /// exactly as it did before the band existed.
 pub const RATIO_BAND_FULL: (i64, i64) = (10, 100);
+
+/// What one subscription account serves at once when nobody has said
+/// otherwise. Five is the number a single interactive CLI session comfortably
+/// keeps busy without the vendor starting to 429 — high enough that a seller is
+/// not leaving capacity idle, low enough that the default never gets an account
+/// rate-limited on its owner's behalf.
+pub const DEFAULT_SELL_CONCURRENCY: i64 = 5;
+
+/// The range an operator may set concurrency to. The floor is 1 — an account
+/// that serves nothing is expressed by switching selling off, not by a zero
+/// here, and a zero would otherwise declare a lane the market can never pick.
+/// The ceiling is a sanity bound on a hand-typed number, not a vendor limit.
+pub const SELL_CONCURRENCY_RANGE: (i64, i64) = (1, 64);
+
+/// Clamp a concurrency setting into its legal range.
+///
+/// A stored 0 — which is what a row written before this column existed reads as
+/// under SQLite's `DEFAULT` for an added column, and what a half-typed input
+/// produces — becomes the default rather than the floor: nobody chose 0, so it
+/// means "unset", and answering it with 1 would quietly take four fifths of an
+/// upgraded seller's capacity off the market.
+pub fn normalise_concurrency(n: i64) -> i64 {
+    if n <= 0 {
+        return DEFAULT_SELL_CONCURRENCY;
+    }
+    n.clamp(SELL_CONCURRENCY_RANGE.0, SELL_CONCURRENCY_RANGE.1)
+}
 
 /// Clamp a price band into the legal range and put its ends the right way
 /// round. A value from before the band existed (0) lands on the floor, i.e. on
@@ -112,6 +147,7 @@ CREATE TABLE IF NOT EXISTS tools (
   sell_daily_limit INTEGER NOT NULL DEFAULT 0,
   sell_min_ratio INTEGER NOT NULL DEFAULT 10,
   sell_max_ratio INTEGER NOT NULL DEFAULT 100,
+  sell_concurrency INTEGER NOT NULL DEFAULT 5,
   UNIQUE(provider, account_id)
 );
 CREATE TABLE IF NOT EXISTS publish_config (
@@ -193,6 +229,10 @@ const MIGRATIONS: &[&str] = &[
     // exactly as it did.
     "ALTER TABLE tools ADD COLUMN sell_min_ratio INTEGER NOT NULL DEFAULT 10",
     "ALTER TABLE tools ADD COLUMN sell_max_ratio INTEGER NOT NULL DEFAULT 100",
+    // How many requests the account serves at once, declared to the market as
+    // the lane's concurrency ceiling. Defaulted to the same 5 a fresh row gets;
+    // `normalise_concurrency` maps a 0 from an older row onto it too.
+    "ALTER TABLE tools ADD COLUMN sell_concurrency INTEGER NOT NULL DEFAULT 5",
     // JSON array of every local store holding this account's token.
     "ALTER TABLE tools ADD COLUMN sources TEXT",
     "ALTER TABLE provider_records ADD COLUMN provider TEXT NOT NULL DEFAULT ''",
@@ -383,10 +423,10 @@ impl LocalStore {
     /// List imported tool accounts (keychain refs only; no plaintext).
     pub async fn list_tools(&self) -> anyhow::Result<Vec<ToolRow>> {
         #[allow(clippy::type_complexity)]
-        let rows: Vec<(String, String, String, Option<String>, Option<String>, Option<String>, Option<String>, i64, i64, i64, i64)> =
+        let rows: Vec<(String, String, String, Option<String>, Option<String>, Option<String>, Option<String>, i64, i64, i64, i64, i64)> =
             sqlx::query_as(
                 "SELECT provider, account_id, keychain_ref, plan, origin, source, sources, sell_enabled, sell_daily_limit,
-                        sell_min_ratio, sell_max_ratio
+                        sell_min_ratio, sell_max_ratio, sell_concurrency
                  FROM tools ORDER BY provider, account_id",
             )
             .fetch_all(&self.pool)
@@ -395,7 +435,7 @@ impl LocalStore {
             .into_iter()
             .map(
                 |(provider, account_id, keychain_ref, plan, origin, source, sources, sell_enabled, sell_daily_limit,
-                  sell_min_ratio, sell_max_ratio)| {
+                  sell_min_ratio, sell_max_ratio, sell_concurrency)| {
                     // Rows written before the `sources` column existed carry
                     // only the single `source`; present that as a one-element
                     // list so callers never special-case the old shape.
@@ -418,6 +458,10 @@ impl LocalStore {
                         // not silently take a subscription off the market.
                         sell_min_ratio,
                         sell_max_ratio,
+                        // Same reading as the band: a row from before the
+                        // column existed carries 0, which means "never set"
+                        // rather than "serve nothing".
+                        sell_concurrency: normalise_concurrency(sell_concurrency),
                     }
                 },
             )
@@ -462,6 +506,28 @@ impl LocalStore {
         let res = sqlx::query("UPDATE tools SET sell_min_ratio=?, sell_max_ratio=? WHERE provider=? AND account_id=?")
             .bind(lo)
             .bind(hi)
+            .bind(provider)
+            .bind(account_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Set how many requests one account serves at once.
+    ///
+    /// Its own statement for the same reason the band is: it answers "how much
+    /// of this subscription is for sale", which the operator edits separately
+    /// from whether it sells at all and from what it will accept for it. The
+    /// value is normalised rather than rejected, so a half-typed number lands
+    /// on the default instead of leaving a lane the market cannot pick.
+    pub async fn set_tool_concurrency(
+        &self,
+        provider: &str,
+        account_id: &str,
+        concurrency: i64,
+    ) -> anyhow::Result<bool> {
+        let res = sqlx::query("UPDATE tools SET sell_concurrency=? WHERE provider=? AND account_id=?")
+            .bind(normalise_concurrency(concurrency))
             .bind(provider)
             .bind(account_id)
             .execute(&self.pool)
@@ -587,10 +653,16 @@ impl LocalStore {
     /// warning which would then be shown about a credential no CLI can rotate —
     /// and the per-account sell switch/limit survive a re-import.
     ///
+    /// `source` is protected by the same rule, because it names the credential
+    /// actually in use: letting a re-import relabel an asale-held account with
+    /// the CLI's file path would show a provenance that contradicts `origin`.
+    ///
     /// `sources` is every local store found holding *this same subscription
     /// account*, best first — the row stays one-per-account, and the extra
-    /// entries are informational (the Sell page lists them). An empty slice is
-    /// treated as an unknown source.
+    /// entries are informational (the Sell page lists them). Those *are* updated
+    /// on a re-import: which stores hold this account is a fact about the
+    /// machine, not about the credential asale uses. An empty slice is treated
+    /// as an unknown source.
     pub async fn upsert_tool(
         &self,
         provider: &str,
@@ -606,7 +678,7 @@ impl LocalStore {
              VALUES(?,?,?,?,?,?,strftime('%s','now'))
              ON CONFLICT(provider, account_id) DO UPDATE SET
                keychain_ref=excluded.keychain_ref,
-               source=excluded.source,
+               source=CASE WHEN tools.origin IN ('oauth','api_key') THEN tools.source ELSE excluded.source END,
                sources=excluded.sources,
                origin=CASE WHEN tools.origin IN ('oauth','api_key') THEN tools.origin ELSE excluded.origin END",
         )
@@ -1006,6 +1078,21 @@ pub struct RecordRow {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_unset_concurrency_reads_as_the_default_not_as_one() {
+        use super::{normalise_concurrency, DEFAULT_SELL_CONCURRENCY, SELL_CONCURRENCY_RANGE};
+        // A row written before the column existed, and a half-typed input, both
+        // arrive as 0. Answering that with the floor would quietly take four
+        // fifths of an upgraded seller's capacity off the market.
+        assert_eq!(normalise_concurrency(0), DEFAULT_SELL_CONCURRENCY);
+        assert_eq!(normalise_concurrency(-3), DEFAULT_SELL_CONCURRENCY);
+        // Deliberate values are kept; absurd ones are clamped rather than
+        // rejected, so a typo cannot leave an account unable to sell.
+        assert_eq!(normalise_concurrency(1), 1);
+        assert_eq!(normalise_concurrency(12), 12);
+        assert_eq!(normalise_concurrency(9_999), SELL_CONCURRENCY_RANGE.1);
+    }
+
     use super::*;
 
     #[tokio::test]
@@ -1018,6 +1105,34 @@ mod tests {
         let tools = s.list_tools().await.unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].provider, "claude");
+    }
+
+    /// A CLI re-import must not relabel an account asale logged into itself.
+    ///
+    /// The daemon re-imports local CLI credentials on every start, and the same
+    /// subscription is one row whichever way it was found — so this upsert is
+    /// what stands between "asale holds this exclusively" and a row that says so
+    /// while pointing at the CLI's file. The extra stores holding the account
+    /// still get recorded; that is a fact about the machine, not the credential.
+    #[tokio::test]
+    async fn a_reimport_cannot_relabel_an_exclusively_held_account() {
+        let s = LocalStore::open_memory().await.unwrap();
+        s.upsert_tool("claude", "a@b.io", "ref", &["oauth"], "oauth").await.unwrap();
+        s.upsert_tool("claude", "a@b.io", "ref", &[".claude/.credentials.json"], "import").await.unwrap();
+
+        let tools = s.list_tools().await.unwrap();
+        assert_eq!(tools.len(), 1, "one subscription is one row");
+        assert_eq!(tools[0].origin.as_deref(), Some("oauth"), "origin survives the re-import");
+        assert_eq!(tools[0].source.as_deref(), Some("oauth"), "and so does the provenance shown for it");
+        assert_eq!(tools[0].sources, [".claude/.credentials.json"], "but the CLI store is still recorded");
+
+        // An imported account, on the other hand, is still free to be upgraded
+        // once the user logs in through asale itself.
+        s.upsert_tool("codex", "c@d.io", "ref2", &[".codex/auth.json"], "import").await.unwrap();
+        s.upsert_tool("codex", "c@d.io", "ref2", &["oauth"], "oauth").await.unwrap();
+        let codex = s.list_tools().await.unwrap().into_iter().find(|t| t.provider == "codex").unwrap();
+        assert_eq!(codex.origin.as_deref(), Some("oauth"));
+        assert_eq!(codex.source.as_deref(), Some("oauth"));
     }
 
     /// A database created before `provider`/`account_id` existed must still open:

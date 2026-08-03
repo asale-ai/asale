@@ -80,6 +80,20 @@ pub async fn import_cli_all(state: &AppState) -> R<Value> {
     Ok(json!({"imported": imported, "warnings": warnings, "skipped": skipped, "errors": errors}))
 }
 
+/// Accounts of `provider` whose credential asale holds exclusively — its own
+/// browser login or a pasted key — rather than a copy of a local CLI's.
+async fn exclusively_held_accounts(state: &AppState, provider: &str) -> std::collections::HashSet<String> {
+    state
+        .store
+        .list_tools()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| t.provider == provider && matches!(t.origin.as_deref(), Some("oauth") | Some("api_key")))
+        .map(|t| t.account_id)
+        .collect()
+}
+
 /// The already-imported account whose stored refresh token *is* this
 /// credential's — i.e. the same login, discovered again. Matching on the token
 /// keeps an account's identity stable when the network (and so the profile
@@ -179,21 +193,33 @@ pub async fn import_from_cli(state: &AppState, provider: String) -> R<Value> {
         identified.push((account_id, sc));
     }
     let accounts = cli_import::merge_by_account(identified, now_secs());
+    let held_exclusively = exclusively_held_accounts(state, &provider).await;
 
     let mut out = Vec::with_capacity(accounts.len());
     for acct in accounts {
         let (account_id, cred) = (acct.account_id, acct.cred);
+        // An account asale logged into itself is not a copy of the CLI's — it
+        // has its own token pair. Overwriting it here would quietly put the
+        // account back on the CLI's shared refresh token while `origin` (which
+        // `upsert_tool` protects, and which drives the shared-rotation warning)
+        // keeps saying asale holds it exclusively. The row still learns that a
+        // CLI on this machine has the same account, via `sources` below.
+        let exclusive = held_exclusively.contains(&account_id);
         // Persist exactly like oauth_login: secret-store tokens + store references.
-        keychain::set(&keychain::token_ref(&provider, &account_id), &cred.access_token).map_err(err)?;
-        if let Some(refresh) = &cred.refresh_token {
-            keychain::set(&keychain::refresh_ref(&provider, &account_id), refresh).map_err(err)?;
-        }
-        if let Some(exp) = cred.expires_at {
-            state
-                .store
-                .set_setting(&publisher::exp_key(&provider, &account_id), &exp.to_string())
-                .await
-                .map_err(err)?;
+        if !exclusive {
+            keychain::set(&keychain::token_ref(&provider, &account_id), &cred.access_token).map_err(err)?;
+            if let Some(refresh) = &cred.refresh_token {
+                keychain::set(&keychain::refresh_ref(&provider, &account_id), refresh).map_err(err)?;
+            }
+            // Belongs to the credential above: keeping the CLI's expiry against
+            // asale's own token would refresh it at the wrong moment.
+            if let Some(exp) = cred.expires_at {
+                state
+                    .store
+                    .set_setting(&publisher::exp_key(&provider, &account_id), &exp.to_string())
+                    .await
+                    .map_err(err)?;
+            }
         }
         if let Some(plan) = &cred.plan {
             let _ = state.store.set_setting(&format!("plan:{provider}:{account_id}"), plan).await;
@@ -355,9 +381,10 @@ pub async fn list_accounts(state: &AppState) -> R<Value> {
 }
 
 /// Turn one account's sell switch on/off and set its selling terms: the daily
-/// token cap (0 = unlimited) and the market discount band it will sell inside.
-/// Selling is per account, never per provider: switching one Claude account on
-/// leaves your other Claude accounts untouched.
+/// token cap (0 = unlimited), the market discount band it will sell inside, and
+/// how many requests it serves at once. Selling is per account, never per
+/// provider: switching one Claude account on leaves your other Claude accounts
+/// untouched.
 ///
 /// Every argument past `enabled` is optional and means "leave this as it is" —
 /// the UI edits the switch, the cap and the band independently, and a form that
@@ -370,6 +397,7 @@ pub async fn set_account_sell(
     daily_limit: Option<i64>,
     min_ratio: Option<i64>,
     max_ratio: Option<i64>,
+    concurrency: Option<i64>,
 ) -> R<Value> {
     let tools = state.store.list_tools().await.map_err(err)?;
     let existing = tools
@@ -383,6 +411,9 @@ pub async fn set_account_sell(
         min_ratio.unwrap_or(existing.sell_min_ratio),
         max_ratio.unwrap_or(existing.sell_max_ratio),
     );
+    let lanes = asale_client_core::store::normalise_concurrency(
+        concurrency.unwrap_or(existing.sell_concurrency),
+    );
 
     state
         .store
@@ -394,6 +425,14 @@ pub async fn set_account_sell(
         .set_tool_ratio_band(&provider, &account_id, band_lo, band_hi)
         .await
         .map_err(err)?;
+    state
+        .store
+        .set_tool_concurrency(&provider, &account_id, lanes)
+        .await
+        .map_err(err)?;
+    // Rebuilds the pool and nudges the live session, which is what re-declares
+    // the lane — a concurrency change the market has not been told about would
+    // only take effect at the next periodic re-declaration.
     accounts_changed(state).await;
 
     Ok(json!({
@@ -403,6 +442,7 @@ pub async fn set_account_sell(
         "sell_daily_limit": limit,
         "sell_min_ratio": band_lo,
         "sell_max_ratio": band_hi,
+        "sell_concurrency": lanes,
     }))
 }
 
@@ -464,6 +504,292 @@ pub async fn resume_lane(
         }
     }
     Ok(json!({"resumed": true, "provider": provider, "account_id": account_id, "model": model}))
+}
+
+// ── Custom endpoints (internal) ──────────────────────────────────
+//
+// A custom account is an OpenAI-compatible endpoint the operator supplies: a
+// base URL, a key, and whatever models that endpoint serves. It sells through
+// exactly the same path as a subscription — same lanes, same price band, same
+// concurrency ceiling, same metering — and differs in only two places: the
+// upstream URL travels with the account instead of being built by the gateway
+// (see `executor::execute`), and the model set comes from the endpoint's own
+// `/models` rather than from a vendor's plan.
+//
+// This is platform-internal machinery, not a seller feature: it exists to put
+// supply behind models the subscription sellers happen not to cover. The
+// commands below are refused unless the daemon was started with
+// `ASALE_CUSTOM_ENDPOINTS=1`, so an ordinary install has no way to reach them
+// even if the RPC name is known.
+
+/// Env var that arms the custom-endpoint commands.
+const CUSTOM_ENDPOINTS_ENV: &str = "ASALE_CUSTOM_ENDPOINTS";
+
+/// Whether this daemon is running the internal custom-endpoint feature.
+pub fn custom_endpoints_enabled() -> bool {
+    matches!(
+        std::env::var(CUSTOM_ENDPOINTS_ENV).ok().as_deref().map(str::trim),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
+/// Whether this daemon will accept the custom-endpoint commands.
+///
+/// Always answerable — unlike the commands themselves, which refuse when the
+/// feature is off. The UI asks this to decide whether to show the tab at all:
+/// an install that is not running the feature should not display a page whose
+/// every action would be rejected.
+pub async fn custom_endpoints_status(_state: &AppState) -> R<Value> {
+    Ok(json!({"enabled": custom_endpoints_enabled()}))
+}
+
+/// Re-read one endpoint's model list now, rather than at the next hourly
+/// refresh.
+///
+/// The list only moves when somebody reconfigures the endpoint — which is
+/// exactly when its operator is looking at this page and wondering why the new
+/// model is not on offer yet.
+pub async fn refresh_custom_endpoint(state: &AppState, account_id: String) -> R<Value> {
+    if !custom_endpoints_enabled() {
+        return Err(cmd_err!(
+            "errors.cli.customEndpointsDisabled",
+            "custom endpoints are an internal feature; start the daemon with ASALE_CUSTOM_ENDPOINTS=1"
+        ));
+    }
+    let tool = state
+        .store
+        .list_tools()
+        .await
+        .map_err(err)?
+        .into_iter()
+        .find(|t| t.provider == publisher::CUSTOM_PROVIDER && t.account_id == account_id)
+        .ok_or("unknown endpoint")?;
+    let base = state
+        .store
+        .get_setting(&publisher::custom_base_key(&account_id))
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let Some(key) = keychain::get(&tool.keychain_ref).ok().flatten() else {
+        return Err(cmd_err!("errors.cli.customEndpointNoKey", "this endpoint has no key in the secret store"));
+    };
+    let models = discovery::custom_endpoint_models(&base, &key)
+        .await
+        .map_err(|e| cmd_err!("errors.cli.customEndpointUnreachable", format!("endpoint check failed: {e}")))?;
+    publisher::store_custom_models(&state.store, &account_id, &models).await.map_err(err)?;
+    // Rebuild + re-declare, so a model that just became available is on the
+    // market now instead of at the next periodic declaration.
+    accounts_changed(state).await;
+    Ok(json!({
+        "account_id": account_id,
+        "endpoint_models": models.len(),
+        "sellable_models": sellable_custom_models(state, &account_id).await,
+    }))
+}
+
+/// Remove a custom endpoint: the account row, its key, and the two settings
+/// that only this kind of account has.
+///
+/// `remove_account` handles the first two for every provider; the base URL and
+/// the cached model list are this feature's own, and leaving them behind would
+/// silently re-arm a re-added endpoint with a stale list.
+pub async fn remove_custom_endpoint(state: &AppState, account_id: String) -> R<bool> {
+    if !custom_endpoints_enabled() {
+        return Err(cmd_err!(
+            "errors.cli.customEndpointsDisabled",
+            "custom endpoints are an internal feature; start the daemon with ASALE_CUSTOM_ENDPOINTS=1"
+        ));
+    }
+    let removed =
+        remove_account(state, publisher::CUSTOM_PROVIDER.to_string(), account_id.clone()).await?;
+    let _ = state.store.set_setting(&publisher::custom_base_key(&account_id), "").await;
+    let _ = publisher::store_custom_models(&state.store, &account_id, &[]).await;
+    Ok(removed)
+}
+
+/// Connect (or reconfigure) a custom OpenAI-compatible endpoint and put it on
+/// the market.
+///
+/// The endpoint is probed before anything is stored: `GET {base}/models` is the
+/// one call every OpenAI-compatible surface answers, so it verifies the base
+/// URL and the key together and returns the model list in the same round trip.
+/// A base or key that does not work fails here rather than on the first
+/// consumer request, where it would cost a buyer a turn and this device its
+/// reputation.
+///
+/// `min_ratio` is the floor this endpoint sells at, in whole percent *of* list
+/// price — the same number and the same convention as a subscription's price
+/// band, because it is the same decision: below this, do not trade. It is what
+/// keeps a metered endpoint from selling under what its own tokens cost.
+/// `concurrency` is how many requests it serves at once.
+///
+/// Re-running it for an existing `label` updates that account in place: the
+/// endpoint, the key and the terms are all rewritten, and the cached model list
+/// is replaced by what the probe just returned.
+#[allow(clippy::too_many_arguments)]
+pub async fn connect_custom_endpoint(
+    state: &AppState,
+    base_url: String,
+    api_key: String,
+    label: Option<String>,
+    min_ratio: Option<i64>,
+    concurrency: Option<i64>,
+    enabled: Option<bool>,
+) -> R<Value> {
+    if !custom_endpoints_enabled() {
+        return Err(cmd_err!(
+            "errors.cli.customEndpointsDisabled",
+            "custom endpoints are an internal feature; start the daemon with ASALE_CUSTOM_ENDPOINTS=1"
+        ));
+    }
+    let base = base_url.trim().trim_end_matches('/').to_string();
+    if base.is_empty() {
+        return Err(cmd_err!("errors.cli.customBaseEmpty", "base URL is empty"));
+    }
+    if !(base.starts_with("http://") || base.starts_with("https://")) {
+        return Err(cmd_err!(
+            "errors.cli.customBaseScheme",
+            "base URL must start with http:// or https://"
+        ));
+    }
+    let key = api_key.trim().trim_matches(['"', '\'']).trim().to_string();
+    if key.is_empty() {
+        return Err(cmd_err!("errors.cli.apiKeyEmpty", "API key is empty"));
+    }
+    if key.chars().any(char::is_whitespace) {
+        return Err(cmd_err!(
+            "errors.cli.apiKeyHasWhitespace",
+            "API key contains whitespace — paste just the key, not the whole command"
+        ));
+    }
+
+    // The probe is the connect check: it answers "is this an OpenAI-compatible
+    // endpoint, does this key work on it, and what does it serve" at once.
+    let models = discovery::custom_endpoint_models(&base, &key)
+        .await
+        .map_err(|e| cmd_err!("errors.cli.customEndpointUnreachable", format!("endpoint check failed: {e}")))?;
+    if models.is_empty() {
+        return Err(cmd_err!(
+            "errors.cli.customEndpointNoModels",
+            "the endpoint reports no models, so there is nothing to sell"
+        ));
+    }
+
+    // Named by the operator, so two endpoints stay tellable apart. Falling back
+    // to the host keeps the row stable across re-runs when no name was given.
+    let account_id = label
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .unwrap_or_else(|| host_of(&base));
+
+    let provider = publisher::CUSTOM_PROVIDER;
+    let token_ref = keychain::token_ref(provider, &account_id);
+    keychain::set(&token_ref, &key).map_err(err)?;
+    state.store.set_setting(&publisher::custom_base_key(&account_id), &base).await.map_err(err)?;
+    // The probe's answer is the freshest there is; storing it here means the
+    // account is sellable immediately instead of after the first rebuild goes
+    // and asks the endpoint again.
+    publisher::store_custom_models(&state.store, &account_id, &models).await.map_err(err)?;
+    state
+        .store
+        .upsert_tool(provider, &account_id, &token_ref, &["custom"], "api_key")
+        .await
+        .map_err(err)?;
+
+    let floor = min_ratio.map(|r| {
+        asale_client_core::store::normalise_band(r, asale_client_core::store::RATIO_BAND_FULL.1).0
+    });
+    let sell_on = enabled.unwrap_or(true);
+    // Reuses the ordinary sell path so the terms land exactly where a
+    // subscription's do — one place decides what a lane offers, whatever kind
+    // of account is behind it.
+    set_account_sell(
+        state,
+        provider.to_string(),
+        account_id.clone(),
+        sell_on,
+        None,
+        floor,
+        None,
+        concurrency,
+    )
+    .await?;
+
+    // What the market will actually take of that list. The endpoint's own set
+    // is usually much larger than the catalog's, and "connected, 400 models,
+    // selling 12" is the answer the operator needs to see.
+    let sellable = sellable_custom_models(state, &account_id).await;
+    Ok(json!({
+        "provider": provider,
+        "account_id": account_id,
+        "base_url": base,
+        "endpoint_models": models.len(),
+        "sellable_models": sellable,
+        "sell_enabled": sell_on,
+    }))
+}
+
+/// Every custom endpoint this device has, with what it is selling.
+///
+/// Separate from `list_accounts` — which lists these too, like any other
+/// account — because it answers the question only this kind of account raises:
+/// which endpoint is behind it, and how much of what that endpoint serves the
+/// platform can actually trade.
+pub async fn list_custom_endpoints(state: &AppState) -> R<Value> {
+    if !custom_endpoints_enabled() {
+        return Err(cmd_err!(
+            "errors.cli.customEndpointsDisabled",
+            "custom endpoints are an internal feature; start the daemon with ASALE_CUSTOM_ENDPOINTS=1"
+        ));
+    }
+    let tools = state.store.list_tools().await.map_err(err)?;
+    let mut out = Vec::new();
+    for t in tools.iter().filter(|t| t.provider == publisher::CUSTOM_PROVIDER) {
+        let base = state
+            .store
+            .get_setting(&publisher::custom_base_key(&t.account_id))
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        out.push(json!({
+            "account_id": t.account_id,
+            "base_url": base,
+            "sell_enabled": t.sell_enabled,
+            "min_ratio": t.sell_min_ratio,
+            "concurrency": t.sell_concurrency,
+            "sellable_models": sellable_custom_models(state, &t.account_id).await,
+        }));
+    }
+    Ok(json!({"endpoints": out}))
+}
+
+/// The models one custom account is currently advertising — the endpoint's own
+/// list, narrowed to what the platform trades. Read back from the pool, so it is
+/// the same set the supply declaration is built from rather than a second
+/// computation of it that could disagree.
+async fn sellable_custom_models(state: &AppState, account_id: &str) -> Vec<String> {
+    publisher::rebuild_pool(&state.store, &state.pool).await;
+    let Ok(pool) = state.pool.lock() else { return Vec::new() };
+    pool.lane_views(now_secs())
+        .into_iter()
+        .filter(|l| l.provider == publisher::CUSTOM_PROVIDER && l.account_id == account_id)
+        .map(|l| l.model)
+        .collect()
+}
+
+/// The host of a URL, for naming an endpoint connected without a label. Parsed
+/// by hand: the point is a short human-facing id, and pulling in a URL crate for
+/// one split would be the larger change.
+fn host_of(base: &str) -> String {
+    let rest = base.split_once("://").map(|(_, r)| r).unwrap_or(base);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    if host.is_empty() {
+        base.to_string()
+    } else {
+        host.to_string()
+    }
 }
 
 /// Connect a metered platform account (`kimi_api`, `xai_api`) by pasting its
