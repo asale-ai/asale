@@ -168,6 +168,10 @@ pub struct AuthCode {
     pub code: String,
     pub redirect_uri: String,
     pub verifier: String,
+    /// The `state` this login was started with. Carried past the callback
+    /// because Anthropic's token endpoint requires it in the exchange body too
+    /// — see [`exchange`].
+    pub state: String,
 }
 
 /// Start a localhost callback listener and return the authorize URL to open.
@@ -208,10 +212,13 @@ pub async fn begin(p: &OAuthProvider) -> anyhow::Result<(String, AuthCodeFuture)
         url.push_str(&format!("&{}={}", urlencode(k), urlencode(v)));
     }
 
-    let (tx, rx) = oneshot::channel::<String>();
+    // `(code, state)`: the state comes back so the callback can be checked
+    // against the login that started it.
+    let (tx, rx) = oneshot::channel::<(String, String)>();
     let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
     let redirect2 = redirect_uri.clone();
     let verifier = pkce.verifier.clone();
+    let state2 = state.clone();
 
     // Minimal callback server: capture ?code= and close. It keeps accepting
     // until a request actually carries a code — a browser will happily spend
@@ -248,29 +255,42 @@ pub async fn begin(p: &OAuthProvider) -> anyhow::Result<(String, AuthCodeFuture)
             };
             write_page(&mut sock, &body).await;
             if let Some(sender) = tx.lock().unwrap().take() {
-                let _ = sender.send(code);
+                let _ = sender.send((code, extract_query(&req, "state")));
             }
             break;
         }
     });
 
-    Ok((url, AuthCodeFuture { rx, redirect_uri: redirect2, verifier }))
+    Ok((url, AuthCodeFuture { rx, redirect_uri: redirect2, verifier, state: state2 }))
 }
 
 /// Awaitable that yields the captured auth code.
 pub struct AuthCodeFuture {
-    rx: oneshot::Receiver<String>,
+    rx: oneshot::Receiver<(String, String)>,
     redirect_uri: String,
     verifier: String,
+    state: String,
 }
 
 impl AuthCodeFuture {
     pub async fn wait(self) -> anyhow::Result<AuthCode> {
-        let code = self.rx.await.map_err(|_| anyhow::anyhow!("callback closed"))?;
+        let (code, echoed_state) = self.rx.await.map_err(|_| anyhow::anyhow!("callback closed"))?;
         if code.is_empty() {
             anyhow::bail!("no code in callback");
         }
-        Ok(AuthCode { code, redirect_uri: self.redirect_uri, verifier: self.verifier })
+        // Checked only when the provider echoes one: every provider here is sent
+        // a `state` and returns it, but a login must not start failing because
+        // some vendor drops it. A value that comes back *different* is another
+        // matter — that callback belongs to a different login attempt.
+        if !echoed_state.is_empty() && echoed_state != self.state {
+            anyhow::bail!("state mismatch");
+        }
+        Ok(AuthCode {
+            code,
+            redirect_uri: self.redirect_uri,
+            verifier: self.verifier,
+            state: self.state,
+        })
     }
 }
 
@@ -347,9 +367,15 @@ pub async fn exchange(p: &OAuthProvider, ac: &AuthCode) -> anyhow::Result<serde_
         params.push(("client_secret", secret.clone()));
     }
     let resp = if p.anthropic_style {
-        // Anthropic's token endpoint takes a JSON body.
-        let body: serde_json::Map<String, serde_json::Value> =
+        // Anthropic's token endpoint takes a JSON body, and — unlike plain
+        // OAuth2, where `state` belongs to the authorize step alone — it also
+        // requires `state` here. Without it the whole request is refused as
+        // `invalid_request_error: Invalid request format`, which reads as if
+        // the login itself failed even though the browser already said it
+        // succeeded.
+        let mut body: serde_json::Map<String, serde_json::Value> =
             params.iter().map(|(k, v)| (k.to_string(), serde_json::Value::String(v.clone()))).collect();
+        body.insert("state".to_string(), serde_json::Value::String(ac.state.clone()));
         http.post(p.token_url).json(&body).send().await?
     } else {
         http.post(p.token_url).form(&params).send().await?
@@ -499,6 +525,46 @@ mod tests {
         // The exchange must replay the exact same value.
         assert!(fut.redirect_uri.starts_with("http://localhost:"));
         assert!(fut.redirect_uri.ends_with("/callback"));
+    }
+
+    /// The `state` put in the authorize URL is the one the exchange replays:
+    /// Anthropic refuses a token request that omits it.
+    #[tokio::test]
+    async fn the_authorize_state_is_kept_for_the_exchange() {
+        let p = provider("claude").unwrap();
+        let (url, fut) = begin(&p).await.unwrap();
+        assert!(url.contains(&format!("&state={}", fut.state)), "authorize state not in {url}");
+        assert!(!fut.state.is_empty());
+    }
+
+    /// A callback echoing someone else's state belongs to another login; one
+    /// echoing nothing is a vendor quirk and still has to work.
+    #[tokio::test]
+    async fn a_foreign_state_is_refused_and_a_missing_one_is_tolerated() {
+        let pending = |state: &str| {
+            let (tx, rx) = oneshot::channel::<(String, String)>();
+            let fut = AuthCodeFuture {
+                rx,
+                redirect_uri: "http://localhost:1/callback".into(),
+                verifier: "verifier".into(),
+                state: state.into(),
+            };
+            (tx, fut)
+        };
+
+        let (tx, fut) = pending("ours");
+        tx.send(("the-code".into(), "someone-elses".into())).unwrap();
+        assert!(fut.wait().await.is_err(), "a mismatched state must not produce a code");
+
+        let (tx, fut) = pending("ours");
+        tx.send(("the-code".into(), String::new())).unwrap();
+        let ac = fut.wait().await.unwrap();
+        assert_eq!(ac.code, "the-code");
+        assert_eq!(ac.state, "ours", "and the exchange still replays ours");
+
+        let (tx, fut) = pending("ours");
+        tx.send(("the-code".into(), "ours".into())).unwrap();
+        assert_eq!(fut.wait().await.unwrap().state, "ours");
     }
 
     #[test]

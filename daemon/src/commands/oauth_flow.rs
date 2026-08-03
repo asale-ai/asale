@@ -108,36 +108,28 @@ pub(crate) async fn finish_provider_oauth(
         // browser diagnostics.
         return Err(missing_access_token_error(provider, &tokens));
     }
-    let account_id = tokens["account"]["email"]
-        .as_str()
-        .or_else(|| tokens["email"].as_str())
-        .map(str::to_string)
-        // Codex returns neither — the identity lives in the id_token claims.
-        .or_else(|| oauth::id_token_claim(&tokens, "email"))
-        .unwrap_or_else(|| "account".to_string());
-    // Codex returns the plan in neither field — like the email above, it lives in
-    // the id_token claims, in the same `https://api.openai.com/auth` block this
-    // function already reads the ChatGPT account id out of. Missing it left every
-    // asale-logged Codex account at `plan: None`, which
-    // `discovery::plan_window_cap` reads as the lowest tier (200k tokens per 5h
-    // window) no matter what the subscription actually allows — so the lanes went
-    // dark after a handful of full-size sales and matching answered `no_supply`.
-    let claim_plan = oauth::id_token_claim(&tokens, "chatgpt_plan_type").or_else(|| {
-        tokens["id_token"]
-            .as_str()
-            .and_then(cli_import::jwt_claims)
-            .as_ref()
-            .and_then(|c| c.get("https://api.openai.com/auth"))
-            .and_then(|a| a.get("chatgpt_plan_type"))
-            .and_then(|p| p.as_str())
-            .map(str::to_string)
+    let account_id = account_email(&tokens).unwrap_or_else(|| {
+        // Key names only: every value in a token response is a secret.
+        tracing::warn!(
+            provider,
+            "no email in the token response — falling back to a shared account id. \
+             response keys = {:?}, account keys = {:?}",
+            key_names(&tokens),
+            key_names(&tokens["account"])
+        );
+        "account".to_string()
     });
-    let plan = tokens["account"]["plan"]
-        .as_str()
-        .or_else(|| tokens["plan"].as_str())
-        .map(str::to_string)
-        .or(claim_plan)
-        .filter(|p| !p.is_empty());
+    let plan = account_plan(&tokens);
+    if plan.is_none() {
+        tracing::warn!(
+            provider,
+            account_id,
+            "no plan in the token response — quota will be estimated at the lowest tier. \
+             response keys = {:?}, account keys = {:?}",
+            key_names(&tokens),
+            key_names(&tokens["account"])
+        );
+    }
 
     // Persist tokens in the secret store; the store only holds references (§3.4).
     keychain::set(&keychain::token_ref(provider, &account_id), access).map_err(err)?;
@@ -181,16 +173,102 @@ pub(crate) async fn finish_provider_oauth(
     Ok(json!({"provider": provider, "account_id": account_id, "keychain_ref": keychain::token_ref(provider, &account_id)}))
 }
 
-fn missing_access_token_error(provider: &str, tokens: &Value) -> CmdError {
-    let provider_error = tokens["error"]
+/// The key names of a JSON object, for saying what a response looked like
+/// without saying what was in it — every value in a token response is a secret.
+fn key_names(v: &Value) -> Vec<&str> {
+    v.as_object().map(|o| o.keys().map(String::as_str).collect()).unwrap_or_default()
+}
+
+/// Which account this login belongs to, however the vendor spells it.
+///
+/// Anthropic answers `account.email_address`, others `account.email` or a bare
+/// `email`, and Codex none of them — its identity is in the `id_token` claims.
+/// Falling through all of them is not a cosmetic problem: the result becomes
+/// `account_id`, which is the keychain key, so two accounts that both fall back
+/// to the same placeholder overwrite each other's tokens.
+fn account_email(tokens: &Value) -> Option<String> {
+    tokens["account"]["email_address"]
         .as_str()
-        .or_else(|| tokens["error"]["code"].as_str())
-        .unwrap_or("missing_access_token");
+        .or_else(|| tokens["account"]["email"].as_str())
+        .or_else(|| tokens["email"].as_str())
+        .map(str::to_string)
+        .or_else(|| oauth::id_token_claim(tokens, "email"))
+        .filter(|email| !email.is_empty())
+}
+
+/// The subscription tier this account is on.
+///
+/// Anthropic names it `subscription_type` — the same word its CLI writes to
+/// `.credentials.json` as `subscriptionType`, which is where the import path
+/// already reads it. Codex puts it in the `id_token` instead, in the same
+/// `https://api.openai.com/auth` block the caller reads the ChatGPT account id
+/// from.
+///
+/// Also not cosmetic: `discovery::plan_window_cap` prices an unknown plan at the
+/// lowest tier, so a Max subscription would advertise a Pro-sized window and go
+/// dark after a handful of full-size sales, with matching answering `no_supply`.
+fn account_plan(tokens: &Value) -> Option<String> {
+    tokens["account"]["subscription_type"]
+        .as_str()
+        .or_else(|| tokens["account"]["plan"].as_str())
+        .or_else(|| tokens["subscription_type"].as_str())
+        .or_else(|| tokens["subscriptionType"].as_str())
+        .or_else(|| tokens["plan"].as_str())
+        .map(str::to_string)
+        .or_else(|| codex_claim_plan(tokens))
+        .filter(|plan| !plan.is_empty())
+}
+
+fn codex_claim_plan(tokens: &Value) -> Option<String> {
+    oauth::id_token_claim(tokens, "chatgpt_plan_type").or_else(|| {
+        tokens["id_token"]
+            .as_str()
+            .and_then(cli_import::jwt_claims)
+            .as_ref()
+            .and_then(|claims| claims.get("https://api.openai.com/auth"))
+            .and_then(|auth| auth.get("chatgpt_plan_type"))
+            .and_then(|plan| plan.as_str())
+            .map(str::to_string)
+    })
+}
+
+/// The provider's own account of why the exchange produced no token.
+///
+/// Vendors disagree on the shape: plain OAuth2 answers
+/// `{"error", "error_description"}`, Anthropic `{"error": {"type", "message"}}`
+/// and OpenAI `{"error": {"code", "message"}}`. Reading only the first two of
+/// those flattened every other failure into a bare `missing_access_token`,
+/// which is how a region block ends up indistinguishable from an expired
+/// authorization code — with nothing in the log either way.
+///
+/// Only these two fields are read. The rest of the response may still hold a
+/// refresh or ID token even when it is malformed, and this string is rendered
+/// by the frontend.
+fn provider_error_detail(tokens: &Value) -> String {
+    let error = &tokens["error"];
+    let code = error.as_str().or_else(|| error["code"].as_str()).or_else(|| error["type"].as_str());
+    let text = tokens["error_description"].as_str().or_else(|| error["message"].as_str());
+    match (code, text) {
+        (Some(code), Some(text)) if code != text => format!("{code}: {text}"),
+        (Some(code), _) => code.to_string(),
+        (None, Some(text)) => text.to_string(),
+        (None, None) => "missing_access_token".to_string(),
+    }
+}
+
+fn missing_access_token_error(provider: &str, tokens: &Value) -> CmdError {
+    let detail = provider_error_detail(tokens);
+    // The RPC error is rendered in a webview; this is where the operator can
+    // actually read it back after the dialog is gone.
+    tracing::warn!(provider, "token exchange returned no access_token: {detail}");
+    // `detail` is the name every `errors.oauth.*` entry interpolates. Sending
+    // it under any other name renders the catalog's `{{detail}}` verbatim —
+    // which is exactly what the sell page showed instead of this reason.
     cmd_err!(
         "errors.oauth.exchangeFailed",
-        format!("token exchange failed ({provider_error})"),
+        format!("token exchange failed ({detail})"),
         provider = provider,
-        reason = provider_error
+        detail = detail
     )
 }
 
@@ -211,6 +289,73 @@ mod tests {
         for secret in ["refresh-secret", "identity-secret", "client-secret"] {
             assert!(!encoded.contains(secret));
         }
+    }
+
+    /// Each vendor's own shape has to survive as something a user can act on —
+    /// "this region is blocked" and "your code expired" are different problems.
+    #[test]
+    fn every_vendors_error_shape_keeps_its_reason() {
+        let cases = [
+            (json!({"error": {"type": "forbidden", "message": "Request not allowed"}}), "forbidden: Request not allowed"),
+            (json!({"error": "invalid_grant", "error_description": "code expired"}), "invalid_grant: code expired"),
+            (json!({"error": {"code": "invalid_client"}}), "invalid_client"),
+            (json!({"error_description": "no client credential"}), "no client credential"),
+            (json!({"token_type": "bearer"}), "missing_access_token"),
+        ];
+        for (response, want) in cases {
+            assert_eq!(provider_error_detail(&response), want, "for {response}");
+        }
+    }
+
+    /// Each vendor spells the identity differently, and none of them may end up
+    /// on the shared `"account"` placeholder — that is the keychain key.
+    #[test]
+    fn every_vendors_identity_shape_is_recognized() {
+        let cases = [
+            (json!({"account": {"email_address": "a@x.com"}}), "a@x.com", "Anthropic"),
+            (json!({"account": {"email": "b@x.com"}}), "b@x.com", "account.email"),
+            (json!({"email": "c@x.com"}), "c@x.com", "bare email"),
+        ];
+        for (response, want, who) in cases {
+            assert_eq!(account_email(&response).as_deref(), Some(want), "{who}");
+        }
+        assert_eq!(account_email(&json!({"account": {"email_address": ""}})), None, "blank is not an identity");
+        assert_eq!(account_email(&json!({"token_type": "bearer"})), None);
+    }
+
+    #[test]
+    fn every_vendors_plan_shape_is_recognized() {
+        let cases = [
+            (json!({"account": {"subscription_type": "max"}}), "max", "Anthropic"),
+            (json!({"account": {"plan": "pro"}}), "pro", "account.plan"),
+            (json!({"subscriptionType": "max"}), "max", "CLI spelling"),
+            (json!({"plan": "team"}), "team", "bare plan"),
+        ];
+        for (response, want, who) in cases {
+            assert_eq!(account_plan(&response).as_deref(), Some(want), "{who}");
+        }
+        assert_eq!(account_plan(&json!({"account": {"subscription_type": ""}})), None, "blank is not a plan");
+        assert_eq!(account_plan(&json!({"token_type": "bearer"})), None);
+    }
+
+    /// The diagnostic that runs when the two above find nothing must not put the
+    /// response itself in the log.
+    #[test]
+    fn the_shape_diagnostic_names_keys_and_nothing_else() {
+        let response = json!({"access_token": "secret-a", "account": {"uuid": "secret-b"}});
+        assert_eq!(key_names(&response), ["access_token", "account"]);
+        assert_eq!(key_names(&response["account"]), ["uuid"]);
+        assert!(key_names(&json!("not an object")).is_empty());
+    }
+
+    /// The catalog entry interpolates `detail`; anything else renders as
+    /// literal `{{detail}}` in the UI.
+    #[test]
+    fn the_reason_travels_under_the_name_the_catalog_interpolates() {
+        let response = json!({"error": {"type": "forbidden", "message": "Request not allowed"}});
+        let encoded = missing_access_token_error("claude", &response).to_json();
+        assert_eq!(encoded["key"], "errors.oauth.exchangeFailed");
+        assert_eq!(encoded["params"]["detail"], "forbidden: Request not allowed");
     }
 }
 
