@@ -267,9 +267,81 @@ fn system_proxy() -> Option<String> {
     None
 }
 
-#[cfg(not(target_os = "macos"))]
+/// The OS-level HTTP(S) proxy on Windows: WinINET's per-user settings, which is
+/// where Clash / v2rayN / Shadowsocks & co. write when the user ticks "system
+/// proxy". Unix's `https_proxy` convention does not exist here — nothing exports
+/// it globally — so without this read a GUI-launched daemon has no way at all to
+/// learn about the proxy the whole machine is already using, and every provider
+/// call dials direct into a block.
+///
+/// Read through `reg.exe` for the same reason macOS shells out to `scutil`: it
+/// keeps a platform-only registry dependency out of a crate every target builds.
+#[cfg(target_os = "windows")]
 fn system_proxy() -> Option<String> {
-    // Windows/Linux: the env vars above are the convention; nothing else to read.
+    use std::os::windows::process::CommandExt;
+    /// Without it the probe flashes a console window on the GUI build.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let out = std::process::Command::new("reg.exe")
+        .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // Rows look like `    ProxyEnable    REG_DWORD    0x1`. Only ASCII names and
+    // values are read, so a non-UTF-8 console codepage cannot corrupt them.
+    let text = String::from_utf8_lossy(&out.stdout);
+    let value = |name: &str| -> Option<String> {
+        text.lines().find_map(|line| {
+            let mut cols = line.split_whitespace();
+            if cols.next()? != name {
+                return None;
+            }
+            cols.next()?; // the REG_* type column
+            let rest = cols.collect::<Vec<_>>().join(" ");
+            (!rest.is_empty()).then_some(rest)
+        })
+    };
+    if value("ProxyEnable").as_deref() != Some("0x1") {
+        return None;
+    }
+    normalize_win_proxy(&value("ProxyServer")?)
+}
+
+/// WinINET stores either one bare `host:port` used for every scheme, or a
+/// `scheme=host:port;…` list. HTTPS is preferred over HTTP for the same reason
+/// as on macOS: it is the entry that carries our CONNECT tunnels.
+#[cfg(target_os = "windows")]
+fn normalize_win_proxy(raw: &str) -> Option<String> {
+    fn with_scheme(host_port: &str) -> String {
+        if host_port.contains("://") {
+            host_port.to_string()
+        } else {
+            format!("http://{host_port}")
+        }
+    }
+
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if !raw.contains('=') {
+        return Some(with_scheme(raw));
+    }
+    let entry = |key: &str| {
+        raw.split(';').find_map(|part| part.trim().strip_prefix(key)).map(str::trim).filter(|v| !v.is_empty())
+    };
+    // `socks=` is deliberately skipped: WinINET records a bare host:port there
+    // and not which SOCKS version it speaks, so picking one would route provider
+    // traffic into a tunnel that may not understand it.
+    entry("https=").or_else(|| entry("http=")).map(with_scheme)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn system_proxy() -> Option<String> {
+    // Linux: the env vars above really are the convention; nothing else to read.
     None
 }
 
@@ -331,6 +403,26 @@ mod tests {
         assert_eq!(ProxyPref::from_setting(None), ProxyPref::Auto, "unset → auto");
         assert_eq!(ProxyPref::from_setting(Some("  ")), ProxyPref::Auto, "blank → auto");
         assert_eq!(ProxyPref::from_setting(Some("none")), ProxyPref::Direct);
+    }
+
+    /// The forms WinINET actually writes, taken from a machine with Clash on.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_proxy_values_normalize_to_a_url() {
+        assert_eq!(normalize_win_proxy("127.0.0.1:7890").as_deref(), Some("http://127.0.0.1:7890"), "bare host:port");
+        assert_eq!(
+            normalize_win_proxy("http=127.0.0.1:7890;https=127.0.0.1:7891").as_deref(),
+            Some("http://127.0.0.1:7891"),
+            "https= outranks http=, matching the macOS reader"
+        );
+        assert_eq!(
+            normalize_win_proxy("http=127.0.0.1:7890;ftp=127.0.0.1:7890").as_deref(),
+            Some("http://127.0.0.1:7890"),
+            "http= when there is no https="
+        );
+        assert_eq!(normalize_win_proxy("socks=127.0.0.1:7891"), None, "socks alone: version unknown, stay direct");
+        assert_eq!(normalize_win_proxy(""), None);
+        assert_eq!(normalize_win_proxy("   "), None);
     }
 
     #[test]
