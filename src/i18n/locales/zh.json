@@ -252,12 +252,18 @@
     "pasteLabel": "回调地址，或者只填授权码",
     "pastePlaceholder": "http://localhost:37669/callback?code=…",
     "pasteSubmit": "完成登录",
-    "connectViaEndpoint": "平台端点",
-    "endpointHint": "粘贴 {{provider}} 的 key，在这里创建：",
+    "connectViaEndpoint": "填 Base URL 和 Key",
+    "endpointTile": "自定义端点",
+    "endpointHint": "OpenAI、Anthropic、Gemini、OpenAI Responses 四种协议的端点都可以。填入它的 Base URL（到 /v1 为止）和 API Key；连接时会先请求一次 /models 验证，通不过就不会保存。",
+    "endpointBase": "Base URL",
+    "endpointWire": "协议",
+    "endpointWireAuto": "自动识别",
+    "endpointKey": "API Key",
+    "endpointNamePlaceholder": "openrouter",
     "endpointFloor": "价格底线",
     "endpointTermsHint": "底价是占原价的百分比，市场价低于它就自动停售——这个端点每个 token 都是真金白银，底价就是防止亏本卖的那道闸。一个 key 一个账号：同一家的多个 key 请用不同名称连接，重名会互相覆盖。两项之后都能在下面的账号里改。",
     "endpointChecking": "验证中…",
-    "endpointConnected": "{{account}} 已连接：端点提供 {{served}} 个模型，其中 {{selling}} 个平台在交易。"
+    "endpointConnected": "{{account}} 已按 {{wire}} 协议连接：端点提供 {{served}} 个模型，其中 {{selling}} 个平台在交易。"
   },
   "consume": {
     "title": "买入",

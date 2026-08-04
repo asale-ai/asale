@@ -20,7 +20,8 @@ use asale_protocol::ids::Vendor;
 use asale_client_core::store::LocalStore;
 use asale_client_core::{
     spawn_publisher, AccountPool, AccountRuntime, ConfigSource, LeasedToken, PauseReason, PublisherDeps,
-    PublisherHandle, Provider, RecordSink, SupplySource, TaskOutcome, TokenProvider, UpstreamErrorKind, WsConfig,
+    PublisherHandle, Provider, RecordSink, SupplySource, TaskOutcome, TokenProvider, UpstreamErrorKind, Wire,
+    WsConfig,
 };
 use async_trait::async_trait;
 use serde_json::json;
@@ -303,6 +304,26 @@ pub fn custom_base_key(account_id: &str) -> String {
     format!("custombase:{account_id}")
 }
 
+/// Settings key holding the dialect one custom endpoint speaks.
+///
+/// Beside the base URL and for the same reason — it is a property of that one
+/// account, not of its provider. Absent (an endpoint connected before the
+/// dialect was a choice) reads as [`Wire::Openai`], which is what it was.
+pub fn custom_wire_key(account_id: &str) -> String {
+    format!("customwire:{account_id}")
+}
+
+/// The dialect this custom account's endpoint speaks, as recorded.
+pub async fn custom_wire(store: &LocalStore, account_id: &str) -> Wire {
+    store
+        .get_setting(&custom_wire_key(account_id))
+        .await
+        .ok()
+        .flatten()
+        .and_then(|w| Wire::from_str_opt(&w))
+        .unwrap_or_default()
+}
+
 /// Settings key holding the model list one custom endpoint last reported.
 fn custom_models_key(account_id: &str) -> String {
     format!("custommodels:{account_id}")
@@ -470,7 +491,8 @@ async fn custom_endpoint_models(store: &LocalStore, tool: &asale_client_core::st
         tracing::warn!(account = %tool.account_id, "custom account: no key in the secret store");
         return stale();
     };
-    match asale_client_core::discovery::custom_endpoint_models(&base, &key_value).await {
+    let wire = custom_wire(store, &tool.account_id).await;
+    match asale_client_core::discovery::custom_endpoint_models(&base, &key_value, wire).await {
         Ok(models) => match store_custom_models(store, &tool.account_id, &models).await {
             Ok(fresh) => {
                 if cached.as_ref().map(|c| &c.aliases) != Some(&fresh.aliases) {
@@ -804,19 +826,48 @@ impl SupplySource for PoolSupplySource {
 pub async fn build_supply_items(store: &LocalStore, pool: &StdMutex<AccountPool>) -> serde_json::Value {
     let price_min: i64 = local_policy(store).await.min_price;
     let now = now_secs();
-    let views = match pool.lock() {
-        Ok(p) => p.lane_views(now),
+    // The dialect each lane is offered in, decided once and used both to pick
+    // whose capacity counts towards it below and to pick who serves it when the
+    // work arrives (`PoolTokens::acquire`). Empty for every provider whose
+    // upstream is the vendor's, which settles the dialect on its own.
+    let (views, lane_wires) = match pool.lock() {
+        Ok(p) => {
+            let views = p.lane_views(now);
+            let mut wires: std::collections::BTreeMap<(String, String), Wire> = Default::default();
+            for v in views.iter().filter(|v| v.upstream_wire.is_some()) {
+                let k = (v.provider.clone(), v.model.clone());
+                if let std::collections::btree_map::Entry::Vacant(e) = wires.entry(k) {
+                    if let Some(w) = p.lane_wire(&v.provider, &v.model, now) {
+                        e.insert(w);
+                    }
+                }
+            }
+            (views, wires)
+        }
         Err(_) => return json!([]),
     };
 
     let mut offers: std::collections::BTreeMap<(String, String), LaneOffer> = Default::default();
+    let mut wire_conflicts = 0usize;
     for v in views {
         // An account the operator has not switched on for selling is not on
         // the market at all — not even as a paused lane.
         if !v.sell_enabled {
             continue;
         }
-        let offer = offers.entry((v.provider.clone(), v.model.clone())).or_default();
+        let key = (v.provider.clone(), v.model.clone());
+        // A lane carries one dialect. An endpoint of this device that serves
+        // the same model in another one is left out rather than added in: its
+        // capacity would be declared under a dialect it cannot answer, and the
+        // gateway would build a body it can only refuse. It stays sellable for
+        // every model the winning dialect does not already cover.
+        if let (Some(w), Some(own)) = (lane_wires.get(&key), v.upstream_wire) {
+            if own != *w {
+                wire_conflicts += 1;
+                continue;
+            }
+        }
+        let offer = offers.entry(key).or_default();
         if v.status == "selling" {
             // Each account's headroom is its own (spec §4): summing here
             // never lets one account borrow another's quota, because
@@ -858,8 +909,9 @@ pub async fn build_supply_items(store: &LocalStore, pool: &StdMutex<AccountPool>
         .filter_map(|((provider, model), o)| {
             // A provider this build does not know is not declarable — the
             // gateway would reject the whole frame on the unknown variant.
+            let wire = lane_wires.get(&(provider.clone(), model.clone())).copied();
             let provider = Provider::from_str_opt(&provider)?;
-            let item = SupplyItem::offered(
+            let mut item = SupplyItem::offered(
                 &model,
                 provider,
                 o.window_remaining,
@@ -867,6 +919,12 @@ pub async fn build_supply_items(store: &LocalStore, pool: &StdMutex<AccountPool>
                 "",
                 o.concurrency_free,
             );
+            // Declared only where it is the lane's own answer; leaving it empty
+            // for everyone else is what keeps the gateway building a
+            // subscription's body from the vendor it belongs to.
+            if let Some(w) = wire {
+                item = item.speaking(w);
+            }
             Some(if o.window_remaining > 0 {
                 item
             } else {
@@ -875,6 +933,12 @@ pub async fn build_supply_items(store: &LocalStore, pool: &StdMutex<AccountPool>
             })
         })
         .collect();
+    if wire_conflicts > 0 {
+        tracing::warn!(
+            "{wire_conflicts} lane(s) left out: another endpoint on this device already offers \
+             those models in a different protocol, and a lane can only be sold in one"
+        );
+    }
     json!(items)
 }
 
@@ -950,13 +1014,24 @@ impl TokenProvider for PoolTokens {
         // Sale traffic may only ever be served by an account the user switched
         // on for selling, on a lane that is not cooling or paused —
         // `pick_for_sale`, not `pick`.
-        let picked = self.pool.lock().ok()?.pick_for_sale(provider, model, now_secs())?;
+        //
+        // And, for a provider whose accounts each hold their own endpoint, only
+        // by one speaking the dialect this lane was declared in: the body in
+        // hand was built for that dialect, and the same rule chose it here as
+        // chose it in the declaration.
+        let picked = {
+            let mut pool = self.pool.lock().ok()?;
+            let now = now_secs();
+            let wire = pool.lane_wire(provider, model, now);
+            pool.pick_for_sale(provider, model, wire, now)?
+        };
         match keychain::get(&picked.keychain_ref).ok().flatten() {
             Some(token) => Some(LeasedToken {
                 token,
                 account_id: picked.account_id,
                 upstream_account_id: picked.upstream_account_id,
                 upstream_base: picked.upstream_base,
+                upstream_wire: picked.upstream_wire,
                 upstream_model: picked.upstream_model,
             }),
             None => {
@@ -1151,6 +1226,12 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
             .ok()
             .flatten()
             .filter(|s| !s.is_empty());
+        // Read for a custom account only: it is what turns that base into a
+        // full URL and decides the header its key is sent in.
+        a.upstream_wire = match a.upstream_base.is_some() {
+            true => Some(custom_wire(store, &tool.account_id).await),
+            false => None,
+        };
         // Empty for every other provider: their model ids are the market's
         // already, so there is nothing to translate on the way out.
         a.model_aliases = listing.map(|l| l.aliases).unwrap_or_default();

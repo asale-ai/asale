@@ -135,6 +135,76 @@ impl std::fmt::Display for Provider {
     }
 }
 
+/// The wire format an upstream speaks.
+///
+/// Every vendor's own API has exactly one, and which one is settled at compile
+/// time by the [`Provider`]: `claude` answers Anthropic Messages, `codex`
+/// answers OpenAI Responses. A custom endpoint is the exception — its operator
+/// points it at whatever host they hold a key for — so there the wire is a
+/// property of the *account*, declared with its supply and carried to the
+/// gateway, which is what decides the body it builds for that lane.
+///
+/// The four are exactly the dialects the gateway can translate between; a lane
+/// speaking anything else is one the market has no way to serve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Wire {
+    /// OpenAI chat completions — `POST {base}/chat/completions`, bearer key.
+    Openai,
+    /// OpenAI Responses — `POST {base}/responses`, bearer key.
+    Responses,
+    /// Anthropic Messages — `POST {base}/messages`, `x-api-key` and a version
+    /// header rather than a bearer.
+    Claude,
+    /// Google Generative Language — `POST {base}/models/{model}:generateContent`,
+    /// which puts the model *and* whether it streams in the path, keyed by
+    /// `x-goog-api-key`.
+    Gemini,
+}
+
+impl Wire {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Wire::Openai => "openai",
+            Wire::Responses => "responses",
+            Wire::Claude => "claude",
+            Wire::Gemini => "gemini",
+        }
+    }
+
+    /// Parse a wire/settings string. `None` for anything unknown — including
+    /// the empty string a publisher sends for a lane whose provider settles its
+    /// own wire, which is why callers treat `None` as "ask the provider" rather
+    /// than as an error.
+    pub fn from_str_opt(s: &str) -> Option<Wire> {
+        Some(match s.trim() {
+            "openai" => Wire::Openai,
+            "responses" => Wire::Responses,
+            "claude" => Wire::Claude,
+            "gemini" => Wire::Gemini,
+            _ => return None,
+        })
+    }
+
+    /// What the connect form offers, in the order it offers them.
+    pub const ALL: [Wire; 4] = [Wire::Openai, Wire::Claude, Wire::Gemini, Wire::Responses];
+}
+
+impl Default for Wire {
+    /// What a custom endpoint is assumed to speak when nobody said: the schema
+    /// the great majority of resellable endpoints serve, and the one every such
+    /// account spoke before the wire was a choice at all.
+    fn default() -> Wire {
+        Wire::Openai
+    }
+}
+
+impl std::fmt::Display for Wire {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Catalog vendor slug — the left half of an OpenRouter model id, stored in
 /// `prices.provider`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

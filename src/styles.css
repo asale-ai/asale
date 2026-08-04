@@ -1931,6 +1931,9 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
    a name, a price floor and a concurrency ceiling are each a few characters,
    and stacked they turn a five-field form into a scrolling page. The name takes
    the slack because it is the only one whose length is not known. */
+/* The base-URL shortcuts sit under the field they fill, at the same offset as
+   the hint that would otherwise be there. */
+.field > .band-presets { margin-top: 6px; }
 .ep-terms { display: grid; grid-template-columns: 1fr 132px 148px; gap: var(--s3); align-items: end; }
 .ep-terms .field { margin-bottom: 0; }
 .ep-terms .band-input { width: 100%; }

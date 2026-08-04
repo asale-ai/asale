@@ -49,6 +49,7 @@
 //! and keeping one convention end to end is what stops a band from silently
 //! meaning its own inverse.
 
+use asale_protocol::ids::Wire;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -294,6 +295,12 @@ pub struct AccountRuntime {
     /// every other provider's upstream is the vendor's, and the gateway builds
     /// the URL for it.
     pub upstream_base: Option<String>,
+    /// The dialect that endpoint speaks, for the same one provider. It decides
+    /// the path under `upstream_base` and the header the key is sent in, so it
+    /// travels with the base everywhere the base does. `None` reads as the
+    /// OpenAI schema — what every custom account spoke before this was a
+    /// choice, and still what most of them do.
+    pub upstream_wire: Option<Wire>,
     /// market model id -> the id this account's upstream knows it by.
     ///
     /// Only a `custom` account has any: an aggregator lists
@@ -345,6 +352,7 @@ impl AccountRuntime {
             keychain_ref: keychain_ref.to_string(),
             upstream_account_id: None,
             upstream_base: None,
+            upstream_wire: None,
             model_aliases: BTreeMap::new(),
             plan: None,
             quota_remaining: 0,
@@ -428,6 +436,9 @@ pub struct PickedAccount {
     /// executor that sends the request is the only place that knows which
     /// account — and therefore which endpoint — the task was leased against.
     pub upstream_base: Option<String>,
+    /// See [`AccountRuntime::upstream_wire`]. Carried alongside the base, which
+    /// is meaningless without it.
+    pub upstream_wire: Option<Wire>,
     /// The id this account's upstream knows the leased model by, when it differs
     /// from the market's. `None` means "send the model id as it arrived".
     pub upstream_model: Option<String>,
@@ -484,6 +495,10 @@ pub struct LaneStatusView {
     /// account of a provider that sells this model, and what it may run at once
     /// is those accounts' ceilings added up.
     pub concurrency_max: u32,
+    /// The dialect this lane's account speaks, for the one provider whose
+    /// accounts may each speak a different one (`custom`). `None` everywhere
+    /// else — and it is what marks a view as belonging to such an account.
+    pub upstream_wire: Option<Wire>,
 }
 
 pub struct AccountPool {
@@ -567,27 +582,52 @@ impl AccountPool {
     /// subscription locally is not a sale, so neither the sell switch nor the
     /// lane pauses (which are about selling) apply.
     pub fn pick(&mut self, provider: &str, now: i64) -> Option<PickedAccount> {
-        self.pick_where(provider, None, now, false)
+        self.pick_where(provider, None, None, now, false)
     }
 
     /// Pick an account for local (non-sale) use of one model. Honours the
     /// lane's cooldown — a lane that just failed is unhealthy for local traffic
     /// too — but not its market pauses.
     pub fn pick_local(&mut self, provider: &str, model: &str, now: i64) -> Option<PickedAccount> {
-        self.pick_where(provider, Some(model), now, false)
+        self.pick_where(provider, Some(model), None, now, false)
     }
 
     /// Pick an account that is switched on for selling *and* whose lane for
     /// this model is serving — the only accounts the relay executor may serve
     /// market traffic from.
-    pub fn pick_for_sale(&mut self, provider: &str, model: &str, now: i64) -> Option<PickedAccount> {
-        self.pick_where(provider, Some(model), now, true)
+    ///
+    /// `wire` narrows it to accounts speaking one dialect. The lane was
+    /// declared under a single one (see [`AccountPool::lane_wire`]) and the
+    /// gateway has already built a body in it, so an account speaking another
+    /// is not a substitute — it would answer 400 to a request it never
+    /// understood. `None` does not narrow, which is every provider whose
+    /// accounts all speak the same dialect by construction.
+    pub fn pick_for_sale(
+        &mut self,
+        provider: &str,
+        model: &str,
+        wire: Option<Wire>,
+        now: i64,
+    ) -> Option<PickedAccount> {
+        self.pick_where(provider, Some(model), wire, now, true)
     }
 
-    fn pick_where(&mut self, provider: &str, model: Option<&str>, now: i64, sell_only: bool) -> Option<PickedAccount> {
+    fn pick_where(
+        &mut self,
+        provider: &str,
+        model: Option<&str>,
+        wire: Option<Wire>,
+        now: i64,
+        sell_only: bool,
+    ) -> Option<PickedAccount> {
         let mut best: Option<usize> = None;
         for (i, a) in self.accounts.iter().enumerate() {
             if a.provider != provider || (sell_only && !a.sell_enabled) {
+                continue;
+            }
+            // Only ever narrows accounts that have a dialect of their own; a
+            // provider whose upstream is the vendor's is not excluded by it.
+            if wire.is_some() && a.upstream_wire.is_some() && a.upstream_wire != wire {
                 continue;
             }
             let ok = match (model, sell_only) {
@@ -632,6 +672,7 @@ impl AccountPool {
             keychain_ref: a.keychain_ref.clone(),
             upstream_account_id: a.upstream_account_id.clone(),
             upstream_base: a.upstream_base.clone(),
+            upstream_wire: a.upstream_wire,
             // Only when this account spells the model differently from the
             // market. `pick` (the local, non-sale route) passes no model, and
             // there is nothing to translate for it either — a local caller is
@@ -867,10 +908,45 @@ impl AccountPool {
                     min_ratio: a.sell_min_ratio,
                     max_ratio: a.sell_max_ratio,
                     concurrency_max: a.concurrency_max,
+                    upstream_wire: a.upstream_wire,
                 });
             }
         }
         out
+    }
+
+    /// The dialect this device offers `model` in, where its accounts may each
+    /// speak a different one.
+    ///
+    /// One market lane is one (model, device) pair and carries a single
+    /// dialect, so a device holding endpoints of two protocols that both serve
+    /// a model can only offer it in one of them. The dialect with the most
+    /// headroom behind it wins — that keeps the largest endpoint sellable — and
+    /// ties break on the dialect's own name, so the answer does not move
+    /// between rebuilds and the declaration keeps agreeing with the pick.
+    ///
+    /// `None` when no account of this provider speaks a dialect of its own,
+    /// which is every provider but `custom`.
+    pub fn lane_wire(&self, provider: &str, model: &str, now: i64) -> Option<Wire> {
+        let mut headroom: BTreeMap<&'static str, (i64, Wire)> = BTreeMap::new();
+        let mut any: Option<Wire> = None;
+        for a in self.accounts.iter().filter(|a| a.provider == provider) {
+            let (Some(w), true) = (a.upstream_wire, a.lanes.contains_key(model)) else {
+                continue;
+            };
+            // Something to fall back on when every lane is paused: the offer is
+            // still declared (with its reason), and it has to say *some*
+            // dialect for the day it comes back.
+            any.get_or_insert(w);
+            if a.sell_enabled && a.lane_available(model, now) {
+                headroom.entry(w.as_str()).or_insert((0, w)).0 += a.quota_remaining as i64;
+            }
+        }
+        headroom
+            .into_values()
+            .max_by_key(|(h, w)| (*h, std::cmp::Reverse(w.as_str())))
+            .map(|(_, w)| w)
+            .or(any)
     }
 
     /// Snapshot for the UI (spec §2.1 `list_accounts`).
@@ -939,8 +1015,8 @@ mod tests {
         // — while Haiku is at 80% and inside the band.
         p.apply_prices(&prices(&[(OPUS, 38), (HAIKU, 80)]), now);
 
-        assert!(p.pick_for_sale("claude", OPUS, now).is_none(), "withheld lane must not sell");
-        assert!(p.pick_for_sale("claude", HAIKU, now).is_some());
+        assert!(p.pick_for_sale("claude", OPUS, None, now).is_none(), "withheld lane must not sell");
+        assert!(p.pick_for_sale("claude", HAIKU, None, now).is_some());
 
         let views = p.lane_views(now);
         let opus = views.iter().find(|v| v.model == OPUS).unwrap();
@@ -959,22 +1035,22 @@ mod tests {
         let mut p = AccountPool::new(Strategy::RoundRobin);
         p.set_accounts(vec![banded("a", (60, 100))]);
         p.apply_prices(&prices(&[(OPUS, 38)]), now);
-        assert!(p.pick_for_sale("claude", OPUS, now).is_none());
+        assert!(p.pick_for_sale("claude", OPUS, None, now).is_none());
 
         // Back inside the band, but only just: the margin keeps a price parked
         // on the edge from flapping the lane on and off.
         p.apply_prices(&prices(&[(OPUS, 60)]), now + 10);
-        assert!(p.pick_for_sale("claude", OPUS, now + 10).is_none(), "on the edge is not back");
+        assert!(p.pick_for_sale("claude", OPUS, None, now + 10).is_none(), "on the edge is not back");
 
         // Clear of the edge, but the dwell has not elapsed yet.
         p.apply_prices(&prices(&[(OPUS, 70)]), now + 20);
-        assert!(p.pick_for_sale("claude", OPUS, now + 20).is_none());
+        assert!(p.pick_for_sale("claude", OPUS, None, now + 20).is_none());
 
         // Held there past the dwell (plus this lane's jitter, which is bounded
         // by the dwell itself) — now it comes back.
         let late = now + 20 + 2 * PRICE_REENTRY_DWELL_SECS;
         p.apply_prices(&prices(&[(OPUS, 70)]), late);
-        assert!(p.pick_for_sale("claude", OPUS, late).is_some());
+        assert!(p.pick_for_sale("claude", OPUS, None, late).is_some());
     }
 
     #[test]
@@ -988,7 +1064,7 @@ mod tests {
         p.apply_prices(&prices(&[(OPUS, 45)]), now + 20);
         let late = now + 10 + 2 * PRICE_REENTRY_DWELL_SECS;
         p.apply_prices(&prices(&[(OPUS, 70)]), late);
-        assert!(p.pick_for_sale("claude", OPUS, late).is_none(), "the clock restarts on a relapse");
+        assert!(p.pick_for_sale("claude", OPUS, None, late).is_none(), "the clock restarts on a relapse");
     }
 
     #[test]
@@ -997,14 +1073,14 @@ mod tests {
         let mut p = AccountPool::new(Strategy::RoundRobin);
         p.set_accounts(vec![banded("a", (60, 100))]);
         p.apply_prices(&prices(&[(OPUS, 38)]), now);
-        assert!(p.pick_for_sale("claude", OPUS, now).is_none());
+        assert!(p.pick_for_sale("claude", OPUS, None, now).is_none());
 
         // The operator lowers their own floor. That is a decision about what
         // they will accept, not a market move, so it does not serve out the
         // dwell that exists to stop a fleet re-entering in lockstep.
         p.set_accounts(vec![banded("a", (20, 100))]);
         p.apply_prices(&prices(&[(OPUS, 38)]), now + 1);
-        assert!(p.pick_for_sale("claude", OPUS, now + 1).is_some());
+        assert!(p.pick_for_sale("claude", OPUS, None, now + 1).is_some());
     }
 
     #[test]
@@ -1016,7 +1092,7 @@ mod tests {
         // The market went unreachable: being offline is not a reason to stop
         // selling on the terms this device already had.
         p.apply_prices(&BTreeMap::new(), now + 10);
-        assert!(p.pick_for_sale("claude", OPUS, now + 10).is_some());
+        assert!(p.pick_for_sale("claude", OPUS, None, now + 10).is_some());
         assert_eq!(p.lane_views(now + 10)[0].ratio, None);
     }
 
@@ -1143,7 +1219,7 @@ mod tests {
         p.set_accounts(vec![off, on]);
 
         // The relay only ever serves from the account switched on for selling…
-        assert_eq!(p.pick_for_sale("claude", OPUS, now).unwrap().account_id, "asale-owned");
+        assert_eq!(p.pick_for_sale("claude", OPUS, None, now).unwrap().account_id, "asale-owned");
         assert!(p.any_sellable("claude", OPUS, now));
         // …while the local direct route may still use either.
         assert!(p.pick("claude", now).is_some());
@@ -1152,7 +1228,7 @@ mod tests {
         let mut both_off = acct("asale-owned", 100);
         both_off.sell_enabled = false;
         p.set_accounts(vec![both_off]);
-        assert!(p.pick_for_sale("claude", OPUS, now).is_none());
+        assert!(p.pick_for_sale("claude", OPUS, None, now).is_none());
         assert!(!p.any_sellable("claude", OPUS, now));
         assert!(p.any_available("claude", now));
     }
@@ -1186,11 +1262,11 @@ mod tests {
         let now = 1000;
         let mut p = AccountPool::new(Strategy::RoundRobin);
         p.set_accounts(vec![sellable("a")]);
-        p.pick_for_sale("claude", OPUS, now).unwrap();
+        p.pick_for_sale("claude", OPUS, None, now).unwrap();
         p.on_error("claude", "a", OPUS, UpstreamErrorKind::ServerError, "500", now);
 
-        assert!(p.pick_for_sale("claude", OPUS, now).is_none(), "the failed lane is cooling");
-        assert!(p.pick_for_sale("claude", HAIKU, now).is_some(), "its sibling keeps selling");
+        assert!(p.pick_for_sale("claude", OPUS, None, now).is_none(), "the failed lane is cooling");
+        assert!(p.pick_for_sale("claude", HAIKU, None, now).is_some(), "its sibling keeps selling");
         assert!(!p.any_sellable("claude", OPUS, now));
         assert!(p.any_sellable("claude", HAIKU, now));
     }
@@ -1204,11 +1280,11 @@ mod tests {
         // First two failures self-heal on the ladder.
         let mut at = now;
         for (i, rung) in LANE_COOLDOWN_LADDER.iter().enumerate() {
-            p.pick_for_sale("claude", OPUS, at).unwrap();
+            p.pick_for_sale("claude", OPUS, None, at).unwrap();
             assert_eq!(p.on_error("claude", "a", OPUS, UpstreamErrorKind::ServerError, "500", at), None);
-            assert!(p.pick_for_sale("claude", OPUS, at + rung - 1).is_none(), "rung {i} still cooling");
+            assert!(p.pick_for_sale("claude", OPUS, None, at + rung - 1).is_none(), "rung {i} still cooling");
             at += rung + 1;
-            assert!(p.pick_for_sale("claude", OPUS, at).is_some(), "rung {i} must clear on its own");
+            assert!(p.pick_for_sale("claude", OPUS, None, at).is_some(), "rung {i} must clear on its own");
             // That pick leased a slot; hand it back without clearing the streak
             // (only a success does that).
             p.find("claude", "a").unwrap().in_use -= 1;
@@ -1216,13 +1292,13 @@ mod tests {
 
         // The third consecutive failure is not a bad minute — it is a broken
         // lane, and it stays out until someone looks at it.
-        p.pick_for_sale("claude", OPUS, at).unwrap();
+        p.pick_for_sale("claude", OPUS, None, at).unwrap();
         assert_eq!(
             p.on_error("claude", "a", OPUS, UpstreamErrorKind::ServerError, "500", at),
             Some(PauseReason::Breaker)
         );
         assert_eq!(p.find("claude", "a").unwrap().lanes[OPUS].fail_streak, LANE_BREAKER_THRESHOLD);
-        assert!(p.pick_for_sale("claude", OPUS, at + 86_400).is_none(), "a breaker does not time out");
+        assert!(p.pick_for_sale("claude", OPUS, None, at + 86_400).is_none(), "a breaker does not time out");
 
         let view = p.lane_views(at).into_iter().find(|v| v.model == OPUS).unwrap();
         assert_eq!(view.status, "paused");
@@ -1231,7 +1307,7 @@ mod tests {
 
         // …and the operator's resume puts it straight back.
         p.resume_lane("claude", "a", OPUS);
-        assert!(p.pick_for_sale("claude", OPUS, at).is_some());
+        assert!(p.pick_for_sale("claude", OPUS, None, at).is_some());
         assert_eq!(p.find("claude", "a").unwrap().lanes[OPUS].fail_streak, 0);
     }
 
@@ -1240,15 +1316,15 @@ mod tests {
         let now = 1000;
         let mut p = AccountPool::new(Strategy::RoundRobin);
         p.set_accounts(vec![sellable("a")]);
-        p.pick_for_sale("claude", OPUS, now).unwrap();
+        p.pick_for_sale("claude", OPUS, None, now).unwrap();
         p.on_error("claude", "a", OPUS, UpstreamErrorKind::ServerError, "500", now);
         let later = now + LANE_COOLDOWN_LADDER[0] + 1;
-        p.pick_for_sale("claude", OPUS, later).unwrap();
+        p.pick_for_sale("claude", OPUS, None, later).unwrap();
         p.on_success("claude", "a", OPUS, 100);
         assert_eq!(p.find("claude", "a").unwrap().lanes[OPUS].fail_streak, 0);
         // So the next isolated failure starts at the first rung again, rather
         // than landing one step from the breaker.
-        p.pick_for_sale("claude", OPUS, later + 1).unwrap();
+        p.pick_for_sale("claude", OPUS, None, later + 1).unwrap();
         assert_eq!(
             p.on_error("claude", "a", OPUS, UpstreamErrorKind::ServerError, "500", later + 1),
             None
@@ -1261,7 +1337,7 @@ mod tests {
         let reset = now + 600;
         let mut p = AccountPool::new(Strategy::RoundRobin);
         p.set_accounts(vec![sellable("a")]);
-        p.pick_for_sale("claude", OPUS, now).unwrap();
+        p.pick_for_sale("claude", OPUS, None, now).unwrap();
         let paused = p.on_error(
             "claude",
             "a",
@@ -1287,7 +1363,7 @@ mod tests {
         a.expires_at = Some(now + 3600);
         let mut p = AccountPool::new(Strategy::RoundRobin);
         p.set_accounts(vec![a.clone()]);
-        p.pick_for_sale("claude", OPUS, now).unwrap();
+        p.pick_for_sale("claude", OPUS, None, now).unwrap();
         assert_eq!(
             p.on_error("claude", "a", OPUS, UpstreamErrorKind::AuthFailed, "401", now),
             Some(PauseReason::Auth)
@@ -1302,7 +1378,7 @@ mod tests {
         // A refreshed token (new expiry) is the recovery signal.
         a.expires_at = Some(now + 7200);
         p.set_accounts(vec![a]);
-        assert!(p.pick_for_sale("claude", OPUS, now).is_some());
+        assert!(p.pick_for_sale("claude", OPUS, None, now).is_some());
         assert!(p.lane_views(now).iter().all(|v| v.paused_reason.is_none()));
     }
 
@@ -1318,7 +1394,7 @@ mod tests {
         p.on_error("claude", "a", OPUS, UpstreamErrorKind::AuthFailed, "401", now);
         p.resume_lane("claude", "a", OPUS);
         assert!(p.lane_views(now).iter().all(|v| v.paused_reason.is_none()), "every lane comes back");
-        assert!(p.pick_for_sale("claude", HAIKU, now).is_some(), "a lane nobody named still serves");
+        assert!(p.pick_for_sale("claude", HAIKU, None, now).is_some(), "a lane nobody named still serves");
         assert_eq!(p.statuses(now)[0].status, "available", "the account-level flag goes too");
     }
 
@@ -1331,8 +1407,8 @@ mod tests {
         p.set_accounts(vec![sellable("a")]);
         p.pause_lane("claude", "a", HAIKU, PauseReason::Breaker, 0);
         p.resume_lane("claude", "a", OPUS);
-        assert!(p.pick_for_sale("claude", HAIKU, now).is_none());
-        assert!(p.pick_for_sale("claude", OPUS, now).is_some());
+        assert!(p.pick_for_sale("claude", HAIKU, None, now).is_none());
+        assert!(p.pick_for_sale("claude", OPUS, None, now).is_some());
     }
 
     #[test]
@@ -1344,8 +1420,8 @@ mod tests {
         p.set_accounts(vec![sellable("a")]);
         p.pause_lane("claude", "a", OPUS, PauseReason::Breaker, 0);
         p.set_accounts(vec![sellable("a")]);
-        assert!(p.pick_for_sale("claude", OPUS, now).is_none());
-        assert!(p.pick_for_sale("claude", HAIKU, now).is_some());
+        assert!(p.pick_for_sale("claude", OPUS, None, now).is_none());
+        assert!(p.pick_for_sale("claude", HAIKU, None, now).is_some());
     }
 
     #[test]
@@ -1356,7 +1432,7 @@ mod tests {
         let mut p = AccountPool::new(Strategy::RoundRobin);
         p.set_accounts(vec![sellable("a")]);
         p.pause_lane("claude", "a", OPUS, PauseReason::Breaker, 0);
-        assert!(p.pick_for_sale("claude", OPUS, now).is_none());
+        assert!(p.pick_for_sale("claude", OPUS, None, now).is_none());
         assert!(p.pick("claude", now).is_some());
     }
 

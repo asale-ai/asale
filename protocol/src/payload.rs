@@ -1,6 +1,6 @@
 //! Frame payload bodies (spec §2.4).
 
-use crate::ids::{Provider, TokenType};
+use crate::ids::{Provider, TokenType, Wire};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -69,6 +69,19 @@ pub struct SupplyItem {
     /// again; 0 when it does not know, or when it needs its operator to act.
     #[serde(default)]
     pub resume_at: i64,
+    /// The wire format this lane's upstream speaks, when its provider does not
+    /// settle that on its own.
+    ///
+    /// Only a `custom` lane fills this in: its host is the operator's, so the
+    /// dialect is a property of the account rather than of the provider. Every
+    /// other provider's upstream is the vendor's own and its wire is known to
+    /// the gateway at compile time.
+    ///
+    /// Empty means "whatever the provider implies" — which is also what an
+    /// older publisher sends, and what a `custom` lane meant back when every
+    /// such endpoint was assumed to speak the OpenAI schema.
+    #[serde(default)]
+    pub wire: String,
 }
 
 fn default_true() -> bool {
@@ -95,6 +108,7 @@ impl SupplyItem {
             available: true,
             paused_reason: String::new(),
             resume_at: 0,
+            wire: String::new(),
         }
     }
 
@@ -105,6 +119,22 @@ impl SupplyItem {
         self.paused_reason = reason.to_string();
         self.resume_at = resume_at;
         self
+    }
+
+    /// The same lane, speaking a dialect its provider does not imply. Only a
+    /// `custom` lane has one to declare.
+    pub fn speaking(mut self, wire: Wire) -> SupplyItem {
+        self.wire = wire.as_str().to_string();
+        self
+    }
+
+    /// The declared wire, or `None` for a lane that left it to its provider —
+    /// an older publisher, or any provider whose upstream is the vendor's own.
+    /// An unrecognised value reads as `None` too: a gateway that does not know
+    /// the dialect cannot build for it, and falling back to the provider's is
+    /// the same answer it would have given before the field existed.
+    pub fn declared_wire(&self) -> Option<Wire> {
+        Wire::from_str_opt(&self.wire)
     }
 }
 
@@ -171,6 +201,7 @@ mod tests {
             available: true,
             paused_reason: String::new(),
             resume_at: 0,
+            wire: String::new(),
         };
         let v = serde_json::to_value(&item).unwrap();
         assert_eq!(v["provider"], "claude");
@@ -190,5 +221,35 @@ mod tests {
         assert!(item.available);
         assert_eq!(item.paused_reason, "");
         assert_eq!(item.resume_at, 0);
+        // The wire came later still: no field means the lane's provider settles
+        // its own dialect, which is what every lane meant before this existed.
+        assert_eq!(item.declared_wire(), None);
+    }
+
+    #[test]
+    fn a_custom_lane_carries_the_dialect_its_endpoint_speaks() {
+        let item = SupplyItem::offered("claude-opus-5", Provider::Custom, 10, 1, "", 2)
+            .speaking(Wire::Claude);
+        let v = serde_json::to_value(&item).unwrap();
+        assert_eq!(v["wire"], "claude");
+        let back: SupplyItem = serde_json::from_value(v).unwrap();
+        assert_eq!(back.declared_wire(), Some(Wire::Claude));
+    }
+
+    #[test]
+    fn a_dialect_this_build_does_not_know_reads_as_undeclared() {
+        // A newer publisher offering a wire this gateway cannot build for. It
+        // must not parse as *some* dialect: falling back to the provider's is
+        // the answer this build would have given anyway, and guessing would put
+        // a body the endpoint cannot read on the wire.
+        let item: SupplyItem = serde_json::from_value(serde_json::json!({
+            "model": "claude-opus-5",
+            "provider": "custom",
+            "window_remaining": 10,
+            "price_min": 1,
+            "wire": "bedrock",
+        }))
+        .unwrap();
+        assert_eq!(item.declared_wire(), None);
     }
 }

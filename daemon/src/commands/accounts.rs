@@ -6,7 +6,7 @@ use crate::cli_scan;
 use crate::keychain;
 use crate::publisher;
 use crate::state::AppState;
-use asale_client_core::{cli_import, discovery, Provider};
+use asale_client_core::{cli_import, discovery, Provider, Wire};
 use serde_json::{json, Value};
 use super::sell::{accounts_changed};
 use super::{R, err, now_secs};
@@ -506,30 +506,34 @@ pub async fn resume_lane(
     Ok(json!({"resumed": true, "provider": provider, "account_id": account_id, "model": model}))
 }
 
-// ── Custom endpoints (internal) ──────────────────────────────────
+// ── Custom endpoints ─────────────────────────────────────────────
 //
-// A custom account is an OpenAI-compatible endpoint the operator supplies: a
-// base URL, a key, and whatever models that endpoint serves. It sells through
-// exactly the same path as a subscription — same lanes, same price band, same
-// concurrency ceiling, same metering — and differs in only two places: the
-// upstream URL travels with the account instead of being built by the gateway
-// (see `executor::execute`), and the model set comes from the endpoint's own
-// `/models` rather than from a vendor's plan.
+// A custom account is an endpoint the operator supplies: a base URL, a key, and
+// whatever models that endpoint serves. It sells through exactly the same path
+// as a subscription — same lanes, same price band, same concurrency ceiling,
+// same metering — and differs in only two places: the upstream URL travels with
+// the account instead of being built by the gateway (see `executor::execute`),
+// and the model set comes from the endpoint's own model list rather than from a
+// vendor's plan.
 //
-// This is platform-internal machinery, not a seller feature: it exists to put
-// supply behind models the subscription sellers happen not to cover. The
-// commands below are refused unless the daemon was started with
-// `ASALE_CUSTOM_ENDPOINTS=1`, so an ordinary install has no way to reach them
-// even if the RPC name is known.
+// It began as platform-internal machinery for putting supply behind models the
+// subscription sellers happen not to cover, armed by `ASALE_CUSTOM_ENDPOINTS=1`.
+// It is now an ordinary way to sell, offered to everyone; the variable survives
+// only as `=0`, for a build that should not have it at all.
 
-/// Env var that arms the custom-endpoint commands.
+/// Env var that turns the custom-endpoint commands off.
 const CUSTOM_ENDPOINTS_ENV: &str = "ASALE_CUSTOM_ENDPOINTS";
 
-/// Whether this daemon is running the internal custom-endpoint feature.
+/// Whether this daemon is running the custom-endpoint feature.
+///
+/// On unless explicitly turned off. It started as platform-internal machinery
+/// armed by this variable; connecting an endpoint of one's own is now an
+/// ordinary way to sell, so an install that says nothing gets it. The variable
+/// stays as the way to build a client that does not have it at all.
 pub fn custom_endpoints_enabled() -> bool {
-    matches!(
+    !matches!(
         std::env::var(CUSTOM_ENDPOINTS_ENV).ok().as_deref().map(str::trim),
-        Some("1") | Some("true") | Some("yes")
+        Some("0") | Some("false") | Some("no")
     )
 }
 
@@ -553,7 +557,7 @@ pub async fn refresh_custom_endpoint(state: &AppState, account_id: String) -> R<
     if !custom_endpoints_enabled() {
         return Err(cmd_err!(
             "errors.cli.customEndpointsDisabled",
-            "custom endpoints are an internal feature; start the daemon with ASALE_CUSTOM_ENDPOINTS=1"
+            "custom endpoints are turned off on this client (ASALE_CUSTOM_ENDPOINTS=0)"
         ));
     }
     let tool = state
@@ -574,7 +578,11 @@ pub async fn refresh_custom_endpoint(state: &AppState, account_id: String) -> R<
     let Some(key) = keychain::get(&tool.keychain_ref).ok().flatten() else {
         return Err(cmd_err!("errors.cli.customEndpointNoKey", "this endpoint has no key in the secret store"));
     };
-    let models = discovery::custom_endpoint_models(&base, &key)
+    // Asked in the protocol it was connected under. Re-detecting here would let
+    // a re-read quietly change what this account speaks, which is a decision
+    // for the connect form, not for a refresh button.
+    let wire = publisher::custom_wire(&state.store, &account_id).await;
+    let models = discovery::custom_endpoint_models(&base, &key, wire)
         .await
         .map_err(|e| cmd_err!("errors.cli.customEndpointUnreachable", format!("endpoint check failed: {e}")))?;
     publisher::store_custom_models(&state.store, &account_id, &models).await.map_err(err)?;
@@ -588,22 +596,24 @@ pub async fn refresh_custom_endpoint(state: &AppState, account_id: String) -> R<
     }))
 }
 
-/// Remove a custom endpoint: the account row, its key, and the two settings
-/// that only this kind of account has.
+/// Remove a custom endpoint: the account row, its key, and the settings that
+/// only this kind of account has.
 ///
-/// `remove_account` handles the first two for every provider; the base URL and
-/// the cached model list are this feature's own, and leaving them behind would
-/// silently re-arm a re-added endpoint with a stale list.
+/// `remove_account` handles the first two for every provider; the base URL, the
+/// protocol and the cached model list are this feature's own, and leaving them
+/// behind would silently re-arm a re-added endpoint with a stale list — or,
+/// worse, with the dialect the *previous* endpoint of that name spoke.
 pub async fn remove_custom_endpoint(state: &AppState, account_id: String) -> R<bool> {
     if !custom_endpoints_enabled() {
         return Err(cmd_err!(
             "errors.cli.customEndpointsDisabled",
-            "custom endpoints are an internal feature; start the daemon with ASALE_CUSTOM_ENDPOINTS=1"
+            "custom endpoints are turned off on this client (ASALE_CUSTOM_ENDPOINTS=0)"
         ));
     }
     let removed =
         remove_account(state, publisher::CUSTOM_PROVIDER.to_string(), account_id.clone()).await?;
     let _ = state.store.set_setting(&publisher::custom_base_key(&account_id), "").await;
+    let _ = state.store.set_setting(&publisher::custom_wire_key(&account_id), "").await;
     let _ = publisher::store_custom_models(&state.store, &account_id, &[]).await;
     Ok(removed)
 }
@@ -612,11 +622,16 @@ pub async fn remove_custom_endpoint(state: &AppState, account_id: String) -> R<b
 /// the market.
 ///
 /// The endpoint is probed before anything is stored: `GET {base}/models` is the
-/// one call every OpenAI-compatible surface answers, so it verifies the base
-/// URL and the key together and returns the model list in the same round trip.
-/// A base or key that does not work fails here rather than on the first
-/// consumer request, where it would cost a buyer a turn and this device its
-/// reputation.
+/// one call all four dialects answer, so it verifies the base URL and the key
+/// together and returns the model list in the same round trip. A base or key
+/// that does not work fails here rather than on the first consumer request,
+/// where it would cost a buyer a turn and this device its reputation.
+///
+/// `wire` is the protocol the endpoint speaks. Omitted, it is *found* — the
+/// probe tries each dialect and keeps the first that answers, because the
+/// moment of connecting is when its operator is least sure (a reseller's docs
+/// say "OpenAI-compatible" for a host that also serves `/messages`) and a wrong
+/// answer is only discovered on the first sale.
 ///
 /// `min_ratio` is the floor this endpoint sells at, in whole percent *of* list
 /// price — the same number and the same convention as a subscription's price
@@ -632,6 +647,7 @@ pub async fn connect_custom_endpoint(
     state: &AppState,
     base_url: String,
     api_key: String,
+    wire: Option<String>,
     label: Option<String>,
     min_ratio: Option<i64>,
     concurrency: Option<i64>,
@@ -640,7 +656,7 @@ pub async fn connect_custom_endpoint(
     if !custom_endpoints_enabled() {
         return Err(cmd_err!(
             "errors.cli.customEndpointsDisabled",
-            "custom endpoints are an internal feature; start the daemon with ASALE_CUSTOM_ENDPOINTS=1"
+            "custom endpoints are turned off on this client (ASALE_CUSTOM_ENDPOINTS=0)"
         ));
     }
     let base = base_url.trim().trim_end_matches('/').to_string();
@@ -664,11 +680,33 @@ pub async fn connect_custom_endpoint(
         ));
     }
 
-    // The probe is the connect check: it answers "is this an OpenAI-compatible
-    // endpoint, does this key work on it, and what does it serve" at once.
-    let models = discovery::custom_endpoint_models(&base, &key)
-        .await
-        .map_err(|e| cmd_err!("errors.cli.customEndpointUnreachable", format!("endpoint check failed: {e}")))?;
+    // A named protocol this build cannot speak is refused rather than quietly
+    // demoted to the default: it would connect, sell, and then answer every
+    // request in a dialect the endpoint never agreed to.
+    let asked = match wire.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
+        None => None,
+        Some(w) => Some(Wire::from_str_opt(w).ok_or_else(|| {
+            cmd_err!(
+                "errors.cli.customWireUnknown",
+                format!("unknown endpoint protocol `{w}` (openai | claude | gemini | responses)")
+            )
+        })?),
+    };
+
+    // The probe is the connect check: it answers "is this an endpoint of that
+    // protocol, does this key work on it, and what does it serve" at once —
+    // and, when no protocol was named, which one it is.
+    let (wire, models) = match asked {
+        Some(w) => {
+            let models = discovery::custom_endpoint_models(&base, &key, w).await.map_err(|e| {
+                cmd_err!("errors.cli.customEndpointUnreachable", format!("endpoint check failed: {e}"))
+            })?;
+            (w, models)
+        }
+        None => discovery::detect_custom_endpoint_wire(&base, &key)
+            .await
+            .map_err(|e| cmd_err!("errors.cli.customEndpointUnreachable", format!("endpoint check failed: {e}")))?,
+    };
     if models.is_empty() {
         return Err(cmd_err!(
             "errors.cli.customEndpointNoModels",
@@ -687,6 +725,11 @@ pub async fn connect_custom_endpoint(
     let token_ref = keychain::token_ref(provider, &account_id);
     keychain::set(&token_ref, &key).map_err(err)?;
     state.store.set_setting(&publisher::custom_base_key(&account_id), &base).await.map_err(err)?;
+    state
+        .store
+        .set_setting(&publisher::custom_wire_key(&account_id), wire.as_str())
+        .await
+        .map_err(err)?;
     // The probe's answer is the freshest there is; storing it here means the
     // account is sellable immediately instead of after the first rebuild goes
     // and asks the endpoint again.
@@ -724,6 +767,9 @@ pub async fn connect_custom_endpoint(
         "provider": provider,
         "account_id": account_id,
         "base_url": base,
+        // Returned whether it was asked for or found, because those are the
+        // same answer to the operator and the found one is the news.
+        "wire": wire.as_str(),
         "endpoint_models": models.len(),
         "sellable_models": sellable,
         "sell_enabled": sell_on,
@@ -740,7 +786,7 @@ pub async fn list_custom_endpoints(state: &AppState) -> R<Value> {
     if !custom_endpoints_enabled() {
         return Err(cmd_err!(
             "errors.cli.customEndpointsDisabled",
-            "custom endpoints are an internal feature; start the daemon with ASALE_CUSTOM_ENDPOINTS=1"
+            "custom endpoints are turned off on this client (ASALE_CUSTOM_ENDPOINTS=0)"
         ));
     }
     let tools = state.store.list_tools().await.map_err(err)?;
@@ -756,6 +802,7 @@ pub async fn list_custom_endpoints(state: &AppState) -> R<Value> {
         out.push(json!({
             "account_id": t.account_id,
             "base_url": base,
+            "wire": publisher::custom_wire(&state.store, &t.account_id).await.as_str(),
             "sell_enabled": t.sell_enabled,
             "min_ratio": t.sell_min_ratio,
             "concurrency": t.sell_concurrency,

@@ -4,6 +4,7 @@
 //! consumer never see it.
 
 use crate::protocol::{self, Envelope, HttpRequestPayload, Usage};
+use asale_protocol::ids::Wire;
 use crate::security::QuotaVerifier;
 use async_trait::async_trait;
 use base64::Engine;
@@ -24,19 +25,73 @@ fn with_model(body: &[u8], model_id: &str) -> Option<Vec<u8>> {
     serde_json::to_vec(&v).ok()
 }
 
-/// The chat-completions endpoint under a custom account's base URL.
+/// The endpoint under a custom account's base URL that serves `wire`.
 ///
 /// The base is what its operator pasted, so both spellings people actually use
 /// are accepted: with the `/v1` suffix (`https://host/api/v1`, what a vendor's
 /// docs print) and without it. A base that already names the endpoint is left
 /// alone rather than having a second copy appended.
-fn custom_chat_url(base: &str) -> String {
+///
+/// `built` is the URL the gateway produced, and only Gemini needs it: that
+/// dialect puts the model *and* whether the call streams into the path
+/// (`/models/{model}:streamGenerateContent?alt=sse`), so the tail the gateway
+/// built is what carries the request and only the origin is ours to replace.
+fn custom_url(base: &str, wire: Wire, built: &str) -> String {
     let base = base.trim().trim_end_matches('/');
-    if base.ends_with("/chat/completions") {
-        return base.to_string();
+    let join = |suffix: &str| {
+        if base.ends_with(suffix) {
+            base.to_string()
+        } else {
+            format!("{base}/{suffix}")
+        }
+    };
+    match wire {
+        Wire::Openai => join("chat/completions"),
+        Wire::Responses => join("responses"),
+        Wire::Claude => join("messages"),
+        Wire::Gemini => match built.find("/models/") {
+            Some(i) => format!("{base}{}", &built[i..]),
+            // A built URL with no model in it is one this path cannot complete.
+            // Addressing the collection is wrong but reaches the operator's own
+            // host, where it fails as a 404 they can read — better than sending
+            // the placeholder, which fails as DNS.
+            None => join("models"),
+        },
     }
-    format!("{base}/chat/completions")
 }
+
+/// The header a custom endpoint expects its key in.
+///
+/// Not a matter of taste: an Anthropic-compatible host ignores a bearer and
+/// answers 401 for the missing `x-api-key`, and Google's wants `x-goog-api-key`.
+/// This is only ever applied to a custom account — a *subscription* is a bearer
+/// whatever its upstream's dialect, Anthropic's own OAuth included.
+fn authorize_custom(
+    builder: reqwest::RequestBuilder,
+    wire: Wire,
+    token: &str,
+    headers: &serde_json::Map<String, serde_json::Value>,
+) -> reqwest::RequestBuilder {
+    match wire {
+        Wire::Openai | Wire::Responses => builder.header("authorization", format!("Bearer {token}")),
+        Wire::Claude => {
+            let b = builder.header("x-api-key", token);
+            // The gateway's Claude builder sends this already; a proxy that
+            // rewrites headers is the case worth covering, and a required
+            // header missing costs the whole sale.
+            if headers.keys().any(|k| k.eq_ignore_ascii_case("anthropic-version")) {
+                b
+            } else {
+                b.header("anthropic-version", ANTHROPIC_VERSION)
+            }
+        }
+        Wire::Gemini => builder.header("x-goog-api-key", token),
+    }
+}
+
+/// The Messages API version an Anthropic-compatible host is addressed with.
+/// Mirrors the gateway's own (`translator::claude::ANTHROPIC_VERSION`).
+const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// The line Anthropic requires at the head of a subscription request's system
 /// prompt (see `with_claude_code_system`).
@@ -59,6 +114,11 @@ pub struct LeasedToken {
     /// host the gateway cannot know. `None` means "use the URL the gateway
     /// built", which is every other provider.
     pub upstream_base: Option<String>,
+    /// The dialect that endpoint speaks, which decides both the path under
+    /// `upstream_base` and the header the key travels in. Only read when
+    /// `upstream_base` is set; `None` there means the OpenAI schema, which is
+    /// what every custom account spoke before this was a choice.
+    pub upstream_wire: Option<Wire>,
     /// The id this account's upstream knows the requested model by, when it
     /// differs from the market's. `None` means "send the model id as it
     /// arrived" — true of every provider whose ids the catalog stores natively.
@@ -174,12 +234,18 @@ pub async fn execute(
 
     let method = reqwest::Method::from_bytes(req.upstream.method.as_bytes()).unwrap_or(reqwest::Method::POST);
     // A `custom` account's endpoint belongs to whoever configured it, so the
-    // gateway sends a placeholder and the real URL is assembled here — the one
-    // side that knows which account this task was leased against. Everything
-    // else uses the URL as built: those hosts are the vendors' and are settled
-    // at compile time.
-    let url = match lease.upstream_base.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
-        Some(base) => custom_chat_url(base),
+    // gateway sends a placeholder and both the real URL and the header the key
+    // travels in are assembled here — the one side that knows which account
+    // this task was leased against. Everything else uses the URL as built and a
+    // bearer: those hosts are the vendors' and are settled at compile time.
+    let custom = lease
+        .upstream_base
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .map(|base| (base, lease.upstream_wire.unwrap_or_default()));
+    let url = match custom {
+        Some((base, wire)) => custom_url(base, wire, &req.upstream.url),
         None => req.upstream.url.clone(),
     };
     let mut builder = http.request(method, &url);
@@ -188,7 +254,10 @@ pub async fn execute(
             builder = builder.header(k, s);
         }
     }
-    builder = builder.header("authorization", format!("Bearer {token}"));
+    builder = match custom {
+        Some((_, wire)) => authorize_custom(builder, wire, &token, &req.upstream.headers),
+        None => builder.header("authorization", format!("Bearer {token}")),
+    };
     let mut body = B64.decode(req.upstream.body_b64.as_bytes()).unwrap_or_default();
     // The token we just injected is a Claude Code subscription credential, and
     // the server that built this body does not know that — so the OAuth-only
@@ -786,22 +855,47 @@ mod tests {
 
     #[test]
     fn a_custom_base_reaches_chat_completions_however_it_was_pasted() {
-        use super::custom_chat_url;
+        use super::custom_url;
+        let built = "https://custom.invalid/v1/chat/completions";
         // The two spellings people actually paste: a vendor's documented base
         // (which ends in /v1) and the same thing with a trailing slash.
         assert_eq!(
-            custom_chat_url("https://openrouter.ai/api/v1"),
+            custom_url("https://openrouter.ai/api/v1", Wire::Openai, built),
             "https://openrouter.ai/api/v1/chat/completions"
         );
         assert_eq!(
-            custom_chat_url("https://openrouter.ai/api/v1/"),
+            custom_url("https://openrouter.ai/api/v1/", Wire::Openai, built),
             "https://openrouter.ai/api/v1/chat/completions"
         );
         // Already the endpoint: appending a second copy would 404 an otherwise
         // correct configuration.
         assert_eq!(
-            custom_chat_url("https://host/v1/chat/completions"),
+            custom_url("https://host/v1/chat/completions", Wire::Openai, built),
             "https://host/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn each_dialect_addresses_its_own_endpoint_under_the_pasted_base() {
+        use super::custom_url;
+        assert_eq!(
+            custom_url("https://relay.example/v1", Wire::Claude, "https://custom.invalid/v1/messages"),
+            "https://relay.example/v1/messages"
+        );
+        assert_eq!(
+            custom_url("https://relay.example/v1", Wire::Responses, "https://custom.invalid/v1/responses"),
+            "https://relay.example/v1/responses"
+        );
+        // Gemini is the one whose path carries the request: the model and
+        // whether it streams are in it, and neither is anywhere else, so the
+        // tail the gateway built has to survive the rewrite intact.
+        assert_eq!(
+            custom_url(
+                "https://relay.example/v1beta",
+                Wire::Gemini,
+                "https://custom.invalid/v1beta/models/gemini-3.5-flash:streamGenerateContent?alt=sse",
+            ),
+            "https://relay.example/v1beta/models/gemini-3.5-flash:streamGenerateContent?alt=sse"
         );
     }
 
@@ -1216,6 +1310,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
                 account_id: "dev@example.com".into(),
                 upstream_account_id: self.0.map(String::from),
                 upstream_base: None,
+                upstream_wire: None,
                 upstream_model: None,
             })
         }
@@ -1249,6 +1344,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
                 account_id: "dev@example.com".into(),
                 upstream_account_id: None,
                 upstream_base: None,
+                upstream_wire: None,
                 upstream_model: None,
             })
         }
@@ -1312,6 +1408,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
                     account_id: "dev@example.com".into(),
                     upstream_account_id: Some("acc-stored".into()),
                 upstream_base: None,
+                upstream_wire: None,
                 upstream_model: None,
                 })
             }

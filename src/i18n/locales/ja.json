@@ -252,12 +252,18 @@
     "pasteLabel": "コールバック URL、または認可コードのみ",
     "pastePlaceholder": "http://localhost:37669/callback?code=…",
     "pasteSubmit": "ログインを完了",
-    "connectViaEndpoint": "プラットフォーム接続先",
-    "endpointHint": "{{provider}} のキーを貼り付けてください。発行はこちら:",
+    "connectViaEndpoint": "Base URL と API キー",
+    "endpointTile": "カスタム接続先",
+    "endpointHint": "OpenAI・Anthropic・Gemini・OpenAI Responses のいずれかを話す接続先が使えます。Base URL（/v1 まで）と API キーを入力してください。接続時にまず /models を取得して確認し、応答がなければ保存しません。",
+    "endpointBase": "Base URL",
+    "endpointWire": "プロトコル",
+    "endpointWireAuto": "自動判別",
+    "endpointKey": "API キー",
+    "endpointNamePlaceholder": "openrouter",
     "endpointFloor": "価格の下限",
     "endpointTermsHint": "下限は定価に対する割合で、市場価格がこれを下回ると販売を停止します。この接続先はトークンごとに実費がかかるため、原価割れを防ぐための設定です。キー 1 本につき 1 アカウント：同じ提供元の複数キーは別々の名前で接続してください（同名だと上書きされます）。どちらも後から下のアカウントで変更できます。",
     "endpointChecking": "確認中…",
-    "endpointConnected": "{{account}} を接続しました：{{served}} 個のモデルを提供し、うち {{selling}} 個が取引可能です。"
+    "endpointConnected": "{{account}} を {{wire}} で接続しました：{{served}} 個のモデルを提供し、うち {{selling}} 個が取引可能です。"
   },
   "consume": {
     "title": "購入",

@@ -565,7 +565,7 @@ async fn daily_cap_stops_only_the_account_that_hit_it() {
     let mut pool = state.pool.lock().unwrap();
     // Only "b" may be picked for sale now.
     let picked = pool
-        .pick_for_sale("claude", "claude-opus-5", now)
+        .pick_for_sale("claude", "claude-opus-5", None, now)
         .expect("a sellable account remains");
     assert_eq!(picked.account_id, "b@x.com", "the capped account is skipped");
     drop(pool);
@@ -673,7 +673,7 @@ async fn a_broken_model_stops_selling_and_waits_for_the_operator() {
     {
         let mut pool = state.pool.lock().unwrap();
         for i in 0..3 {
-            pool.pick_for_sale("claude", opus, now + i * 1_000).unwrap();
+            pool.pick_for_sale("claude", opus, None, now + i * 1_000).unwrap();
             pool.on_error(
                 "claude",
                 account,
@@ -953,6 +953,7 @@ async fn a_custom_endpoint_sells_the_catalog_it_can_serve_under_market_ids() {
         &state,
         base.clone(),
         "sk-endpoint-key".into(),
+        None,
         Some("house".into()),
         Some(10),
         Some(12),
@@ -994,19 +995,131 @@ async fn a_custom_endpoint_sells_the_catalog_it_can_serve_under_market_ids() {
     assert_eq!(haiku["provider"], "custom");
     assert_eq!(haiku["concurrency_free"], 12, "the seller's own ceiling, not a constant");
     assert_eq!(haiku["available"], true);
+    // The stub answers an OpenAI model list to anyone, so that is what the
+    // probe found — and the lane says so, because the gateway builds this
+    // lane's body from that answer and nothing else tells it.
+    assert_eq!(r["wire"], "openai");
+    assert_eq!(haiku["wire"], "openai");
 
     std::env::remove_var("ASALE_CUSTOM_ENDPOINTS");
 }
 
+/// A models endpoint that answers only when the key arrives in `header`, the
+/// way an Anthropic-compatible host insists on `x-api-key` and 401s a bearer.
+/// Same reason as [`models_stub`] for using a real socket: the probe's whole
+/// job is to find out which of these a host is.
+async fn models_stub_keyed_by(header: &'static str, ids: &[&str]) -> String {
+    let body = format!(
+        "{{\"data\":[{}]}}",
+        ids.iter().map(|id| format!("{{\"id\":\"{id}\"}}")).collect::<Vec<_>>().join(",")
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else { return };
+            let body = body.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 2048];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+                let resp = if req.contains(&format!("{header}:")) {
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                } else {
+                    "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string()
+                };
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}/v1")
+}
+
 #[tokio::test(flavor = "current_thread")]
-async fn custom_endpoints_are_refused_unless_the_daemon_was_armed_for_them() {
+async fn an_endpoint_that_speaks_anthropic_is_found_and_sold_as_such() {
     let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
-    let _sb = Sandbox::new("custom-off");
+    let _sb = Sandbox::new("custom-wire");
+    std::env::remove_var("ASALE_CUSTOM_ENDPOINTS");
+    let state = signed_in_state().await;
+    seed_catalog(&state.store, serde_json::json!({"claude": ["claude-haiku-4-5"]})).await;
+    // Refuses a bearer, answers `x-api-key` — which is the whole difference
+    // between the two dialects at the door.
+    let base = models_stub_keyed_by("x-api-key", &["claude-haiku-4-5"]).await;
+
+    // No protocol named: the probe has to work out that a bearer is refused
+    // here and that this host is an Anthropic one.
+    let r = commands::connect_custom_endpoint(
+        &state,
+        base,
+        "sk-endpoint-key".into(),
+        None,
+        Some("relay".into()),
+        Some(10),
+        Some(4),
+        None,
+    )
+    .await
+    .expect("connect");
+    assert_eq!(r["wire"], "claude", "found by asking, not by assuming");
+
+    // And it travels: the gateway reads this field to decide which body to
+    // build for the lane, so a lane that fails to carry it is one that gets
+    // served OpenAI JSON by a host that speaks Anthropic.
+    let items = asale_daemon::publisher::build_supply_items(&state.store, &state.pool).await;
+    let haiku = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["model"] == "claude-haiku-4-5")
+        .expect("the lane is declared")
+        .clone();
+    assert_eq!(haiku["wire"], "claude");
+
+    let listed = commands::list_custom_endpoints(&state).await.unwrap();
+    assert_eq!(listed["endpoints"][0]["wire"], "claude");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_protocol_this_client_cannot_speak_is_refused_rather_than_defaulted() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let _sb = Sandbox::new("custom-wire-unknown");
     std::env::remove_var("ASALE_CUSTOM_ENDPOINTS");
     let state = signed_in_state().await;
 
-    // Internal machinery: knowing the RPC name is not enough to reach it, and
-    // the endpoint is never probed on the way to the refusal.
+    // Silently demoting this to the default would connect the account, sell it,
+    // and answer every request in a dialect the endpoint never agreed to. The
+    // endpoint is not even probed on the way to the refusal.
+    let e = commands::connect_custom_endpoint(
+        &state,
+        "https://example.invalid/v1".into(),
+        "sk-x".into(),
+        Some("bedrock".into()),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("must be refused");
+    assert!(e.message.contains("unknown endpoint protocol"), "got: {}", e.message);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn custom_endpoints_are_refused_on_a_client_built_without_them() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let _sb = Sandbox::new("custom-off");
+    // The feature is on by default now, so this is the *opt-out* that a build
+    // which should not carry it sets.
+    std::env::set_var("ASALE_CUSTOM_ENDPOINTS", "0");
+    let state = signed_in_state().await;
+
+    // Turned off means unreachable: knowing the RPC name is not enough, and the
+    // endpoint is never probed on the way to the refusal.
     let e = commands::connect_custom_endpoint(
         &state,
         "https://example.invalid/v1".into(),
@@ -1015,11 +1128,14 @@ async fn custom_endpoints_are_refused_unless_the_daemon_was_armed_for_them() {
         None,
         None,
         None,
+        None,
     )
     .await
     .expect_err("must be refused");
-    assert!(e.message.contains("internal feature"), "got: {}", e.message);
+    assert!(e.message.contains("turned off"), "got: {}", e.message);
     assert!(commands::list_custom_endpoints(&state).await.is_err());
+
+    std::env::remove_var("ASALE_CUSTOM_ENDPOINTS");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1039,6 +1155,7 @@ async fn an_endpoint_can_be_re_read_switched_and_removed() {
         &state,
         base,
         "sk-endpoint-key".into(),
+        None,
         Some("house".into()),
         Some(60),
         Some(8),
@@ -1092,15 +1209,21 @@ async fn an_endpoint_can_be_re_read_switched_and_removed() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn the_status_probe_says_no_on_an_ordinary_install() {
+async fn the_status_probe_answers_either_way() {
     let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
-    let _sb = Sandbox::new("custom-status-off");
+    let _sb = Sandbox::new("custom-status");
+    // An ordinary install: nothing set, and the feature is on.
     std::env::remove_var("ASALE_CUSTOM_ENDPOINTS");
     let state = signed_in_state().await;
-    // Answerable even when the feature is off — that is the whole point: the
-    // sidebar has to know whether to render the tab, and a refusal would be
+    let status = commands::custom_endpoints_status(&state).await.expect("always answerable");
+    assert_eq!(status["enabled"], true);
+
+    // Answerable when it is off too — that is the whole point: the connect
+    // grid has to know whether to render the tile, and a refusal would be
     // indistinguishable from a daemon that is simply too old to know the
     // command.
+    std::env::set_var("ASALE_CUSTOM_ENDPOINTS", "0");
     let status = commands::custom_endpoints_status(&state).await.expect("always answerable");
     assert_eq!(status["enabled"], false);
+    std::env::remove_var("ASALE_CUSTOM_ENDPOINTS");
 }

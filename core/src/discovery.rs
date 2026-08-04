@@ -15,7 +15,7 @@ use std::time::Duration;
 ///
 /// Defined in `asale-protocol` because the provider name travels on the wire in
 /// every `supply.declare`; the server matches on the same enum.
-pub use asale_protocol::ids::Provider;
+pub use asale_protocol::ids::{Provider, Wire};
 
 /// A held subscription token (access token kept in keychain; here we carry the
 /// reference + expiry metadata).
@@ -436,50 +436,101 @@ pub async fn codex_servable_models(token: &str, chatgpt_account_id: &str) -> any
 
 // ── Custom endpoint ─────────────────────────────────────────────────────────
 
-/// The models an OpenAI-compatible endpoint says it serves.
+/// The models a custom endpoint says it serves.
 ///
-/// `GET {base}/models` is the one call every such endpoint answers — it is what
-/// makes "OpenAI-compatible" checkable rather than asserted — so this doubles as
-/// the credential check when an account is connected: a base URL that is not one
-/// of these, or a key the endpoint refuses, fails here rather than on the first
-/// consumer request.
+/// `GET {base}/models` is the one call all four dialects answer — Anthropic and
+/// Google publish it under the same path OpenAI does — so this doubles as the
+/// credential check when an account is connected: a base URL that is not an
+/// endpoint of the declared dialect, or a key it refuses, fails here rather
+/// than on the first consumer request.
 ///
 /// Ids are returned exactly as the endpoint spells them. Deciding which of them
 /// the market can actually trade is the caller's job: that answer belongs to the
 /// platform's catalog, not to the endpoint.
-pub async fn custom_endpoint_models(base_url: &str, api_key: &str) -> anyhow::Result<Vec<String>> {
+pub async fn custom_endpoint_models(base_url: &str, api_key: &str, wire: Wire) -> anyhow::Result<Vec<String>> {
     let base = base_url.trim().trim_end_matches('/');
     anyhow::ensure!(
         base.starts_with("http://") || base.starts_with("https://"),
         "base URL must start with http:// or https://"
     );
-    let resp = crate::http::upstream()
-        .get(format!("{base}/models"))
-        .header("authorization", format!("Bearer {api_key}"))
-        .timeout(Duration::from_secs(30))
-        .send()
-        .await?;
+    let url = format!("{base}/models");
+    let req = crate::http::upstream().get(&url).timeout(Duration::from_secs(30));
+    // The same key, in the header each dialect's hosts read it from — the probe
+    // has to fail for the *right* reason, and a bearer sent to an Anthropic
+    // endpoint 401s exactly like a bad key.
+    let req = match wire {
+        Wire::Openai | Wire::Responses => req.header("authorization", format!("Bearer {api_key}")),
+        Wire::Claude => req.header("x-api-key", api_key).header("anthropic-version", "2023-06-01"),
+        Wire::Gemini => req.header("x-goog-api-key", api_key),
+    };
+    let resp = req.send().await?;
     let status = resp.status();
     let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
     if !status.is_success() {
-        anyhow::bail!("{base}/models returned {status}: {body}");
+        anyhow::bail!("{url} returned {status}: {body}");
     }
-    // `{"data":[{"id":…}]}` is the OpenAI shape; a bare array is what a few
-    // proxies answer with, and taking both costs one line.
+    // Three shapes for one answer: `{"data":[{"id":…}]}` is OpenAI's and
+    // Anthropic's, `{"models":[{"name":"models/…"}]}` is Google's, and a bare
+    // array is what a few proxies reply with.
     let items = body
         .get("data")
         .and_then(|d| d.as_array())
+        .or_else(|| body.get("models").and_then(|m| m.as_array()))
         .or_else(|| body.as_array())
-        .ok_or_else(|| anyhow::anyhow!("{base}/models did not return a model list"))?;
+        .ok_or_else(|| anyhow::anyhow!("{url} did not return a model list"))?;
     let mut models: Vec<String> = items
         .iter()
-        .filter_map(|m| m.get("id").and_then(|i| i.as_str()).or_else(|| m.as_str()))
+        .filter_map(|m| {
+            m.get("id")
+                .and_then(|i| i.as_str())
+                // Google names them `models/gemini-3.5-flash`; the id the rest
+                // of the world uses is the tail, and it is what the catalog and
+                // the request path both want.
+                .or_else(|| m.get("name").and_then(|n| n.as_str()).map(|n| n.trim_start_matches("models/")))
+                .or_else(|| m.as_str())
+        })
         .filter(|s| !s.is_empty())
         .map(String::from)
         .collect();
     models.sort();
     models.dedup();
     Ok(models)
+}
+
+/// The dialect an endpoint answers on, found by asking.
+///
+/// Connecting one is the moment its operator is least sure what it speaks — a
+/// reseller's docs say "OpenAI-compatible" for a host that also serves
+/// `/messages`, and the answer decides every request afterwards. So the probe
+/// tries each dialect in turn and reports the first that answers, rather than
+/// making the operator guess and discover the mistake on the first sale.
+///
+/// Order is by how much supply each dialect actually carries. The error
+/// returned is the first one's: it is the likeliest endpoint, so its refusal is
+/// the most useful thing to show.
+pub async fn detect_custom_endpoint_wire(
+    base_url: &str,
+    api_key: &str,
+) -> anyhow::Result<(Wire, Vec<String>)> {
+    let mut first_err = None;
+    for wire in [Wire::Openai, Wire::Claude, Wire::Gemini, Wire::Responses] {
+        match custom_endpoint_models(base_url, api_key, wire).await {
+            Ok(models) if !models.is_empty() => return Ok((wire, models)),
+            // An endpoint that answers with an empty list is reachable and
+            // authenticated but has nothing to sell. That is a real answer, not
+            // a reason to try the next dialect — keep it only if nothing better
+            // turns up.
+            Ok(_) => {
+                first_err.get_or_insert_with(|| {
+                    anyhow::anyhow!("the endpoint reports no models, so there is nothing to sell")
+                });
+            }
+            Err(e) => {
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    Err(first_err.unwrap_or_else(|| anyhow::anyhow!("no dialect this client speaks answered")))
 }
 
 // ── Gemini adapter ──────────────────────────────────────────────────────────

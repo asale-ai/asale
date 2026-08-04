@@ -24,38 +24,50 @@ const DEVICE_PROVIDERS = [
   { id: "xai", label: "Grok CLI" },
 ];
 
-/** Platform endpoints — internal.
+/** Custom endpoint — internal.
  *
  * An OpenAI-compatible endpoint the platform buys from and resells: same lanes,
  * same terms, same metering as a subscription, and it appears in the account
- * list below like any other. It differs only in where the requests go, which is
- * why the base URL is fixed here rather than typed: these two are the endpoints
- * the platform actually has an account with, and a free-text URL would be a way
- * to point a key at the wrong host.
+ * list below like any other. It differs only in where the requests go.
+ *
+ * One tile, with the base URL typed into it. It used to be one tile per vendor
+ * with the URL baked in, which meant a code change and a release for every new
+ * endpoint the platform signed up with. The daemon is the one that decides
+ * whether a URL is usable anyway: it requires http(s) and probes
+ * `GET {base}/models` with the key before storing anything, so a wrong host or
+ * a dead key fails at connect time rather than on the first buyer.
  *
  * Only rendered when the daemon is running the feature (`ASALE_CUSTOM_ENDPOINTS`).
  */
-const ENDPOINT_PROVIDERS = [
-  {
-    id: "openrouter",
-    label: "OpenRouter",
-    base: "https://openrouter.ai/api/v1",
-    keyUrl: "https://openrouter.ai/settings/keys",
-    namePlaceholder: "openrouter",
-  },
-  // One base URL, many keys: B.AI's own docs say switching access method only
-  // means replacing the key, the URL and paths do not change. Each key is a
-  // different tier with a different cost, so each is its own account here —
-  // hence a placeholder that suggests naming them apart rather than the bare
-  // vendor id, which would have the second key overwrite the first.
-  {
-    id: "bai",
-    label: "BAI",
-    base: "https://api.b.ai/v1",
-    keyUrl: "https://chat.b.ai/key",
-    namePlaceholder: "bai-mix2",
-  },
+const ENDPOINT_TILE = "custom";
+
+/** Base URLs worth one click — the endpoints the platform itself has an account
+ *  with. A shortcut for filling the field, not a restriction on what may go in
+ *  it. B.AI keeps one base URL for many keys (its own docs say switching access
+ *  method only replaces the key), and each key is a different tier at a
+ *  different cost, so each is connected under its own name. */
+const ENDPOINT_PRESETS = [
+  { label: "OpenRouter", base: "https://openrouter.ai/api/v1" },
+  { label: "BAI", base: "https://api.b.ai/v1" },
 ];
+
+/** The protocols an endpoint may speak, in the order they are offered.
+ *
+ * Vendor names rather than the daemon's ids, because that is what the endpoint's
+ * own docs call them: a host advertising "Anthropic-compatible" is `claude`
+ * here. `""` is the first option and the default — the probe tries each in turn
+ * and keeps the one that answers, which is a better answer than a guess by
+ * somebody reading a reseller's marketing page. */
+const ENDPOINT_WIRES = [
+  { id: "", label: "" },
+  { id: "openai", label: "OpenAI" },
+  { id: "claude", label: "Anthropic" },
+  { id: "gemini", label: "Gemini" },
+  { id: "responses", label: "OpenAI Responses" },
+];
+
+/** What to call a protocol the daemon named back. */
+const wireLabel = (id: string) => ENDPOINT_WIRES.find((w) => w.id === id)?.label || id;
 
 /** The metered platform APIs, which issue keys rather than subscriptions.
  *  `keyUrl` is where the key is issued. */
@@ -335,6 +347,8 @@ export function Publish() {
   // endpoint's form is open, and the terms being typed into it.
   const [endpointsOn, setEndpointsOn] = useState(false);
   const [epProvider, setEpProvider] = useState("");
+  const [epBase, setEpBase] = useState("");
+  const [epWire, setEpWire] = useState("");
   const [epKey, setEpKey] = useState("");
   const [epName, setEpName] = useState("");
   const [epFloor, setEpFloor] = useState("");
@@ -579,6 +593,22 @@ export function Publish() {
     } catch (e) { setErr(errText(e)); } finally { setBusy(false); setDeviceCode(null); }
   }
 
+  /** Only one connect form is open at a time. The tiles are one row of choices,
+   *  so two forms open below it read as two things to fill in — and a key typed
+   *  into the one that scrolled out of view would still be sitting in state for
+   *  whichever submit button is on screen. Opening either clears the other. */
+  function openKeyForm(id: string) {
+    setEpProvider(""); setEpBase(""); setEpKey(""); setEpName(""); setEpFloor("");
+    setKeyProvider(id); setKeyDraft(""); setKeyLabel("");
+  }
+
+  function openEndpointForm(open: boolean) {
+    setKeyProvider(""); setKeyDraft(""); setKeyLabel("");
+    setEpProvider(open ? ENDPOINT_TILE : "");
+    setEpBase(""); setEpWire(""); setEpKey(""); setEpName(""); setEpFloor("");
+    setEpSlots(String(SLOTS_DEFAULT));
+  }
+
   /** Save a pasted API key as an account. The daemon checks it against the
    *  vendor first, so a dead key is refused here rather than failing every task
    *  it later gets matched to. */
@@ -614,33 +644,44 @@ export function Publish() {
     } catch (e) { setImportErr(errText(e)); } finally { setRescanning(false); }
   }
 
-  /** Connect one of the platform endpoints. The base URL comes from the tile,
-   *  not from a field: these are the two endpoints the platform has an account
-   *  with, and a typed host is a way to send a key somewhere it should not go.
-   *  The daemon probes `GET {base}/models` before storing anything, so a dead
-   *  key fails here rather than on the first buyer. */
-  async function connectEndpoint(ep: { id: string; label: string; base: string }) {
+  /** Connect a custom endpoint. The daemon validates the URL and probes
+   *  `GET {base}/models` with the key before storing anything, so a wrong host
+   *  or a dead key fails here rather than on the first buyer. An empty name is
+   *  left to the daemon, which falls back to the endpoint's host — that keeps
+   *  the row stable across re-runs instead of naming it after this form. */
+  async function connectEndpoint() {
     setErr(""); setMsg(""); setEpBusy(true);
     try {
-      const r = await invoke<{ account_id: string; endpoint_models: number; sellable_models: string[] }>(
+      const r = await invoke<{
+        account_id: string;
+        wire: string;
+        endpoint_models: number;
+        sellable_models: string[];
+      }>(
         "connect_custom_endpoint",
         {
-          baseUrl: ep.base,
+          baseUrl: epBase.trim(),
           apiKey: epKey.trim(),
-          label: epName.trim() || ep.id,
+          // Empty means "find out" — the daemon probes each protocol in turn.
+          wire: epWire,
+          label: epName.trim(),
           // Empty floor means "any price"; the daemon clamps it either way.
           minRatio: epFloor.trim() ? clampRatio(parseInt(epFloor, 10) || RATIO_MIN) : RATIO_MIN,
           concurrency: clampSlots(parseInt(epSlots, 10) || SLOTS_DEFAULT),
         },
       );
+      // The protocol is named back whether it was chosen or found — when it was
+      // found, it is the news, and when it was chosen it is the confirmation
+      // that the endpoint really answered on it.
       setMsg(t("publish.endpointConnected", {
         account: r.account_id,
+        wire: wireLabel(r.wire),
         served: r.endpoint_models,
         selling: r.sellable_models.length,
       }));
       // The key is never read back; clear the form rather than leave a secret
       // sitting in a field the next submit would resend.
-      setEpProvider(""); setEpKey(""); setEpName(""); setEpFloor("");
+      setEpProvider(""); setEpBase(""); setEpWire(""); setEpKey(""); setEpName(""); setEpFloor("");
       loadAccounts();
     } catch (e) {
       setErr(errText(e));
@@ -668,7 +709,11 @@ export function Publish() {
   };
 
   const open = KEY_PROVIDERS.find((p) => p.id === keyProvider);
-  const openEp = ENDPOINT_PROVIDERS.find((p) => p.id === epProvider);
+  const openEp = endpointsOn && epProvider === ENDPOINT_TILE;
+  // http(s) is the daemon's own rule (`connect_custom_endpoint`); checking it
+  // here too means the submit button says "not yet" instead of the endpoint
+  // check failing on something the form could see for itself.
+  const epBaseOk = /^https?:\/\/\S+$/i.test(epBase.trim());
 
   const connectGrid = (
     <>
@@ -700,7 +745,7 @@ export function Publish() {
           <button
             key={p.id}
             className={`pick ${keyProvider === p.id ? "active" : ""}`}
-            onClick={() => { setKeyProvider(keyProvider === p.id ? "" : p.id); setKeyDraft(""); setKeyLabel(""); }}
+            onClick={() => openKeyForm(keyProvider === p.id ? "" : p.id)}
             disabled={busy || !inTauri}
           >
             <span className="pick-ico"><Mark id={p.id} /></span>
@@ -711,24 +756,19 @@ export function Publish() {
           </button>
         ))}
         {/* Internal: only when the daemon runs the feature. */}
-        {endpointsOn && ENDPOINT_PROVIDERS.map((p) => (
+        {endpointsOn && (
           <button
-            key={p.id}
-            className={`pick ${epProvider === p.id ? "active" : ""}`}
-            onClick={() => {
-              setEpProvider(epProvider === p.id ? "" : p.id);
-              setEpKey(""); setEpName(""); setEpFloor("");
-              setEpSlots(String(SLOTS_DEFAULT));
-            }}
+            className={`pick ${openEp ? "active" : ""}`}
+            onClick={() => openEndpointForm(!openEp)}
             disabled={busy || !inTauri}
           >
-            <span className="pick-ico"><Mark id={p.id} /></span>
+            <span className="pick-ico"><Mark id={ENDPOINT_TILE} /></span>
             <span>
-              <span className="pick-title">{p.label}</span>
+              <span className="pick-title">{t("publish.endpointTile")}</span>
               <span className="pick-sub">{t("publish.connectViaEndpoint")}</span>
             </span>
           </button>
-        ))}
+        )}
       </div>
 
       {/* Offered in the desktop shell too. Its callback lands on the same
@@ -821,14 +861,14 @@ export function Publish() {
             <button className="btn sm" onClick={connectKey} disabled={busy || !keyDraft.trim()}>
               {t("publish.keyConnect")}
             </button>
-            <button className="btn sm ghost" onClick={() => setKeyProvider("")} disabled={busy}>
+            <button className="btn sm ghost" onClick={() => openKeyForm("")} disabled={busy}>
               {t("publish.keyCancel")}
             </button>
           </div>
         </div>
       )}
 
-      {/* A platform endpoint takes its terms up front, unlike a subscription:
+      {/* A custom endpoint takes its terms up front, unlike a subscription:
           it costs real money per token, so the floor that keeps it from selling
           under cost is part of connecting it, not something to remember to set
           afterwards. Both terms are editable later on the account row, like any
@@ -837,13 +877,55 @@ export function Publish() {
         <div className="keyform fade-in">
           <div className="callout info">
             <IconInfo />
-            <span>
-              {t("publish.endpointHint", { provider: openEp.label })}{" "}
-              <a href={openEp.keyUrl} target="_blank" rel="noreferrer">{openEp.keyUrl}</a>
-            </span>
+            <span>{t("publish.endpointHint")}</span>
           </div>
           <div className="field">
-            <label htmlFor="ep-key">{t("publish.keyLabel", { provider: openEp.label })}</label>
+            <label htmlFor="ep-base">{t("publish.endpointBase")}</label>
+            <input
+              id="ep-base"
+              className="input mono"
+              autoComplete="off"
+              spellCheck={false}
+              value={epBase}
+              placeholder="https://openrouter.ai/api/v1"
+              onChange={(e) => setEpBase(e.target.value)}
+            />
+            {/* The two the platform has an account with, kept as one click each
+                now that the tiles they used to have are gone. */}
+            <div className="band-presets">
+              <span className="band-cap">{t("publish.bandQuick")}</span>
+              {ENDPOINT_PRESETS.map((p) => (
+                <button
+                  key={p.base}
+                  className={`chip ${epBase.trim() === p.base ? "on" : ""}`}
+                  onClick={() => setEpBase(p.base)}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {/* Left on "find out" unless its operator knows better: a reseller's
+              docs say "OpenAI-compatible" for hosts that answer `/messages`,
+              and the probe settles it in one round trip. Named explicitly, a
+              protocol the endpoint does not actually serve fails at connect
+              rather than on the first sale. */}
+          <div className="field">
+            <label>{t("publish.endpointWire")}</label>
+            <div className="band-presets">
+              {ENDPOINT_WIRES.map((w) => (
+                <button
+                  key={w.id}
+                  className={`chip ${epWire === w.id ? "on" : ""}`}
+                  onClick={() => setEpWire(w.id)}
+                >
+                  {w.label || t("publish.endpointWireAuto")}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="field">
+            <label htmlFor="ep-key">{t("publish.endpointKey")}</label>
             <input
               id="ep-key"
               className="input mono"
@@ -853,9 +935,8 @@ export function Publish() {
               value={epKey}
               placeholder={t("publish.keyPlaceholder")}
               onChange={(e) => setEpKey(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && epKey.trim()) connectEndpoint(openEp); }}
+              onKeyDown={(e) => { if (e.key === "Enter" && epBaseOk && epKey.trim()) connectEndpoint(); }}
             />
-            <div className="hint mono">{openEp.base}</div>
           </div>
           <div className="ep-terms">
             <div className="field">
@@ -864,7 +945,7 @@ export function Publish() {
                 id="ep-name"
                 className="input"
                 value={epName}
-                placeholder={openEp.namePlaceholder}
+                placeholder={t("publish.endpointNamePlaceholder")}
                 onChange={(e) => setEpName(e.target.value)}
               />
             </div>
@@ -905,12 +986,12 @@ export function Publish() {
           <div className="keyform-actions">
             <button
               className="btn sm"
-              onClick={() => connectEndpoint(openEp)}
-              disabled={epBusy || !epKey.trim()}
+              onClick={connectEndpoint}
+              disabled={epBusy || !epBaseOk || !epKey.trim()}
             >
               {epBusy ? t("publish.endpointChecking") : t("publish.keyConnect")}
             </button>
-            <button className="btn sm ghost" onClick={() => setEpProvider("")} disabled={epBusy}>
+            <button className="btn sm ghost" onClick={() => openEndpointForm(false)} disabled={epBusy}>
               {t("publish.keyCancel")}
             </button>
           </div>

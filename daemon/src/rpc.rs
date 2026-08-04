@@ -239,12 +239,14 @@ rpc_args! {
         #[serde(default, alias = "max_ratio")] max_ratio: Option<i64>,
         #[serde(default)] concurrency: Option<i64>,
     }
-    // Internal custom endpoints. Every term past the URL and key is optional
-    // and falls back to the account's current value (or, on a first connect, to
-    // the ordinary defaults).
+    // Custom endpoints. Every term past the URL and key is optional and falls
+    // back to the account's current value (or, on a first connect, to the
+    // ordinary defaults) — `wire` to whatever the probe finds the endpoint
+    // speaking.
     CustomEndpointArgs {
         #[serde(alias = "base_url")] base_url: String,
         #[serde(alias = "api_key")] api_key: String,
+        #[serde(default)] wire: Option<String>,
         #[serde(default)] label: Option<String>,
         #[serde(default, alias = "min_ratio")] min_ratio: Option<i64>,
         #[serde(default)] concurrency: Option<i64>,
@@ -426,15 +428,16 @@ async fn rpc(
             )
             .await?
         },
-        // Internal: an OpenAI-compatible endpoint sold as if it were a
-        // subscription. Refused unless the daemon was started with
-        // ASALE_CUSTOM_ENDPOINTS=1 — see `commands::accounts`.
+        // An endpoint of the operator's own, sold as if it were a subscription.
+        // On unless the client was built with ASALE_CUSTOM_ENDPOINTS=0 — see
+        // `commands::accounts`.
         "connect_custom_endpoint" => {
             let p: CustomEndpointArgs = args(&a)?;
             commands::connect_custom_endpoint(
                 st,
                 p.base_url,
                 p.api_key,
+                p.wire,
                 p.label,
                 p.min_ratio,
                 p.concurrency,

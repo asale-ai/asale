@@ -21,7 +21,7 @@ pub mod ws;
 
 pub use discovery::{
     estimate_quota_window, needs_refresh, plan_window_cap, ApiKeyAdapter, ClaudeAdapter, CodexAdapter,
-    DeviceFlowAdapter, GeminiAdapter, Provider, QuotaWindow, RefreshedToken, ToolAdapter,
+    DeviceFlowAdapter, GeminiAdapter, Provider, QuotaWindow, RefreshedToken, ToolAdapter, Wire,
 };
 pub use executor::{LeasedToken, RecordSink, TaskOutcome, TokenProvider};
 pub use pool::{
