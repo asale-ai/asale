@@ -10,7 +10,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
-import { IconSearch, IconCheck, IconX, IconPlus, IconChip } from "../icons";
+import { groupModelsByFamily } from "@shared/model-groups";
+import { IconSearch, IconCheck, IconX, IconPlus, IconChip, IconChevronDown } from "../icons";
 
 export interface ModelOption {
   /** Value stored when this model is picked — the id the proxy routes on. */
@@ -25,16 +26,18 @@ export interface ModelOption {
   tag?: string;
   /**
    * Why this model cannot be picked right now (e.g. nobody is supplying it).
-   * Set = the row is shown greyed with this label and does not respond to a
-   * click. Shown rather than hidden on purpose: supply moves by the second, and
-   * dropping rows in and out of the list reads as the catalog losing models.
-   * A model that is *already* picked stays clickable so it can be removed.
+   * Set = the row is hidden while the "in supply" filter is on (the default),
+   * and shown greyed with this label once the filter is off. A model that is
+   * *already* picked is never hidden and stays clickable, so a pick made when
+   * supply existed can always be seen and removed.
    */
   unavailable?: string;
 }
 
 const UNKNOWN_VENDOR = "__other__";
 const vendorOf = (o: ModelOption) => o.vendor || UNKNOWN_VENDOR;
+/** Vendor-qualified id, so two vendors' same-named models never share a family. */
+const keyOf = (o: ModelOption) => `${o.vendor ?? ""}/${o.id}`;
 
 /* ── The dialog ──────────────────────────────────────────────────────────── */
 
@@ -59,6 +62,11 @@ function ModelDialog({
   const [q, setQ] = useState("");
   const [vendor, setVendor] = useState("all");
   const [pickedOnly, setPickedOnly] = useState(false);
+  /** On by default: of ~350 priced models only a dozen have a seller at any
+   *  moment, and a list that is 97% unpickable is a list nobody reads. */
+  const [supplyOnly, setSupplyOnly] = useState(true);
+  /** Families whose older versions the user asked to see, by family key. */
+  const [expanded, setExpanded] = useState<string[]>([]);
   const [draft, setDraft] = useState<string[]>(value);
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -70,6 +78,8 @@ function ModelDialog({
     setQ("");
     setVendor("all");
     setPickedOnly(false);
+    setSupplyOnly(true);
+    setExpanded([]);
     const id = setTimeout(() => searchRef.current?.focus(), 30);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -102,18 +112,53 @@ function ModelDialog({
     // people expect rather than needing the exact id order.
     const terms = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
     return options.filter((o) => {
+      // A pick already made is never filtered away, whatever the filters say:
+      // it has to stay visible to be removable, and supply it once had can go
+      // away between two openings of this dialog.
+      const picked = draft.includes(o.id);
       if (vendor !== "all" && vendorOf(o) !== vendor) return false;
-      if (pickedOnly && !draft.includes(o.id)) return false;
+      if (pickedOnly && !picked) return false;
+      if (supplyOnly && o.unavailable && !picked) return false;
       const hay = `${o.id} ${o.label ?? ""} ${o.vendor ?? ""}`.toLowerCase();
       return terms.every((needle) => hay.includes(needle));
     });
-  }, [options, q, vendor, pickedOnly, draft]);
+  }, [options, q, vendor, pickedOnly, supplyOnly, draft]);
+
+  // Families are formed from what survived the filters, not from the whole
+  // catalog: searching "opus 4.1" should surface 4.1 itself rather than hide it
+  // under a 4.8 the search ruled out.
+  const families = useMemo(() => groupModelsByFamily(list, keyOf), [list]);
+
+  /**
+   * The list exactly as rendered — the one place that decides which rows exist,
+   * so the count in the toolbar and "select shown" cannot drift from the screen.
+   *
+   * A collapsed family shows its newest version plus any older one already
+   * picked: a pick has to stay visible to be removable, even when the version
+   * it names has been superseded.
+   */
+  const view = useMemo(
+    () =>
+      families.map((family) => {
+        const unfolded = expanded.includes(family.key);
+        const shown = unfolded
+          ? family.all
+          : [family.latest, ...family.older.filter((o) => draft.includes(o.id))];
+        return { family, unfolded, shown, buried: family.all.length - shown.length };
+      }),
+    [families, expanded, draft],
+  );
+  const shownOptions = useMemo(() => view.flatMap((v) => v.shown), [view]);
 
   if (!open) return null;
 
   function pick(id: string) {
     if (!multiple) { onApply([id]); onClose(); return; }
     setDraft((d) => (d.includes(id) ? d.filter((x) => x !== id) : [...d, id]));
+  }
+
+  function toggleFamily(key: string) {
+    setExpanded((e) => (e.includes(key) ? e.filter((x) => x !== key) : [...e, key]));
   }
 
   const body = (
@@ -150,6 +195,15 @@ function ModelDialog({
                 <option key={v.id} value={v.id}>{v.label} ({v.n})</option>
               ))}
             </select>
+            <button
+              type="button"
+              className={`chip ${supplyOnly ? "on" : ""}`}
+              onClick={() => setSupplyOnly((v) => !v)}
+              title={t("modelPicker.supplyOnlyHint")}
+            >
+              {supplyOnly && <IconCheck />}
+              {t("modelPicker.supplyOnly")}
+            </button>
             {multiple && draft.length > 0 && (
               <button
                 type="button"
@@ -161,53 +215,80 @@ function ModelDialog({
               </button>
             )}
             <span className="modal-spacer" />
-            <span className="modal-count">{t("modelPicker.shown", { n: list.length })}</span>
+            <span className="modal-count">{t("modelPicker.shown", { n: shownOptions.length })}</span>
           </div>
         </div>
 
         <div className="modal-list">
-          {list.length === 0 ? (
+          {view.length === 0 ? (
             <div className="opt-empty">
               <IconChip />
               <div>{options.length === 0 ? t("modelPicker.empty") : t("modelPicker.noMatch")}</div>
+              {/* The filter that empties this list most often is the supply one,
+                  and it is on before the user has touched anything — so say so
+                  rather than let the catalog look empty. */}
+              {options.length > 0 && supplyOnly && (
+                <button type="button" className="btn sm subtle" onClick={() => setSupplyOnly(false)}>
+                  {t("modelPicker.showUnavailable")}
+                </button>
+              )}
             </div>
           ) : (
-            list.map((o) => {
-              const on = draft.includes(o.id);
-              const blocked = !!o.unavailable && !on;
-              return (
-                <button
-                  key={o.id}
-                  type="button"
-                  className={`opt ${on ? "on" : ""} ${blocked ? "off" : ""}`}
-                  aria-disabled={blocked}
-                  onClick={() => { if (!blocked) pick(o.id); }}
-                >
-                  <span className={`opt-box ${multiple ? "" : "radio"} ${on ? "on" : ""}`}><IconCheck /></span>
-                  <span className="opt-main">
-                    <span className="opt-name" title={o.id}>{o.label ?? o.id}</span>
-                    <span className="opt-meta mono">{o.id}{o.meta && ` · ${o.meta}`}</span>
-                  </span>
-                  {o.unavailable && <span className="opt-tag muted">{o.unavailable}</span>}
-                  {o.tag && <span className="opt-tag">{o.tag}</span>}
-                </button>
-              );
-            })
+            view.map(({ family, unfolded, shown, buried }) => (
+              <div key={family.key} className="opt-family">
+                {shown.map((o) => {
+                  const on = draft.includes(o.id);
+                  const blocked = !!o.unavailable && !on;
+                  return (
+                    <button
+                      key={o.id}
+                      type="button"
+                      className={`opt ${on ? "on" : ""} ${blocked ? "off" : ""} ${o === family.latest ? "" : "sub"}`}
+                      aria-disabled={blocked}
+                      onClick={() => { if (!blocked) pick(o.id); }}
+                    >
+                      <span className={`opt-box ${multiple ? "" : "radio"} ${on ? "on" : ""}`}><IconCheck /></span>
+                      <span className="opt-main">
+                        <span className="opt-name" title={o.id}>{o.label ?? o.id}</span>
+                        <span className="opt-meta mono">{o.id}{o.meta && ` · ${o.meta}`}</span>
+                      </span>
+                      {o.unavailable && <span className="opt-tag muted">{o.unavailable}</span>}
+                      {o.tag && <span className="opt-tag">{o.tag}</span>}
+                    </button>
+                  );
+                })}
+                {/* A sibling of the rows, not a child: each row is a button. */}
+                {(unfolded || buried > 0) && (
+                  <button
+                    type="button"
+                    className={`opt-more ${unfolded ? "on" : ""}`}
+                    aria-expanded={unfolded}
+                    onClick={() => toggleFamily(family.key)}
+                  >
+                    <IconChevronDown />
+                    {unfolded ? t("modelPicker.hideOlder") : t("modelPicker.showOlder", { n: buried })}
+                  </button>
+                )}
+              </div>
+            ))
           )}
         </div>
 
         <div className="modal-foot">
           {multiple ? (
             <>
+              {/* "Select shown" means the rows on screen — a collapsed family's
+                  older versions are not among them, so it never picks a model
+                  the user has not seen. */}
               <button
                 type="button"
                 className="btn sm subtle"
                 onClick={() =>
                   setDraft((d) => [
-                    ...new Set([...d, ...list.filter((o) => !o.unavailable).map((o) => o.id)]),
+                    ...new Set([...d, ...shownOptions.filter((o) => !o.unavailable).map((o) => o.id)]),
                   ])
                 }
-                disabled={list.every((o) => !!o.unavailable)}
+                disabled={shownOptions.every((o) => !!o.unavailable)}
               >
                 {t("modelPicker.selectAll")}
               </button>

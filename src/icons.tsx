@@ -88,6 +88,7 @@ export const IconPower = (p: P) => (<Svg {...p}><path d="M12 3v9M6.4 6.4a8 8 0 1
 export const IconLoader = (p: P) => (<Svg {...p}><path d="M12 3v3M12 18v3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M3 12h3M18 12h3M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1" /></Svg>);
 export const IconArrowLeft = (p: P) => (<Svg {...p}><path d="M19 12H5M12 19l-7-7 7-7" /></Svg>);
 export const IconArrowRight = (p: P) => (<Svg {...p}><path d="M5 12h14M12 5l7 7-7 7" /></Svg>);
+export const IconChevronDown = (p: P) => (<Svg {...p}><path d="m6 9 6 6 6-6" /></Svg>);
 export const IconDownload = (p: P) => (<Svg {...p}><path d="M12 3v12M7 10l5 5 5-5M5 21h14" /></Svg>);
 export const IconLink = (p: P) => (<Svg {...p}><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1.5 1.5" /><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1.5-1.5" /></Svg>);
 export const IconSearch = (p: P) => (<Svg {...p}><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></Svg>);

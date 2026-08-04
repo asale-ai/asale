@@ -48,6 +48,12 @@
     "walletSub": "可用于买入",
     "earnedToday": "今日卖出 +{{amount}} USDT",
     "goConnect": "去连接账号",
+    "prices": {
+      "title": "实时市场价",
+      "sub": "交易最活跃的几个模型此刻的成交价，与厂商标价对比。",
+      "perM": "USDT / 百万输出",
+      "new": "新上架"
+    },
     "map": {
       "title": "你所在的网络",
       "desc": "颜色越深表示用户越多，线条越亮表示流转的 token 越多。国家来自每位用户自己填写的资料 — 这里不读取任何 IP 地址。",
@@ -695,6 +701,11 @@
     "allVendors": "全部供应商（{{n}}）",
     "vendorOther": "其他",
     "pickedOnly": "只看已选 {{n}}",
+    "supplyOnly": "只看有供应",
+    "supplyOnlyHint": "隐藏当前没有人出售的模型",
+    "showUnavailable": "显示暂无供应的模型",
+    "showOlder": "查看 {{n}} 个历史版本",
+    "hideOlder": "收起历史版本",
     "noMatch": "没有匹配的模型",
     "empty": "暂无可选模型",
     "selectAll": "全选当前",

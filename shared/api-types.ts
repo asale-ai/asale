@@ -182,6 +182,58 @@ export interface PriceHistory {
   points: PricePoint[];
 }
 
+/** One point of a featured model's sparkline — `ts` and `ratio`, nothing else.
+ *
+ *  Deliberately not a `PricePoint`: the ticker draws a single line in ~120px,
+ *  so the six other fields would be bytes on the wire for pixels nobody renders.
+ */
+export interface SparkPoint {
+  /** Bucket start, unix seconds. */
+  ts: number;
+  ratio: number;
+}
+
+/** One card of `GET /api/v1/market/featured`. */
+export interface FeaturedModel {
+  model: string;
+  model_id: string;
+  provider: string;
+  display_name: string;
+  /** Market price as a fraction of list price, in [0.1, 1.0]. */
+  ratio: number;
+  /** `1 - ratio`. */
+  discount: number;
+  /**
+   * Change in `ratio` over the last 24h, as a signed fraction (0.05 = +5%).
+   *
+   * `null` when the model has no history to compare against — a model priced
+   * for the first time has no 24h change, and rendering that as `0.00%` would
+   * claim a measurement that was never made.
+   */
+  change_24h: number | null;
+  /** Micro-USDT per 1k tokens, at the current ratio. */
+  market_prices: { input: number; output: number };
+  /** The vendor's list price, same units. */
+  ref_prices: { input: number; output: number };
+  /** Oldest first, ready to draw. Empty for a model with no history yet. */
+  points: SparkPoint[];
+}
+
+/** Response of `GET /api/v1/market/featured`. */
+export interface FeaturedResp {
+  models: FeaturedModel[];
+  /** The bucket size of every `points` array — currently always `"hour"`. */
+  granularity: PriceGranularity;
+}
+
+/** One row of `GET /api/v1/admin/settings`. */
+export interface AppSetting {
+  key: string;
+  value: unknown;
+  updated_ts: number;
+  updated_by: number | null;
+}
+
 // ── errors ──────────────────────────────────────────────────────────
 
 /**

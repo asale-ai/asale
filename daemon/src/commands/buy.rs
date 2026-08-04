@@ -514,6 +514,23 @@ pub async fn market_models(state: &AppState) -> R<Value> {
     resp_json(resp).await
 }
 
+/// The models the platform features, with their current price, 24h change and
+/// curve — the overview's price ticker (public endpoint).
+///
+/// Proxied whole rather than assembled here: the server already batches the
+/// catalog lookup and the history read into one cached response, so the desktop
+/// app makes the same single request the landing page does, and the two agree
+/// on which models are featured without the client holding its own list.
+pub async fn market_featured(state: &AppState) -> R<Value> {
+    let http = asale_client_core::http::plain();
+    let resp = http
+        .get(format!("{}/api/v1/market/featured", state.cfg.server_api_base))
+        .send()
+        .await
+        .map_err(err)?;
+    resp_json(resp).await
+}
+
 /// The 24h window the world map is drawn from — the same one the landing page
 /// asks for, so both maps show the same network.
 const GLOBE_MINUTES: i64 = 1440;

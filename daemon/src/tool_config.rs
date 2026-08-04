@@ -1,16 +1,19 @@
 //! Buy-side config switching for the AI CLIs installed on this machine
-//! (flow §4/§6), generalized over Claude Code, Codex and Gemini CLI.
+//! (flow §4/§6), generalized over the five tools in `TOOLS` below.
 //!
 //! Turning "buy" on for a tool rewrites that tool's own config so it talks to
 //! the asale local proxy instead of the vendor endpoint; turning it off restores
-//! the original files verbatim. Each tool keeps its own files, so the three
+//! the original files verbatim. Each tool keeps its own files, so the
 //! switches are fully independent:
 //!
-//!   claude → `~/.claude/settings.json`  (`env.ANTHROPIC_BASE_URL` / `…_AUTH_TOKEN`)
-//!   codex  → `~/.codex/config.toml` (`model_provider` + `[model_providers.asale]`
-//!            + `model` + `model_catalog_json`) and `~/.codex/auth.json`
-//!            (`OPENAI_API_KEY`)
-//!   gemini → `~/.gemini/.env` (`GOOGLE_GEMINI_BASE_URL` / `GEMINI_API_KEY`)
+//!   claude   → `~/.claude/settings.json`  (`env.ANTHROPIC_BASE_URL` / `…_AUTH_TOKEN`)
+//!   codex    → `~/.codex/config.toml` (`model_provider` + `[model_providers.asale]`
+//!              + `model` + `model_catalog_json`) and `~/.codex/auth.json`
+//!              (`OPENAI_API_KEY`)
+//!   gemini   → `~/.gemini/.env` (`GOOGLE_GEMINI_BASE_URL` / `GEMINI_API_KEY`)
+//!   openclaw → `~/.openclaw/openclaw.json`
+//!   hermes   → `<hermes_home()>/config.yaml` — the one tool not under a
+//!              `~/.<tool>` dot-directory; see `hermes_home` for why.
 //!
 //! This is the *only* place asale writes into a vendor CLI's directory, and it
 //! happens solely on the buy side. The sell side never reads or writes these

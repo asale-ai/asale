@@ -6,6 +6,7 @@ import {
   type AccountStatus, type BuyTool, type BuyTools,
 } from "../lib";
 import { StatTile, PageHead, Mark } from "../ui";
+import { FeaturedPrices } from "../components/FeaturedPrices";
 import { WorldMap } from "../components/WorldMap";
 import { IconWallet, IconPublish, IconConsume, IconArrowRight, IconServer } from "../icons";
 
@@ -192,6 +193,10 @@ export function Dashboard({ onNavigate, region = "" }: { onNavigate: (t: Tab) =>
           foot={goto("consume", t("dashboard.goConsume"))}
         />
       </div>
+
+      {/* What the market pays for the models most people trade. Above the map
+          because it is the number a reader acts on; the map is context. */}
+      <FeaturedPrices />
 
       {/* Where the network is — and, once signed in, where the reader is in it */}
       <WorldMap region={region} />

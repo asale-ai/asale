@@ -328,6 +328,7 @@ async fn rpc(
         "consume_get_mode" => commands::consume_get_mode(st).await?,
         "market_models" => commands::market_models(st).await?,
         "market_globe" => commands::market_globe(st).await?,
+        "market_featured" => commands::market_featured(st).await?,
         "buy_tools" => commands::buy_tools(st).await?,
 
         // ── upstream proxy + settings ───────────────────────────────────

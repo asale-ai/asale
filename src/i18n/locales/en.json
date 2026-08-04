@@ -48,6 +48,12 @@
     "walletSub": "Available for buying",
     "earnedToday": "+{{amount}} USDT sold today",
     "goConnect": "Connect an account",
+    "prices": {
+      "title": "Live market prices",
+      "sub": "What buyers are paying right now for the models people trade most, against the vendor's list rate.",
+      "perM": "USDT / 1M out",
+      "new": "New"
+    },
     "map": {
       "title": "The network around you",
       "desc": "Darker means more users; brighter lines carry more tokens. Countries come from what each user declared — nothing here reads an IP address.",
@@ -695,6 +701,11 @@
     "allVendors": "All vendors ({{n}})",
     "vendorOther": "Other",
     "pickedOnly": "Selected only ({{n}})",
+    "supplyOnly": "In supply",
+    "supplyOnlyHint": "Hide models nobody is selling right now.",
+    "showUnavailable": "Show models with no supply",
+    "showOlder": "{{n}} older versions",
+    "hideOlder": "Hide older versions",
     "noMatch": "No model matches your search.",
     "empty": "No models to choose from yet.",
     "selectAll": "Select shown",
