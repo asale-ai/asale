@@ -1254,7 +1254,7 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
                 p.pause_lane(&provider, &account_id, &model, r, 0);
             }
         }
-        p.apply_prices(&ratios, now_secs());
+        p.apply_prices(&ratios);
     }
 }
 

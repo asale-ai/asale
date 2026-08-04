@@ -51,17 +51,9 @@ pub struct Ctx {
 struct Ui;
 
 pub fn router(ctx: Ctx) -> Router {
-    // Origins allowed to call the RPC API cross-origin:
-    //   - the Vite dev server (http://localhost:9173 / 127.0.0.1:9173),
-    //   - the Tauri shell webview (tauri://localhost, https://tauri.localhost).
-    // Same-origin B/S access (UI served by this daemon) needs no CORS at all.
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(|origin: &HeaderValue, _| {
-            let Ok(o) = origin.to_str() else { return false };
-            o == "tauri://localhost"
-                || o == "https://tauri.localhost"
-                || o.starts_with("http://localhost:")
-                || o.starts_with("http://127.0.0.1:")
+            origin.to_str().is_ok_and(allowed_origin)
         }))
         .allow_methods([Method::GET, Method::POST])
         .allow_headers([header::CONTENT_TYPE, header::HeaderName::from_static("x-asale-token")]);
@@ -75,6 +67,31 @@ pub fn router(ctx: Ctx) -> Router {
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
         .layer(cors)
         .with_state(ctx)
+}
+
+/// Origins allowed to call the RPC API cross-origin.
+///
+/// Two callers, and neither is same-origin:
+///
+///   * **the Tauri shell's webview**, whose origin is the platform's business,
+///     not ours. macOS and Linux serve the app from the custom scheme
+///     (`tauri://localhost`); Windows cannot — WebView2 has no custom-scheme
+///     support — so there the very same app is served over
+///     `http://tauri.localhost`. Leaving that one out made every packaged
+///     Windows client fail every RPC and render "the local service is not
+///     running", against a daemon that was answering perfectly well. It never
+///     showed up in development because `pnpm dev:app` loads the frontend from
+///     Vite, whose origin is `http://localhost:9173` and matches below.
+///   * **a browser on this machine** pointed at the Vite dev server.
+///
+/// B/S access — the daemon serving the UI itself — is same-origin and never
+/// reaches this at all.
+fn allowed_origin(o: &str) -> bool {
+    o == "tauri://localhost"
+        || o == "https://tauri.localhost"
+        || o == "http://tauri.localhost"
+        || o.starts_with("http://localhost:")
+        || o.starts_with("http://127.0.0.1:")
 }
 
 async fn healthz() -> impl IntoResponse {
@@ -573,6 +590,26 @@ mod tests {
         // "everyone is allowed".
         assert!(!token_matches("", &headers(None)));
         assert!(!token_matches("", &headers(Some(""))));
+    }
+
+    #[test]
+    fn the_desktop_shell_is_admitted_on_every_platform_it_ships_for() {
+        // Windows is the one that bit: WebView2 has no custom-scheme support,
+        // so the packaged app is served over http there while macOS and Linux
+        // get the custom scheme. Missing the http spelling meant every RPC from
+        // a packaged Windows client was blocked before it was ever authorized,
+        // and the app reported the daemon as not running.
+        assert!(allowed_origin("tauri://localhost"), "macOS / Linux");
+        assert!(allowed_origin("http://tauri.localhost"), "Windows (WebView2)");
+        assert!(allowed_origin("https://tauri.localhost"));
+        // A browser on this machine, at the dev server or the daemon's own port.
+        assert!(allowed_origin("http://localhost:9173"));
+        assert!(allowed_origin("http://127.0.0.1:9700"));
+        // Anything else is a page that found the port, and the token is not the
+        // only thing that should be standing between it and the wallet.
+        assert!(!allowed_origin("https://evil.example"));
+        assert!(!allowed_origin("http://tauri.localhost.evil.example"));
+        assert!(!allowed_origin("http://localhost.evil.example"));
     }
 
     #[test]
