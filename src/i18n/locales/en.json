@@ -278,14 +278,19 @@
     "modelsDone": "Updated the models {{tool}} buys.",
     "restartNeeded": "Written to disk, but {{tool}} only reads its config at startup: restart the {{tool}} app or terminal window for the change to take effect.",
     "restartDismiss": "Dismiss",
-    "drifted": "The switch is on but {{path}} no longer points at Asale — something else changed it. Toggle off and on to re-apply.",
+    "drifted": "The switch is on, but {{path}} does not point at Asale and Asale could not put it back — sign in, then re-apply.",
     "restartHint": "Flipping a switch or changing the models takes effect only after the tool's app or terminal window is restarted — sessions already running are unaffected.",
     "refresh": "Refresh",
     "pickModelsFor": "{{tool}} · models to buy",
     "priceMeta": "{{in}} in / {{out}} out per M",
     "contextMeta": "{{n}} context",
     "noSupply": "No supply",
-    "configPaths": "Config"
+    "configPaths": "Config",
+    "openConfig": "Open {{path}}",
+    "openedFile": "Opened {{path}}.",
+    "openedFolder": "That file has not been written yet — opened the folder {{path}} instead.",
+    "reapply": "Re-apply",
+    "repaired": "{{tools}}: the config had been changed by something else and was pointed back at Asale. Restart the tool for it to take effect."
   },
   "wallet": {
     "title": "Wallet",
@@ -674,7 +679,8 @@
     "copy": "Copy",
     "copied": "Copied",
     "networkError": "Could not reach the server. Check your connection and try again.",
-    "requestFailed": "The request failed. Please try again."
+    "requestFailed": "The request failed. Please try again.",
+    "listSep": ", "
   },
   "modelPicker": {
     "title": "Choose models",
@@ -840,10 +846,14 @@
     "session": {
       "expired": "Your session has expired. Sign in again.",
       "signInToBuy": "Sign in before buying tokens.",
-      "notSignedIn": "You are not signed in. Sign in and try again."
+      "notSignedIn": "You are not signed in. Sign in and try again.",
+      "signInToSell": "Sign in before selling tokens."
     },
     "tool": {
-      "unknown": "Unsupported tool: {{tool}}. Choose Claude, Codex or Gemini."
+      "unknown": "Unsupported tool: {{tool}}. Choose Claude, Codex or Gemini.",
+      "notAConfig": "{{path}} is not one of the config files Asale writes.",
+      "configMissing": "There is no config at {{path}} yet, and its folder does not exist either.",
+      "openFailed": "Could not open the file — this machine has no application set to open it."
     },
     "cli": {
       "unknownProvider": "Unsupported CLI. Choose Claude, Codex or Gemini.",

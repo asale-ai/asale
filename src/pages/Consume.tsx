@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  invoke, inTauri, pricePerMillion, fmtContext,
-  type BuyTool, type BuyTools, type MarketModel,
+  invoke, inTauri, pricePerMillion, fmtContext, isSignedOut, gotoSignIn, requireSignIn,
+  DaemonError, type BuyTool, type BuyTools, type MarketModel,
 } from "../lib";
 import { Card, Ok, Err, SkeletonRows, PageHead, IconAction, Mark } from "../ui";
 import { ModelMultiSelect, type ModelOption } from "../components/ModelPicker";
-import { IconRoute, IconConsume, IconRefresh, IconCheck, IconAlert, IconX } from "../icons";
+import { IconRoute, IconConsume, IconRefresh, IconCheck, IconAlert, IconX, IconExternal } from "../icons";
 import { errText } from "../errors";
 
 const priceOf = (m: MarketModel, type: string) => m.prices.find((p) => p.token_type === type);
@@ -63,6 +63,8 @@ export function Consume() {
    *  once at startup, so neither the switch nor a model edit reaches a session
    *  that is already up — the row keeps saying so until the user dismisses it. */
   const [restart, setRestart] = useState<Record<string, boolean>>({});
+  /** Config files with an open in flight, keyed by path. */
+  const [opening, setOpening] = useState<Record<string, boolean>>({});
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
   const [refreshing, setRefreshing] = useState(false);
@@ -70,9 +72,17 @@ export function Consume() {
   const loadTools = useCallback(() => {
     if (!inTauri) return Promise.resolve();
     return invoke<BuyTools>("buy_tools")
-      .then((r) => setTools(r.tools || []))
+      .then((r) => {
+        setTools(r.tools || []);
+        // The daemon repairs a drifted config while answering this call. Say
+        // so — the file did change under the user, and the CLI that is already
+        // running still needs restarting for it to matter.
+        const fixed = (r.repaired || [])
+          .map((id) => (r.tools || []).find((x) => x.id === id)?.label || id);
+        if (fixed.length) setMsg(t("consume.repaired", { tools: fixed.join(t("common.listSep")) }));
+      })
       .catch((e) => setErr(errText(e)));
-  }, []);
+  }, [t]);
 
   const refresh = useCallback(() => {
     setRefreshing(true);
@@ -92,6 +102,12 @@ export function Consume() {
   /** Flip a tool's buy switch, and/or replace its model selection. */
   async function setBuy(tool: BuyTool, enabled: boolean, nextModels?: string[]) {
     setErr(""); setMsg("");
+    // Buying needs a session (the daemon mints a consumer key against it), so
+    // check before touching the switch: a signed-out user belongs on the
+    // sign-in form, not in front of a switch that flicks on and back off.
+    // Switching *off* is exempt — restoring the original config is local work,
+    // and a signed-out user must always be able to undo.
+    if (enabled && !(await requireSignIn("errors.session.signInToBuy"))) return;
     setPending((p) => ({ ...p, [tool.id]: true }));
     // Optimistic so the switch and the chips respond immediately.
     setTools((list) =>
@@ -114,9 +130,32 @@ export function Consume() {
       await loadTools();
     } catch (e) {
       setErr(errText(e));
+      // A session that expired between the check above and this call (or one
+      // the server rejected for its own reasons) lands here — same remedy.
+      if (isSignedOut(e)) gotoSignIn((e as DaemonError).key);
       await loadTools(); // roll the optimistic update back to server truth
     } finally {
       setPending((p) => ({ ...p, [tool.id]: false }));
+    }
+  }
+
+  /** Open a config file in whatever the OS opens it with.
+   *
+   *  The daemon does the opening, so the file opens on the machine the config
+   *  is on — which is the daemon's, not the browser's, when the two differ. A
+   *  path the switch has not written yet has no file to open; the daemon says
+   *  so by opening the folder instead, and the message tells the user that is
+   *  what happened. */
+  async function openConfig(path: string) {
+    setErr(""); setMsg("");
+    setOpening((o) => ({ ...o, [path]: true }));
+    try {
+      const r = await invoke<{ path: string; folder: boolean }>("open_config_path", { path });
+      setMsg(t(r.folder ? "consume.openedFolder" : "consume.openedFile", { path: r.path }));
+    } catch (e) {
+      setErr(errText(e));
+    } finally {
+      setOpening((o) => ({ ...o, [path]: false }));
     }
   }
 
@@ -152,9 +191,16 @@ export function Consume() {
           <div className="acct-list">
             {tools.map((tool) => {
               const busy = !!pending[tool.id];
-              // The switch is on but the config no longer points at us — a
-              // manual edit, or another switcher took the file over.
-              const drifted = tool.enabled && !tool.in_effect;
+              // The switch is on but the config no longer points at us, and the
+              // daemon's automatic re-apply could not fix it either (no cached
+              // key, or the file is not writable) — everything it *can* fix is
+              // already fixed by the time `buy_tools` answers.
+              //
+              // Never while a call is in flight: the switch is optimistic, so
+              // between the click and the answer every tool being turned on
+              // reads as "enabled, not in effect" and would flash a warning
+              // blaming another program for a config nothing has written yet.
+              const drifted = tool.enabled && !tool.in_effect && !busy;
               return (
                 <div key={tool.id} className={`acct ${tool.enabled ? "selling" : ""} ${tool.installed ? "" : "muted-row"}`}>
                   <div className="acct-head">
@@ -185,6 +231,18 @@ export function Consume() {
                   {drifted && (
                     <div className="callout warn compact">
                       <IconAlert /><span>{t("consume.drifted", { path: tool.config_path })}</span>
+                      {/* Re-applying is what the daemon just tried and what the
+                          old copy asked the user to do by hand ("switch it off
+                          and on again"); the button does it in one click, and
+                          keeps the backup taken when the switch went on. */}
+                      <button
+                        type="button"
+                        className="btn ghost sm callout-act"
+                        onClick={() => setBuy(tool, true)}
+                        disabled={!inTauri || busy}
+                      >
+                        {t("consume.reapply")}
+                      </button>
                     </div>
                   )}
 
@@ -240,8 +298,21 @@ export function Consume() {
                     <div className="ad-row">
                       <span className="meta-k">{t("consume.configPaths")}</span>
                       <div className="ad-chips">
+                        {/* The path is also the way in: reading the file asale
+                            rewrote used to mean copying the path out and
+                            hunting it down by hand. */}
                         {tool.config_paths.map((p) => (
-                          <span key={p} className="pill mono plain" title={p}><span>{p}</span></span>
+                          <button
+                            key={p}
+                            type="button"
+                            className="pill mono plain act"
+                            title={t("consume.openConfig", { path: p })}
+                            onClick={() => openConfig(p)}
+                            disabled={!inTauri || !!opening[p]}
+                          >
+                            <span>{p}</span>
+                            <IconExternal />
+                          </button>
                         ))}
                       </div>
                     </div>

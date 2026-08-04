@@ -278,14 +278,19 @@
     "modelsDone": "{{tool}} で購入するモデルを更新しました。",
     "restartNeeded": "設定は書き込まれましたが、{{tool}} は起動時にしか設定を読み込みません。反映するには {{tool}} のアプリまたはターミナルを再起動してください。",
     "restartDismiss": "閉じる",
-    "drifted": "スイッチはオンですが、{{path}} はもう Asale を指していません（他の何かが変更した可能性があります）。オフ→オンで再適用できます。",
+    "drifted": "スイッチはオンですが、{{path}} は Asale を指しておらず、自動修復もできませんでした。サインインしてから「再適用」してください。",
     "restartHint": "スイッチの切り替えや購入モデルの変更は、対象アプリまたはターミナルを再起動して初めて反映されます（実行中のセッションには影響しません）。",
     "refresh": "再読み込み",
     "pickModelsFor": "{{tool}} · 購入するモデルを選択",
     "priceMeta": "入力 {{in}} / 出力 {{out}} (100万トークン)",
     "contextMeta": "コンテキスト {{n}}",
     "noSupply": "供給なし",
-    "configPaths": "設定ファイル"
+    "configPaths": "設定ファイル",
+    "openConfig": "{{path}} を開く",
+    "openedFile": "{{path}} を開きました。",
+    "openedFolder": "この設定ファイルはまだ作成されていないため、フォルダ {{path}} を開きました。",
+    "reapply": "再適用",
+    "repaired": "{{tools}} の設定が他のプログラムに変更されていたため、Asale に向け直しました。反映にはツールの再起動が必要です。"
   },
   "wallet": {
     "title": "ウォレット",
@@ -674,7 +679,8 @@
     "copy": "コピー",
     "copied": "コピーしました",
     "networkError": "サーバーに接続できません。ネットワークを確認して再試行してください。",
-    "requestFailed": "リクエストに失敗しました。もう一度お試しください。"
+    "requestFailed": "リクエストに失敗しました。もう一度お試しください。",
+    "listSep": "、"
   },
   "modelPicker": {
     "title": "モデルを選択",
@@ -840,10 +846,14 @@
     "session": {
       "expired": "セッションの有効期限が切れました。再度サインインしてください。",
       "signInToBuy": "トークンを購入する前にサインインしてください。",
-      "notSignedIn": "サインインしていません。サインインしてからお試しください。"
+      "notSignedIn": "サインインしていません。サインインしてからお試しください。",
+      "signInToSell": "トークンを販売する前にサインインしてください。"
     },
     "tool": {
-      "unknown": "サポートされていないツールです：{{tool}}。Claude / Codex / Gemini から選んでください。"
+      "unknown": "サポートされていないツールです：{{tool}}。Claude / Codex / Gemini から選んでください。",
+      "notAConfig": "{{path}} は Asale が書き換える設定ファイルではありません。",
+      "configMissing": "{{path}} はまだ作成されておらず、そのフォルダも存在しません。",
+      "openFailed": "ファイルを開けませんでした。このマシンには開けるアプリケーションが設定されていません。"
     },
     "cli": {
       "unknownProvider": "サポートされていない CLI です。Claude / Codex / Gemini から選んでください。",

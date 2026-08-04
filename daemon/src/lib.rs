@@ -199,6 +199,13 @@ pub async fn start(bind: SocketAddr) -> anyhow::Result<StartedDaemon> {
         tracing::warn!("legacy subscription migration failed: {e}");
     }
 
+    // A tool whose buy switch is on must have a config that points at the
+    // proxy. Anything could have rewritten it while the daemon was down (another
+    // switcher, an editor, an upgrade), and the user should not have to notice
+    // that, let alone repair it by hand — so put it back before the proxy serves
+    // its first request.
+    commands::reconcile_configs(&app_state).await;
+
     // Which models this device may advertise comes from the server's tradable
     // catalog, not from a list baked into the binary. Pull it before the pool
     // is rebuilt below so the sell page shows the real set on the first paint;

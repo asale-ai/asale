@@ -229,6 +229,7 @@ rpc_args! {
     ModeArgs       { mode: String }
     // `models` absent → leave the selection unchanged; `[]` → clear it.
     BuyToolArgs    { tool: String, enabled: bool, #[serde(default)] models: Option<Vec<String>> }
+    PathArgs       { path: String }
     // Every field past `enabled` absent → leave that term of the sale as it is.
     SellArgs       {
         provider: String,
@@ -470,6 +471,12 @@ async fn rpc(
         "set_buy_tool" => {
             let p: BuyToolArgs = args(&a)?;
             commands::set_buy_tool(st, p.tool, p.enabled, p.models).await?
+        },
+        // Open one of those tools' config files on the daemon's machine. Only
+        // paths the buy switch itself writes are accepted — see the command.
+        "open_config_path" => {
+            let p: PathArgs = args(&a)?;
+            commands::open_config_path(p.path).await?
         },
 
         // ── wallet ──────────────────────────────────────────────────────
