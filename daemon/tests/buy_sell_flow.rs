@@ -118,6 +118,82 @@ async fn buy_switch_rewrites_and_restores_every_tool() {
     }
 }
 
+/// A config that stopped pointing at the proxy while the switch stayed on is
+/// the daemon's problem to fix, not the user's: anything can rewrite
+/// `~/.claude/settings.json` (another switcher, an editor, an installer), and
+/// the old advice — "toggle the switch off and on again" — asked the user to
+/// perform by hand exactly what re-applying does.
+///
+/// The pristine backup has to survive that repair, or turning the switch off
+/// would "restore" asale's own writing over the user's file.
+#[tokio::test(flavor = "current_thread")]
+async fn a_drifted_config_is_repaired_when_the_buy_page_loads() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let _sb = Sandbox::new("drift");
+    let state = signed_in_state().await;
+
+    let path = tool_config::primary_config_path("claude");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let original = "{\n  \"model\": \"opusplan\"\n}";
+    std::fs::write(&path, original).unwrap();
+    commands::set_buy_tool(&state, "claude".into(), true, None).await.expect("buy on");
+
+    // Something else takes the file over — switch still on, config no longer ours.
+    std::fs::write(&path, "{\n  \"env\": {\"ANTHROPIC_BASE_URL\": \"https://elsewhere.example\"}\n}").unwrap();
+    assert!(!tool_config::points_at_proxy("claude"), "precondition: it really drifted");
+
+    let listed = commands::buy_tools(&state).await.unwrap();
+    let entry = listed["tools"].as_array().unwrap().iter().find(|t| t["id"] == "claude").unwrap();
+    assert_eq!(entry["in_effect"], true, "repaired before the page is told about it");
+    assert_eq!(listed["repaired"][0], "claude", "and the page can say what it repaired");
+
+    // Off still means the user's own file, not the one the repair wrote.
+    commands::set_buy_tool(&state, "claude".into(), false, None).await.expect("buy off");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        original,
+        "the backup taken when the switch went on survived the repair"
+    );
+}
+
+/// Putting an account on the market needs a session — without one the publisher
+/// only loops on "session expired" behind a switch that looks on. Switching off
+/// never does: a lapsed session must not trap a user into selling.
+#[tokio::test(flavor = "current_thread")]
+async fn selling_needs_a_session_to_start_but_not_to_stop() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let _sb = Sandbox::new("sell-auth");
+    let state = signed_in_state().await;
+
+    keychain::set(&keychain::token_ref("claude", "a@x.com"), "tok").unwrap();
+    state
+        .store
+        .upsert_tool("claude", "a@x.com", &keychain::token_ref("claude", "a@x.com"), &["test"], "oauth")
+        .await
+        .unwrap();
+
+    let on = || commands::set_account_sell(&state, "claude".into(), "a@x.com".into(), true, None, None, None, None);
+    let off = || commands::set_account_sell(&state, "claude".into(), "a@x.com".into(), false, None, None, None, None);
+
+    keychain::delete("access_token").unwrap();
+    let e = on().await.expect_err("signed out: refused");
+    assert_eq!(e.key.as_deref(), Some("errors.session.signInToSell"), "so the UI can send them to sign in");
+    assert!(!commands::publish_wanted(&state).await, "and the switch did not move");
+
+    keychain::set("access_token", "test-access-token").unwrap();
+    on().await.expect("signed in: allowed");
+    assert!(commands::publish_wanted(&state).await);
+
+    // Session lapses while selling: stopping still works, and so does editing
+    // the terms of an account that is already on.
+    keychain::delete("access_token").unwrap();
+    commands::set_account_sell(&state, "claude".into(), "a@x.com".into(), true, Some(500_000), None, None, None)
+        .await
+        .expect("terms of an already-selling account stay editable");
+    off().await.expect("stopping never needs a session");
+    assert!(!commands::publish_wanted(&state).await);
+}
+
 /// Codex takes its model from its own config, not from the caller's request,
 /// so changing the buy page's selection has to rewrite that config — and doing
 /// so must not lose the pristine backup taken when the switch went on.

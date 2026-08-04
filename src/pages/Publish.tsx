@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   invoke, inTauri, realTauri, runOAuthFlow, submitOAuthCode, fmtTokens,
+  isSignedOut, gotoSignIn, requireSignIn, DaemonError,
   type AccountStatus, type ClientStatus, type ImportAllResult, type Lane,
 } from "../lib";
 import { Card, Ok, Err, SkeletonRows, PageHead, IconAction, Empty, Mark, CopyChip } from "../ui";
@@ -453,6 +454,11 @@ export function Publish() {
     const k = keyOf(a);
     const { dailyLimit, minRatio, maxRatio, concurrency } = terms;
     setAcctErr("");
+    // Going on the market needs a session — check before the switch moves, so a
+    // signed-out user lands on the sign-in form instead of watching the switch
+    // turn itself back off. Only the off → on transition: editing the terms of
+    // an account that is already selling, and switching one off, stay local.
+    if (enabled && !a.sell_enabled && !(await requireSignIn("errors.session.signInToSell"))) return;
     setPending((p) => ({ ...p, [k]: true }));
     // Optimistic: the list refreshes on a 4s poll, too slow for a toggle.
     setAccounts((list) =>
@@ -480,6 +486,8 @@ export function Publish() {
       loadAccounts();
     } catch (e) {
       setAcctErr(errText(e));
+      // The session can lapse between the check above and this call.
+      if (isSignedOut(e)) gotoSignIn((e as DaemonError).key);
       loadAccounts(); // roll the optimistic update back to server truth
     } finally {
       setPending((p) => ({ ...p, [k]: false }));

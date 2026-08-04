@@ -75,12 +75,86 @@ pub async fn migrate_legacy_subscription(state: &AppState) -> R<bool> {
     Ok(true)
 }
 
+/// Re-apply the config of every tool whose buy switch is on but whose live
+/// config no longer points at the proxy. Returns the tools that were repaired.
+///
+/// Drift is ordinary on a real machine: another config switcher took the file
+/// over, the user edited it, an upgrade rewrote it, or the proxy port moved
+/// between builds. The switch still says "buy", so the config saying otherwise
+/// is a state the daemon knows how to fix — asking the user to turn the switch
+/// off and on again makes them do by hand what re-applying does exactly. The
+/// original stays safe: `set_buy_tool` keeps the backup taken when the switch
+/// first went on, so turning it off still restores the user's own file rather
+/// than asale's writing.
+///
+/// Only the *cached* consumer key is used. Minting one needs a live session,
+/// and this runs on every Buy-page load — a reconcile that hit the network
+/// would fail precisely when the user is signed out, which is when a config is
+/// most likely to be found drifted.
+/// Tools whose repair has already been reported as failing. The Buy page and
+/// the dashboard both poll `buy_tools` (every few seconds), so a config that
+/// cannot be written — read-only file, no cached key — would otherwise log the
+/// same warning forever. Cleared when the tool repairs, so a recurrence is
+/// reported again.
+static REPAIR_WARNED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Report a failed repair the first time, and stay quiet until it succeeds.
+fn warn_once(tool: &str, msg: String) {
+    let mut warned = REPAIR_WARNED.lock().unwrap_or_else(|e| e.into_inner());
+    if warned.insert(tool.to_string()) {
+        tracing::warn!(tool, "{msg}");
+    }
+}
+
+pub async fn reconcile_configs(state: &AppState) -> Vec<String> {
+    let key = match super::wallet::cached_key(state).await {
+        Ok(Some(k)) => k,
+        // No key to write: nothing to re-apply with. The UI still shows the
+        // drift warning, which is the honest answer here.
+        _ => return Vec::new(),
+    };
+    let base = tool_config::proxy_base();
+    let mut repaired = Vec::new();
+    for tool in tool_config::TOOLS {
+        let Ok(buy) = state.store.buy_tool(tool).await else { continue };
+        if !buy.enabled {
+            continue;
+        }
+        let t = tool.to_string();
+        let drifted = tokio::task::spawn_blocking(move || !tool_config::points_at_proxy(&t))
+            .await
+            .unwrap_or(false);
+        if !drifted {
+            continue;
+        }
+        let (t, b, k, models) = (tool.to_string(), base.clone(), key.clone(), buy.models.clone());
+        // The snapshot `apply` returns is of asale's own writing (or of whoever
+        // took the file over) — dropped on purpose, see `refresh_buy_tool_keys`.
+        match tokio::task::spawn_blocking(move || tool_config::apply(&t, &b, &k, &models)).await {
+            Ok(Ok(_)) => {
+                REPAIR_WARNED.lock().unwrap_or_else(|e| e.into_inner()).remove(*tool);
+                repaired.push(tool.to_string());
+            }
+            Ok(Err(e)) => warn_once(tool, format!("could not re-apply the buy config: {e}")),
+            Err(e) => warn_once(tool, format!("re-applying the buy config panicked: {e}")),
+        }
+    }
+    if !repaired.is_empty() {
+        tracing::info!("re-applied drifted buy configs: {}", repaired.join(", "));
+    }
+    repaired
+}
+
 /// State of every locally installable AI CLI, for the Buy page: whether it is
 /// installed, which subscription account it is signed in as, whether its buy
 /// switch is on, which models it may buy, and whether its config actually points
 /// at the asale proxy right now.
 pub async fn buy_tools(state: &AppState) -> R<Value> {
     let proxy_base = tool_config::proxy_base();
+    // Repair before reporting, so a drifted config is fixed by the time the
+    // page paints instead of being reported to the user as their problem.
+    let repaired = reconcile_configs(state).await;
     // One scan for all three tools — each hits the filesystem/keychain.
     let discovered = tokio::task::spawn_blocking(cli_scan::scan).await.map_err(err)?;
 
@@ -132,7 +206,113 @@ pub async fn buy_tools(state: &AppState) -> R<Value> {
             "since": buy.since_ts,
         }));
     }
-    Ok(json!({ "tools": out, "proxy_base": proxy_base }))
+    Ok(json!({ "tools": out, "proxy_base": proxy_base, "repaired": repaired }))
+}
+
+/// Open one of the buy-side config files in whatever the OS opens it with.
+///
+/// The Buy page lists the files the switch rewrites; reading one meant copying
+/// the path out and finding it by hand, which is exactly the moment a user is
+/// already unsure whether asale wrote what it says it wrote.
+///
+/// The path is matched against the files this daemon itself would write rather
+/// than being opened as given: `asaled` can be bound to a non-loopback address,
+/// and an RPC that opens any path is a remote file opener for whoever holds the
+/// token. Note the file opens on the *daemon's* machine — that is the machine
+/// the config lives on, so it is the only answer that means anything.
+pub async fn open_config_path(path: String) -> R<Value> {
+    let target = buy_config(&path).ok_or_else(|| {
+        cmd_err!(
+            "errors.tool.notAConfig",
+            format!("not a buy config path: {path}"),
+            path = path.as_str()
+        )
+    })?;
+
+    // A listed file need not exist yet: the paths come from `config_paths`,
+    // which is what the switch *would* write, and a tool that has never been
+    // pointed at the proxy has no file there. Open the folder that holds it
+    // instead of failing with "no such file" — the user asked to look, and the
+    // folder is where looking continues.
+    let dir = !target.is_file();
+    let open = if dir {
+        target
+            .parent()
+            .filter(|d| d.is_dir())
+            .map(|d| d.to_path_buf())
+            .ok_or_else(|| {
+                cmd_err!(
+                    "errors.tool.configMissing",
+                    format!("no config at {path}, and its folder does not exist"),
+                    path = path.as_str()
+                )
+            })?
+    } else {
+        target
+    };
+
+    let shown = open.to_string_lossy().to_string();
+    let status = tokio::task::spawn_blocking(move || opener(&open).status())
+        .await
+        .map_err(err)?
+        .map_err(|e| {
+            cmd_err!("errors.tool.openFailed", format!("could not open {shown}: {e}"))
+        })?;
+    if !status.success() {
+        // The launcher ran and refused: no handler for a bare `.env`, or no
+        // desktop session at all on a headless box. The exit code is all we
+        // have — see `opener` for why its output is not captured.
+        return Err(cmd_err!(
+            "errors.tool.openFailed",
+            format!("the system opener exited with {status}")
+        ));
+    }
+    Ok(json!({ "path": shown, "folder": dir }))
+}
+
+/// The config file this path names, if it is one the buy switch writes.
+///
+/// Compared as the frontend received it — `config_paths` is what fills the
+/// chips on the Buy page, so a match is a path this daemon itself produced, and
+/// no normalisation of the caller's string can widen the set.
+fn buy_config(path: &str) -> Option<std::path::PathBuf> {
+    tool_config::TOOLS
+        .iter()
+        .flat_map(|t| tool_config::config_paths(t))
+        .find(|p| p.to_string_lossy() == path)
+}
+
+/// The platform's "open this with the default handler" launcher.
+fn opener(path: &std::path::Path) -> std::process::Command {
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg(path);
+        c
+    };
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        // `start` is a `cmd` builtin, and its first quoted argument is the
+        // window title — without the empty one a quoted path is taken as the
+        // title and nothing opens.
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", ""]).arg(path);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path);
+        c
+    };
+    // The launcher exits as soon as it has handed the file over, but the app it
+    // starts is a child of this daemon: leave it nothing of ours to inherit,
+    // and never a pipe — an editor that holds one open for its whole lifetime
+    // would hang any read of it.
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    cmd
 }
 
 /// Turn a tool's buy switch on or off, and set which models it may buy.
@@ -351,4 +531,27 @@ pub async fn market_globe(state: &AppState) -> R<Value> {
         .await
         .map_err(err)?;
     resp_json(resp).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The path whitelist is the whole of this command's safety: `asaled` can
+    /// be bound to a non-loopback address, so whatever it agrees to open is
+    /// openable by anyone holding the token. Nothing here launches anything —
+    /// the gate is tested, not the platform's opener.
+    #[test]
+    fn only_the_configs_the_buy_switch_writes_are_openable() {
+        for tool in tool_config::TOOLS {
+            for p in tool_config::config_paths(tool) {
+                let shown = p.to_string_lossy().to_string();
+                assert_eq!(buy_config(&shown), Some(p), "{tool} chip is not openable");
+            }
+        }
+        assert_eq!(buy_config("/etc/passwd"), None);
+        // A path *inside* a tool's directory is still not one of its files.
+        let sneaky = tool_config::tool_dir("claude").join("../../.ssh/id_rsa");
+        assert_eq!(buy_config(&sneaky.to_string_lossy()), None);
+    }
 }

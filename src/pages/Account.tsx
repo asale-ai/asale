@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { countryOptions, guessCountry } from "@shared/countries";
-import { invoke, inTauri, runOAuthFlow, type Profile } from "../lib";
+import { invoke, inTauri, runOAuthFlow, takeSignInReason, type Profile } from "../lib";
 import { ProfileCenter } from "./account/ProfileCenter";
 import { GitHubIcon, GoogleIcon } from "./account/icons";
 import { Err, Skeleton } from "../ui";
+import { IconInfo } from "../icons";
 import { errText } from "../errors";
 
 export function Account() {
@@ -28,6 +29,10 @@ export function Account() {
   // confirmed; while set, this panel shows the check-your-inbox state.
   const [pending, setPending] = useState("");
   const [notice, setNotice] = useState("");
+  // Set when another page sent the user here — "sign in before buying tokens",
+  // "your session has expired". Read once, on arrival: landing on a login form
+  // you did not ask for needs the sentence that explains it.
+  const [sentHere] = useState(() => takeSignInReason());
 
   useEffect(() => {
     if (!inTauri) { setProfile(null); return; }
@@ -139,18 +144,25 @@ export function Account() {
 
         {pending ? (
           <div className="card auth-panel">
-            <p className="auth-note">{t("account.verifySentHint")}</p>
-            <button className="btn block lg" onClick={resendVerification} disabled={busy}>
-              {busy ? "…" : t("account.verifyResend")}
-            </button>
-            <button className="btn block" onClick={leavePending} disabled={busy}>
-              {t("account.backToSignIn")}
-            </button>
+            <p className="auth-note auth-hint">{t("account.verifySentHint")}</p>
+            <div className="stack-gap">
+              <button className="btn block lg" onClick={leavePending} disabled={busy}>
+                {t("account.backToSignIn")}
+              </button>
+              <button className="btn ghost block" onClick={resendVerification} disabled={busy}>
+                {busy ? "…" : t("account.verifyResend")}
+              </button>
+            </div>
             {notice && <p className="auth-note">{notice}</p>}
             <Err>{err}</Err>
           </div>
         ) : (
         <div className="card auth-panel">
+          {sentHere && (
+            <div className="callout info compact card-lead">
+              <IconInfo /><span>{t(sentHere)}</span>
+            </div>
+          )}
           <div className="segmented block card-lead">
             {(["login", "register"] as const).map((m) => (
               <button key={m} className={mode === m ? "active" : ""} onClick={() => setMode(m)}>

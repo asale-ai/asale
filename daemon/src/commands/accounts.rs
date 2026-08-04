@@ -404,6 +404,19 @@ pub async fn set_account_sell(
         .iter()
         .find(|t| t.provider == provider && t.account_id == account_id)
         .ok_or("unknown account")?;
+    // Putting an account on the market needs a session: the switch only means
+    // anything once this device can register with the market and declare its
+    // lanes. Without one the publisher sits in a reconnect loop logging
+    // "session expired" behind a switch that looks on — so refuse here and let
+    // the frontend send the user to sign in.
+    //
+    // Only the off → on transition. Editing the terms of an account that is
+    // already selling, and switching one off, are local edits a signed-out user
+    // must still be able to make — being unable to *stop* selling because your
+    // session lapsed would be the worse failure.
+    if enabled && !existing.sell_enabled && keychain::get("access_token").map_err(err)?.is_none() {
+        return Err(cmd_err!("errors.session.signInToSell", "sign in before selling"));
+    }
     // Omitting dailyLimit keeps the account's current cap (the UI toggles the
     // switch and edits the cap independently).
     let limit = daily_limit.unwrap_or(existing.sell_daily_limit).max(0);

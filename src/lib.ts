@@ -121,6 +121,64 @@ export class DaemonUnreachable extends DaemonError {
 }
 export const isDaemonDown = (e: unknown) => e instanceof DaemonUnreachable;
 
+/** The failures that all mean the same thing: there is no usable session, and
+ *  no amount of retrying fixes it — the user has to sign in.
+ *
+ *  Kept as keys rather than sniffed from the message: the daemon localizes
+ *  nothing, so the key is the only stable part of a failure. */
+const SIGNED_OUT_KEYS = new Set([
+  "errors.session.expired",
+  "errors.session.notSignedIn",
+  "errors.session.signInToBuy",
+  "errors.session.signInToSell",
+]);
+export const isSignedOut = (e: unknown) => e instanceof DaemonError && SIGNED_OUT_KEYS.has(e.key);
+
+const SIGN_IN_REASON = "asale.signInReason";
+
+/** Send the user to the sign-in form — the account tab renders it whenever
+ *  there is no profile, so this is one navigation, not a separate route.
+ *
+ *  `reasonKey` is the catalog key of the failure that caused the trip, handed
+ *  to the form to show: a user who clicked a switch and landed on a login page
+ *  is owed the sentence explaining why. */
+export function gotoSignIn(reasonKey = "") {
+  if (reasonKey) sessionStorage.setItem(SIGN_IN_REASON, reasonKey);
+  window.dispatchEvent(new CustomEvent("asale:nav", { detail: "account" }));
+}
+
+/** Read and clear the reason the user was sent to sign in ("" if they came on
+ *  their own). One-shot: it explains this arrival, not the next one. */
+export function takeSignInReason(): string {
+  const key = sessionStorage.getItem(SIGN_IN_REASON) || "";
+  sessionStorage.removeItem(SIGN_IN_REASON);
+  return key;
+}
+
+/**
+ * Gate an action that needs a live session: `true` to go ahead, `false` after
+ * having navigated to the sign-in form.
+ *
+ * Checked *before* the action rather than after it fails, because the switches
+ * this guards are optimistic — without it the user watches a switch turn on,
+ * turn itself back off, and leave an error behind, which reads as a bug rather
+ * than as "sign in first".
+ *
+ * Anything that is not a signed-out answer (daemon still booting, network down)
+ * lets the action through: the real call reports those far better than a guess
+ * made here, and being wrongly bounced to a login form is the worse failure.
+ */
+export async function requireSignIn(reasonKey = "errors.session.notSignedIn"): Promise<boolean> {
+  try {
+    await invoke("me_profile");
+    return true;
+  } catch (e) {
+    if (!isSignedOut(e)) return true;
+    gotoSignIn(reasonKey);
+    return false;
+  }
+}
+
 /** Resolve once the daemon answers anything, or `false` after `timeoutMs`.
  *
  *  Used as the app's boot gate: pages mount only after this settles, so no page
@@ -544,6 +602,10 @@ export interface BuyTool {
 export interface BuyTools {
   tools: BuyTool[];
   proxy_base: string;
+  /** Tools whose drifted config the daemon re-pointed at the proxy while
+   *  answering this call. Reported so the page can say what it repaired
+   *  instead of silently disagreeing with what the user saw a moment ago. */
+  repaired: string[];
 }
 /** Market prices are micro-USDT per 1K tokens; bill sheets quote per 1M. */
 export const pricePerMillion = (micros: number) => micros / 1000;

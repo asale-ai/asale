@@ -523,6 +523,13 @@ h4 { font-size: var(--fs-sub); font-weight: 600; letter-spacing: -0.006em; margi
 .pill svg { width: 12px; height: 12px; }
 .pill.tiny { font-size: var(--fs-micro); padding: 1px 7px; }
 .pill.tiny::before { width: 4px; height: 4px; }
+/* A pill that is also a button — a label you can act on, so it keeps the pill's
+   quiet and earns its affordance on hover rather than borrowing a button's. */
+.pill.act { cursor: pointer; transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease); }
+.pill.act svg { flex-shrink: 0; opacity: 0.45; transition: opacity var(--t-fast) var(--ease); }
+.pill.act:hover:not(:disabled) { background: var(--surface-3); color: var(--fg); }
+.pill.act:hover:not(:disabled) svg { opacity: 1; }
+.pill.act:disabled { cursor: default; opacity: 0.6; }
 
 /* A quiet count next to a card title. */
 .count-chip {
@@ -1261,6 +1268,9 @@ code { background: var(--bg-2); padding: 1px 5px; border-radius: 5px; font-size:
   transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
 }
 .callout-x:hover { background: var(--surface-2); color: var(--fg); }
+/* The one-click fix for what a callout reports — far edge like the dismiss
+   button, but centred on the block: it is an action, not a corner control. */
+.callout-act { margin-left: auto; flex-shrink: 0; align-self: center; }
 .callout .callout-x svg { width: 11px; height: 11px; margin-top: 0; color: currentColor; }
 /* A callout (or control) closing a card, below whatever it qualifies — and its
    mirror, opening one above whatever it introduces. */
@@ -1407,6 +1417,8 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .auth-head .logo-mark { width: 36px; height: 36px; }
 .auth-panel { margin-bottom: 0; }
 .auth-note { font-size: var(--fs-meta); color: var(--fg-2); margin: var(--s3) 0 0; text-align: center; }
+/* The "check your inbox" blurb sits above the action buttons, so it needs room below too. */
+.auth-note.auth-hint { margin: 0 0 var(--s5); line-height: 1.7; }
 /* A segmented control filling its container, each option an equal share. */
 .segmented.block { display: flex; width: 100%; }
 .segmented.block button { flex: 1; justify-content: center; }

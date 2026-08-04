@@ -284,14 +284,19 @@
     "modelsDone": "{{tool}} 的买入模型已更新。",
     "restartNeeded": "配置已写入，但 {{tool}} 只在启动时读取配置：请重启 {{tool}} 的应用程序或命令行窗口，改动才会生效。",
     "restartDismiss": "关闭提示",
-    "drifted": "开关是打开的，但 {{path}} 已不再指向 Asale——可能被其他程序改过。关闭再打开可重新应用。",
+    "drifted": "开关是打开的，但 {{path}} 没有指向 Asale，且自动修复未成功——请先登录，再点「重新应用」。",
     "restartHint": "开关切换或修改买入模型后，都需要重启对应的应用程序或命令行窗口才会生效；已在运行的会话不受影响。",
     "refresh": "刷新",
     "pickModelsFor": "{{tool}} · 选择买入的模型",
     "priceMeta": "入 {{in}} / 出 {{out}} 每百万",
     "contextMeta": "{{n}} 上下文",
     "noSupply": "暂无供应",
-    "configPaths": "配置文件"
+    "configPaths": "配置文件",
+    "openConfig": "打开 {{path}}",
+    "openedFile": "已打开 {{path}}。",
+    "openedFolder": "该配置文件尚未生成，已改为打开所在文件夹 {{path}}。",
+    "reapply": "重新应用",
+    "repaired": "{{tools}} 的配置曾被其他程序改动，已自动重新指向 Asale。重启该工具后生效。"
   },
   "wallet": {
     "title": "钱包",
@@ -680,7 +685,8 @@
     "copy": "复制",
     "copied": "已复制",
     "networkError": "无法连接服务器，请检查网络后重试。",
-    "requestFailed": "请求失败，请重试。"
+    "requestFailed": "请求失败，请重试。",
+    "listSep": "、"
   },
   "modelPicker": {
     "title": "选择模型",
@@ -846,10 +852,14 @@
     "session": {
       "expired": "登录已过期，请重新登录。",
       "signInToBuy": "购买 Token 前请先登录。",
-      "notSignedIn": "尚未登录，请登录后重试。"
+      "notSignedIn": "尚未登录，请登录后重试。",
+      "signInToSell": "卖出 Token 前请先登录。"
     },
     "tool": {
-      "unknown": "不支持的工具：{{tool}}，请选择 Claude、Codex 或 Gemini。"
+      "unknown": "不支持的工具：{{tool}}，请选择 Claude、Codex 或 Gemini。",
+      "notAConfig": "{{path}} 不是 Asale 会改写的配置文件。",
+      "configMissing": "{{path}} 还没有生成，所在文件夹也不存在。",
+      "openFailed": "无法打开该文件——这台机器没有可以打开它的程序。"
     },
     "cli": {
       "unknownProvider": "不支持的 CLI，请选择 Claude、Codex 或 Gemini。",
