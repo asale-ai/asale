@@ -812,6 +812,13 @@ struct LaneOffer {
     concurrency_free: i32,
     /// Set only when nothing can serve the lane; the reason to show.
     pause: Option<(String, i64)>,
+    /// Lowest floor among the accounts *serving* this lane, in whole percent of
+    /// list price. `None` until one of them is actually selling.
+    ///
+    /// Only the serving accounts count. An account holding the lane back has an
+    /// opinion about the price but no capacity behind it, and quoting a floor
+    /// nothing can serve would let an idle account set the market's price.
+    ask_ratio: Option<i64>,
 }
 
 #[async_trait]
@@ -874,6 +881,9 @@ pub async fn build_supply_items(store: &LocalStore, pool: &StdMutex<AccountPool>
             // `rebuild_pool` computed each figure from that account's own
             // usage and its own daily cap.
             offer.window_remaining += v.quota_remaining as i64;
+            // The cheapest of them is what this device is asking: a buyer that
+            // meets it gets served by that account, whatever the others want.
+            offer.ask_ratio = Some(offer.ask_ratio.map_or(v.min_ratio, |a| a.min(v.min_ratio)));
             // The seller's own ceiling, not a constant: the gateway declines to
             // send an account more than this many tasks at once, which is what
             // makes the setting binding rather than advisory — enforcing it only
@@ -924,6 +934,11 @@ pub async fn build_supply_items(store: &LocalStore, pool: &StdMutex<AccountPool>
             // subscription's body from the vendor it belongs to.
             if let Some(w) = wire {
                 item = item.speaking(w);
+            }
+            // Declared whenever an account is serving this lane, so the market
+            // can price an idle minute at the best ask instead of at its floor.
+            if let Some(ask) = o.ask_ratio {
+                item = item.asking(ask as i32);
             }
             Some(if o.window_remaining > 0 {
                 item

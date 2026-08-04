@@ -47,6 +47,21 @@ pub struct SupplyItem {
     pub window_remaining: i64,
     /// Minimum acceptable price, micro-USDT per 1k tokens.
     pub price_min: i64,
+    /// The lowest ratio this lane will sell at, in whole percent *of* the
+    /// vendor's list price — the same scale the market ratio is published on.
+    ///
+    /// This is the publisher's reserve price, and the market needs it for one
+    /// reason: with buyers absent, the only honest reading of the price is the
+    /// best ask, and without this the gateway had no idea what any ask was. It
+    /// priced an idle minute at `ratio_min` instead, which walked the price
+    /// under every seller's floor, took them off the market, and — with the
+    /// market now empty — walked it back up until they returned. That loop is
+    /// self-sustaining and needs no buyer to keep running.
+    ///
+    /// `0` means "not declared": an older publisher, or a lane whose account
+    /// has no floor. The gateway falls back to the configured `ratio_min`.
+    #[serde(default)]
+    pub ask_ratio: i32,
     #[serde(default)]
     pub region: String,
     #[serde(default)]
@@ -103,6 +118,7 @@ impl SupplyItem {
             provider,
             window_remaining,
             price_min,
+            ask_ratio: 0,
             region: region.to_string(),
             concurrency_free,
             available: true,
@@ -118,6 +134,12 @@ impl SupplyItem {
         self.available = false;
         self.paused_reason = reason.to_string();
         self.resume_at = resume_at;
+        self
+    }
+
+    /// The same lane, carrying the floor its account will not sell below.
+    pub fn asking(mut self, ask_ratio: i32) -> SupplyItem {
+        self.ask_ratio = ask_ratio;
         self
     }
 
@@ -196,6 +218,7 @@ mod tests {
             provider: Provider::Claude,
             window_remaining: 1000,
             price_min: 3000,
+            ask_ratio: 60,
             region: String::new(),
             concurrency_free: 4,
             available: true,
@@ -207,6 +230,22 @@ mod tests {
         assert_eq!(v["provider"], "claude");
         assert_eq!(v["window_remaining"], 1000);
         assert_eq!(v["concurrency_free"], 4);
+        assert_eq!(v["ask_ratio"], 60);
+    }
+
+    /// A publisher built before the field existed declares no floor, and the
+    /// gateway must read that as "no opinion" rather than "sells at zero" —
+    /// which would hand the pricing loop an ask under every real one.
+    #[test]
+    fn an_older_publisher_declaring_no_floor_reads_as_zero() {
+        let item: SupplyItem = serde_json::from_value(serde_json::json!({
+            "model": "claude-opus-5",
+            "provider": "claude",
+            "window_remaining": 1000,
+            "price_min": 3000,
+        }))
+        .unwrap();
+        assert_eq!(item.ask_ratio, 0);
     }
 
     #[test]

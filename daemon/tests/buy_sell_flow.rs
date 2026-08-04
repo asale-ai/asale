@@ -1316,3 +1316,53 @@ async fn the_status_probe_answers_either_way() {
     assert_eq!(status["enabled"], false);
     std::env::remove_var("ASALE_CUSTOM_ENDPOINTS");
 }
+
+/// The declaration carries the floor the market prices against, and when two
+/// accounts serve the same model it carries the cheaper of them.
+///
+/// The gateway prices a minute with no buyers at the best ask. Before this
+/// field there was no ask to read, so it priced such a minute at `ratio_min` —
+/// under every seller's floor — which withdrew them, which emptied the market,
+/// which walked the price back up, which brought them back. One publisher was
+/// enough to keep that running, and every lap re-listed and de-listed its whole
+/// catalogue.
+#[tokio::test(flavor = "current_thread")]
+async fn the_declaration_carries_the_cheapest_floor_of_the_serving_accounts() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let _sb = Sandbox::new("ask");
+    let state = signed_in_state().await;
+
+    for (account, min_ratio) in [("dear@x.com", 60), ("cheap@x.com", 40)] {
+        keychain::set(&keychain::token_ref("claude", account), "tok").unwrap();
+        state
+            .store
+            .upsert_tool("claude", account, &keychain::token_ref("claude", account), &["test"], "oauth")
+            .await
+            .unwrap();
+        state.store.set_setting(&format!("plan:claude:{account}"), "max_20x").await.unwrap();
+        commands::set_account_sell(
+            &state,
+            "claude".into(),
+            account.into(),
+            true,
+            None,
+            Some(min_ratio),
+            Some(100),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    let items = asale_daemon::publisher::build_supply_items(&state.store, &state.pool).await;
+    let opus = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["model"] == "claude-opus-5")
+        .expect("opus is declared");
+    assert_eq!(
+        opus["ask_ratio"], 40,
+        "a buyer meeting the cheaper floor gets served by that account, so that is the ask"
+    );
+}
