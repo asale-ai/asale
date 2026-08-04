@@ -1769,8 +1769,13 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 }
 .opt:hover { background: var(--surface-2); }
 .opt.on { background: var(--accent-soft); }
-/* Priced but nobody is selling it: still listed, so the catalog does not
-   appear to lose models every time supply moves — just not pickable. */
+/* A superseded version, revealed by expanding its family: indented under the
+   newest one and set a shade back, so the list still reads as one row per
+   model with history tucked beneath it. */
+.opt.sub { padding-left: calc(var(--s3) + 16px + var(--s3)); }
+.opt.sub .opt-name { font-weight: 400; color: var(--fg-2); }
+/* Priced but nobody is selling it: hidden by the "in supply" filter, and shown
+   like this once the user turns that filter off — visible, not pickable. */
 .opt.off { cursor: not-allowed; }
 .opt.off:hover { background: transparent; }
 .opt.off .opt-box { opacity: 0.4; }
@@ -1793,6 +1798,19 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .opt-tag.muted { background: var(--surface-2); color: var(--fg-3); }
 .opt-empty { text-align: center; color: var(--fg-2); font-size: var(--fs-sub); padding: var(--s7) var(--s3); }
 .opt-empty svg { width: 22px; height: 22px; color: var(--fg-3); margin-bottom: var(--s2); }
+.opt-empty .btn { margin-top: var(--s3); }
+
+/* Expander for a family's older versions — deliberately quieter than a row, so
+   the list still scans as one line per model. */
+.opt-more {
+  display: flex; align-items: center; gap: 6px;
+  margin-left: calc(var(--s3) + 16px + var(--s3)); padding: 3px var(--s2);
+  border: none; border-radius: var(--r1); background: transparent;
+  color: var(--fg-3); cursor: pointer; font-size: var(--fs-micro);
+}
+.opt-more:hover { background: var(--surface-2); color: var(--fg-2); }
+.opt-more svg { width: 12px; height: 12px; transition: transform var(--t-fast) var(--ease); }
+.opt-more.on svg { transform: rotate(180deg); }
 
 /* Single-select trigger — looks like a field, opens the model dialog. */
 .model-select {
@@ -1956,3 +1974,31 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
    row rather than one field of it. */
 .keyform > .hint { color: var(--fg-3); font-size: var(--fs-meta); line-height: 1.5; }
 
+
+/* ── Featured prices (overview ticker) ──────────────────────────────────────
+   One tile per model the platform features: what it trades at, how far that
+   moved in a day, and the curve it moved along. `auto-fit` rather than a fixed
+   four columns because the list is admin-configurable — between one and eight
+   models — and a fixed grid would leave a lone card stretched across the panel
+   or eight of them crushed into a row. */
+.fp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--s3); }
+.fp-card {
+  padding: var(--s3) var(--s4) var(--s2);
+  border-radius: var(--r2); border: 1px solid var(--line); background: var(--bg-2);
+  display: flex; flex-direction: column; gap: var(--s2); min-width: 0;
+}
+.fp-top { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+.fp-name { flex: 1; min-width: 0; font-size: var(--fs-meta); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The discount is the reason to be on this platform at all, so it rides next
+   to the name rather than in the footnotes. */
+.fp-off {
+  flex-shrink: 0; font-family: var(--font-mono); font-size: var(--fs-micro);
+  color: var(--fg-2); padding: 1px 5px; border-radius: var(--r1); background: var(--surface);
+}
+.fp-price { display: flex; align-items: baseline; gap: 5px; min-width: 0; }
+.fp-price > .mono { font-size: 1.15rem; font-weight: 500; letter-spacing: -0.02em; }
+.fp-unit { font-size: var(--fs-micro); color: var(--fg-3); white-space: nowrap; }
+.fp-chg { margin-left: auto; font-size: var(--fs-micro); flex-shrink: 0; }
+/* Fixed height, reserved even when there is no series to draw, so a model
+   priced for the first time does not make its card shorter than its row. */
+.fp-spark { display: block; width: 100%; height: 44px; }

@@ -19,8 +19,8 @@ const usd = (micros: number) => `$${pricePerMillion(micros).toFixed(2)}`;
  *
  * A model is listed because it is *priced*, which is not the same as being
  * *available*: the catalog carries every model the platform knows how to
- * settle, and at any moment some of them have nobody selling them. Those are
- * greyed rather than dropped — see `ModelOption.unavailable`.
+ * settle, and at any moment all but a dozen have nobody selling them. Those
+ * are filtered out of the picker by default — see `ModelOption.unavailable`.
  */
 function toOptions(
   market: MarketModel[],
@@ -54,7 +54,8 @@ export function Consume() {
   const { t } = useTranslation();
 
   const [tools, setTools] = useState<BuyTool[]>([]);
-  /** The market's models, deduped by family — one picker row per model name. */
+  /** The market catalog, whole. The picker is what collapses it to one row per
+   *  model family and hides what has no supply. */
   const [models, setModels] = useState<ModelOption[]>([]);
   const [loading, setLoading] = useState(inTauri);
   /** Tools with an action in flight, keyed by tool id. */

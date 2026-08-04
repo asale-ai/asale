@@ -21,6 +21,8 @@ export type {
   DepositSession,
   DepositSessionStatus,
   DepositSessionTx,
+  FeaturedModel,
+  FeaturedResp,
   Globe,
   GlobeFlow,
   GlobeRegion,
@@ -29,6 +31,7 @@ export type {
   OAuthAccount,
   OAuthProvider,
   Profile,
+  SparkPoint,
 } from "@shared/api-types";
 
 const TOKEN_KEY = "asale.daemon.token";
