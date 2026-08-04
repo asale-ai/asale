@@ -26,7 +26,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 
 /// The tools a buy switch can be turned on for.
@@ -220,7 +220,9 @@ pub fn config_paths(tool: &str) -> Vec<PathBuf> {
     match tool {
         "claude" => vec![d.join("settings.json")],
         "codex" => vec![d.join("config.toml"), d.join("auth.json")],
-        "gemini" => vec![d.join(".env")],
+        // `.env` carries the endpoint and key; `settings.json` carries the one
+        // thing the CLI will not start without — see `apply_gemini`.
+        "gemini" => vec![d.join(".env"), d.join("settings.json")],
         "openclaw" => vec![d.join("openclaw.json")],
         "hermes" => vec![d.join("config.yaml")],
         _ => vec![],
@@ -275,7 +277,14 @@ pub fn current_base_url(tool: &str) -> Option<String> {
                 .as_str()
                 .map(String::from)
         }
-        "hermes" => yaml_block_get(&read_raw(&primary_config_path(tool))?, HERMES_SECTION, HERMES_BASE_URL),
+        // A file Hermes cannot parse is one it ignores entirely, so whatever
+        // `base_url` says in it, the agent is not pointed anywhere. Reading the
+        // text and believing it is how the switch came to report "in effect"
+        // over a config that had been falling back to defaults for days.
+        "hermes" => {
+            let raw = read_raw(&primary_config_path(tool))?;
+            yaml_is_editable(&raw).then(|| yaml_block_get(&raw, HERMES_SECTION, HERMES_BASE_URL))?
+        }
         "openclaw" => {
             let v = read_json(&primary_config_path(tool));
             // Same rule as Codex: only the provider the agent actually starts
@@ -732,9 +741,59 @@ fn strip_openclaw(raw: &str) -> Option<String> {
 ///
 /// `base_url` is not a parameter — Hermes is addressed under its own `/{tool}`
 /// prefix, which [`proxy_base_for`] owns.
+/// Whether a document is structurally a YAML mapping we can safely edit.
+///
+/// Not a parser — the daemon carries no YAML crate, and does not need one to
+/// answer the question that matters. Every line of a config we may edit is
+/// blank, a comment, a document marker, a list item, `key:`, or `key: value`.
+/// A line like `MY_FLAG=1` is none of those, and Hermes rejects the **whole
+/// file** over it: it falls back to its built-in defaults and drops every user
+/// override, the buy switch's included. Editing such a file writes settings
+/// that read as applied on this side and are ignored on the other — the switch
+/// says "in effect" and nothing about the tool's behaviour has changed.
+///
+/// So a document that fails this is left alone and reported, rather than
+/// written into. The body of a block scalar (`key: |`) is free text and is
+/// skipped, since none of its lines are mappings.
+fn yaml_is_editable(raw: &str) -> bool {
+    let mut block_indent: Option<usize> = None;
+    for line in raw.lines() {
+        let indent = line.len() - line.trim_start().len();
+        let t = line.trim();
+        if let Some(open_at) = block_indent {
+            if t.is_empty() || indent > open_at {
+                continue;
+            }
+            block_indent = None;
+        }
+        if t.is_empty() || t.starts_with('#') || t == "---" || t == "..." || t == "-" || t.starts_with("- ") {
+            continue;
+        }
+        let Some((key, value)) = t.split_once(':') else {
+            return false;
+        };
+        // `=` in a key is the shape of an env-file line that wandered into a
+        // YAML document — the exact case that started this.
+        if key.trim().is_empty() || key.contains('=') {
+            return false;
+        }
+        if matches!(value.trim(), "|" | ">" | "|-" | ">-" | "|+" | ">+") {
+            block_indent = Some(indent);
+        }
+    }
+    true
+}
+
 fn apply_hermes(token: &str, models: &[String]) -> Result<()> {
     let path = primary_config_path("hermes");
     let raw = read_raw(&path).unwrap_or_default();
+    anyhow::ensure!(
+        yaml_is_editable(&raw),
+        "{} is not valid YAML — Hermes ignores the whole file when it cannot parse it, \
+         so writing the buy settings into it would report success and change nothing. \
+         Fix the file (Hermes names the offending line on startup) and switch buying on again.",
+        path.display()
+    );
     let mut pairs = vec![
         (HERMES_PROVIDER, HERMES_PROVIDER_CUSTOM.to_string()),
         (HERMES_BASE_URL, proxy_base_for("hermes")),
@@ -943,11 +1002,79 @@ fn yaml_unescape(v: &str) -> String {
 
 // ── Gemini CLI ─────────────────────────────────────────────────────────────
 
+/// The auth mode Gemini CLI must be told to use.
+///
+/// Setting `GEMINI_API_KEY` is not enough on its own: the CLI refuses to start
+/// with "Please set an Auth method in settings.json" and, once the variable is
+/// exported, with "Invalid auth method selected". It wants the choice recorded,
+/// not inferred. Writing the key without this produced a switch that reported
+/// "in effect" against a CLI that could not make a single call.
+const GEMINI_AUTH_TYPE: &str = "gemini-api-key";
+
 fn apply_gemini(base_url: &str, token: &str) -> Result<()> {
-    let path = primary_config_path("gemini");
-    let raw = read_raw(&path).unwrap_or_default();
+    let paths = config_paths("gemini");
+    let env_path = &paths[0];
+    let raw = read_raw(env_path).unwrap_or_default();
     let body = dotenv_set(&raw, &[(GEMINI_BASE_URL, base_url), (GEMINI_API_KEY, token)]);
-    write_atomic(&path, &body)
+    write_atomic(env_path, &body)?;
+
+    // Only when the user has not chosen for themselves: someone signed in with
+    // Vertex or a Google account has an auth mode of their own, and buying
+    // through asale is not a reason to overwrite it.
+    let settings_path = &paths[1];
+    let mut settings = read_json(settings_path);
+    if gemini_auth_type(&settings).is_none() {
+        settings
+            .as_object_mut()
+            .expect("read_json yields an object")
+            .entry("security")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .map(|sec| {
+                sec.entry("auth")
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .map(|auth| auth.insert("selectedType".into(), json!(GEMINI_AUTH_TYPE)))
+            });
+        write_atomic(settings_path, &format!("{}\n", serde_json::to_string_pretty(&settings)?))?;
+    }
+    Ok(())
+}
+
+/// The auth mode already recorded in a Gemini `settings.json`, if any.
+fn gemini_auth_type(settings: &Value) -> Option<&str> {
+    settings.get("security")?.get("auth")?.get("selectedType")?.as_str().filter(|s| !s.is_empty())
+}
+
+/// Drop the auth mode again, but only while it is still the one we wrote — past
+/// that the user has chosen for themselves and the value is theirs.
+fn strip_gemini_settings(raw: &str) -> Option<String> {
+    let mut v: Value = serde_json::from_str(raw).ok().filter(Value::is_object)?;
+    if gemini_auth_type(&v) != Some(GEMINI_AUTH_TYPE) {
+        return Some(raw.to_string());
+    }
+    if let Some(auth) = v.get_mut("security").and_then(|s| s.get_mut("auth")).and_then(Value::as_object_mut) {
+        auth.remove("selectedType");
+    }
+    // Prune the husks our own key left behind, so a settings.json asale created
+    // does not survive the switch being turned off as an empty shell.
+    for parent in ["security"] {
+        let drop_it = v
+            .get(parent)
+            .and_then(|p| p.get("auth"))
+            .and_then(Value::as_object)
+            .is_some_and(|a| a.is_empty());
+        if drop_it {
+            v.get_mut(parent).and_then(Value::as_object_mut).map(|p| p.remove("auth"));
+        }
+        if v.get(parent).and_then(Value::as_object).is_some_and(|p| p.is_empty()) {
+            v.as_object_mut().map(|o| o.remove(parent));
+        }
+    }
+    if v.as_object().is_some_and(Map::is_empty) {
+        return None;
+    }
+    Some(format!("{}\n", serde_json::to_string_pretty(&v).ok()?))
 }
 
 // ── Stripping asale's keys back out ────────────────────────────────────────
@@ -961,6 +1088,7 @@ fn strip_ours(tool: &str, path: &Path) -> Result<()> {
         ("codex", "auth.json") => strip_json_keys(&raw, &[CODEX_API_KEY]),
         ("openclaw", _) => strip_openclaw(&raw),
         ("hermes", _) => strip_hermes(&raw),
+        ("gemini", "settings.json") => strip_gemini_settings(&raw),
         ("gemini", _) => strip_dotenv(&raw, &[GEMINI_BASE_URL, GEMINI_API_KEY]),
         _ => Some(raw),
     };
@@ -1436,6 +1564,43 @@ auxiliary:
     }
 
     #[test]
+    fn a_config_hermes_cannot_parse_is_reported_not_written_into() {
+        with_temp_home(|| {
+            let path = primary_config_path("hermes");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            // An env-file line in a YAML document. Hermes answers this by
+            // discarding the *entire* file and running on its defaults, so
+            // anything written under it takes effect nowhere.
+            let broken = "# mine\nMY_FLAG=1\n\nmodel:\n  provider: \"zai\"\n";
+            std::fs::write(&path, broken).unwrap();
+
+            let err = apply("hermes", "http://127.0.0.1:9787", "sk-asale-h", &models(&["gpt-5.6-terra"]))
+                .expect_err("must refuse rather than write into a file the tool ignores");
+            assert!(err.to_string().contains("not valid YAML"), "got: {err}");
+            assert_eq!(read_raw(&path).as_deref(), Some(broken), "the file is left exactly as it was");
+
+            // And it must not read as configured either: a `base_url` sitting in
+            // a document Hermes never parses points the agent nowhere. Claiming
+            // otherwise is how the switch reported "in effect" over a config
+            // that had been falling back to defaults.
+            let with_our_url = format!("{broken}  base_url: \"{}\"\n", proxy_base_for("hermes"));
+            std::fs::write(&path, &with_our_url).unwrap();
+            assert!(!points_at_proxy("hermes"), "an unparseable config is not in effect");
+        });
+    }
+
+    #[test]
+    fn yaml_editability_admits_real_documents_and_rejects_env_lines() {
+        // Block scalars are free text: none of their lines are mappings, and
+        // rejecting a config for them would lock the switch out of a valid file.
+        assert!(yaml_is_editable("model:\n  prompt: |\n    hello world\n    MY_FLAG=1\n  default: x\n"));
+        assert!(yaml_is_editable("---\n# c\nlist:\n  - one\n  - two\n"));
+        assert!(yaml_is_editable(""));
+        assert!(!yaml_is_editable("MY_FLAG=1\n"));
+        assert!(!yaml_is_editable("model:\n  provider: x\nSTRAY\n"));
+    }
+
+    #[test]
     fn hermes_strip_only_touches_a_config_still_pointed_at_us() {
         with_temp_home(|| {
             let ours = yaml_block_set(
@@ -1535,6 +1700,47 @@ auxiliary:
 
             restore("gemini", &backup).unwrap();
             assert_eq!(read_raw(&path).unwrap(), original);
+        });
+    }
+
+    #[test]
+    fn gemini_gets_the_auth_mode_the_cli_refuses_to_start_without() {
+        with_temp_home(|| {
+            let paths = config_paths("gemini");
+            let (env_path, settings_path) = (&paths[0], &paths[1]);
+            std::fs::create_dir_all(env_path.parent().unwrap()).unwrap();
+
+            // Nothing on disk: the switch has to create both halves. A key
+            // without the auth mode leaves the CLI unable to make a single
+            // call — "Invalid auth method selected" — while the switch reports
+            // itself in effect.
+            let backup = apply("gemini", "http://127.0.0.1:9787", "sk-asale-gem", &[]).unwrap();
+            let settings: Value = serde_json::from_str(&read_raw(settings_path).unwrap()).unwrap();
+            assert_eq!(gemini_auth_type(&settings), Some(GEMINI_AUTH_TYPE));
+
+            // Off again takes both back, and removes a file that was ours.
+            restore("gemini", &backup).unwrap();
+            assert!(read_raw(settings_path).is_none(), "a settings.json we created goes with us");
+        });
+    }
+
+    #[test]
+    fn a_gemini_auth_mode_the_user_chose_is_never_overwritten() {
+        with_temp_home(|| {
+            let paths = config_paths("gemini");
+            let settings_path = &paths[1];
+            std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+            // Signed in with a Google account. Buying through asale is not a
+            // reason to sign them out of it.
+            let theirs = "{\n  \"security\": {\n    \"auth\": {\n      \"selectedType\": \"oauth-personal\"\n    }\n  },\n  \"theme\": \"dark\"\n}";
+            std::fs::write(settings_path, theirs).unwrap();
+
+            let backup = apply("gemini", "http://127.0.0.1:9787", "sk-asale-gem", &[]).unwrap();
+            let after: Value = serde_json::from_str(&read_raw(settings_path).unwrap()).unwrap();
+            assert_eq!(gemini_auth_type(&after), Some("oauth-personal"), "their choice stands");
+
+            restore("gemini", &backup).unwrap();
+            assert_eq!(read_raw(settings_path).unwrap(), theirs, "restore is byte-exact");
         });
     }
 

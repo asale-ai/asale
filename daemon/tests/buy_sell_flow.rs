@@ -29,6 +29,14 @@ impl Sandbox {
         std::fs::create_dir_all(dir.join("data")).unwrap();
         std::env::set_var("HOME", dir.join("home"));
         std::env::set_var("ASALE_DATA_DIR", dir.join("data"));
+        // Hermes is the one tool that does not live under `~/.<tool>`: on
+        // Windows its config is in `%LOCALAPPDATA%\hermes`, which `HOME` does
+        // not move. Without this the buy-switch tests rewrote the *developer's*
+        // real Hermes config — and left it as invalid YAML, which Hermes
+        // answers by ignoring the whole file. `HERMES_HOME` is the first thing
+        // `tool_config::hermes_home` consults, so it moves both platforms at
+        // once.
+        std::env::set_var("HERMES_HOME", dir.join("home").join("hermes"));
         // The login keychain ignores `$HOME`, so the CLI scan must be told to
         // skip it — otherwise a developer's real Claude token would be read
         // into a run that should only see its sandbox.
@@ -82,6 +90,11 @@ async fn buy_switch_rewrites_and_restores_every_tool() {
         let original = match *tool {
             "claude" => "{\n  \"model\": \"opusplan\"\n}",
             "codex" => "model = \"gpt-5-codex\"\nmodel_provider = \"openai\"\n",
+            // Each seed has to be valid in its tool's own format. Hermes reads
+            // YAML, where `MY_FLAG=1` is a parse error — and the switch now
+            // refuses to edit a file the tool would ignore, so the old seed was
+            // testing the refusal rather than the round trip.
+            "hermes" => "# mine\nmy_flag: 1\n",
             _ => "# mine\nMY_FLAG=1\n",
         };
         std::fs::write(&path, original).unwrap();
