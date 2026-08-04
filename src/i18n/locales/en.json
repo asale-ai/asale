@@ -49,17 +49,13 @@
     "earnedToday": "+{{amount}} USDT sold today",
     "goConnect": "Connect an account",
     "prices": {
-      "title": "Live market prices",
-      "sub": "What buyers are paying right now for the models people trade most, against the vendor's list rate.",
-      "perM": "USDT / 1M out",
-      "new": "New"
+      "ofList": "of list price"
     },
     "map": {
       "title": "The network around you",
-      "desc": "Darker means more users; brighter lines carry more tokens. Countries come from what each user declared — nothing here reads an IP address.",
+      "desc": "Countries come from what each user declared — nothing here reads an IP address.",
       "legendUsers": "Users",
       "legendFlow": "Token flow",
-      "legendYou": "You are here",
       "legendLess": "Fewer",
       "legendMore": "More",
       "statCountries": "Countries",
@@ -68,6 +64,7 @@
       "statLanes": "Live lanes",
       "tipUsers": "{{count}} users",
       "tipTokens": "{{tokens}} tokens / 24h",
+      "tipRoles": "{{providers}} sharing · {{consumers}} buying",
       "tipYou": "Your country",
       "unknownRegion": "Region not set"
     }

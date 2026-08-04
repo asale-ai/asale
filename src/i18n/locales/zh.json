@@ -49,17 +49,13 @@
     "earnedToday": "今日卖出 +{{amount}} USDT",
     "goConnect": "去连接账号",
     "prices": {
-      "title": "实时市场价",
-      "sub": "交易最活跃的几个模型此刻的成交价，与厂商标价对比。",
-      "perM": "USDT / 百万输出",
-      "new": "新上架"
+      "ofList": "占厂商原价"
     },
     "map": {
       "title": "你所在的网络",
-      "desc": "颜色越深表示用户越多，线条越亮表示流转的 token 越多。国家来自每位用户自己填写的资料 — 这里不读取任何 IP 地址。",
+      "desc": "国家来自每位用户自己填写的资料 — 这里不读取任何 IP 地址。",
       "legendUsers": "用户",
       "legendFlow": "Token 流向",
-      "legendYou": "你在这里",
       "legendLess": "较少",
       "legendMore": "较多",
       "statCountries": "国家/地区",
@@ -68,6 +64,7 @@
       "statLanes": "活跃通道",
       "tipUsers": "{{count}} 位用户",
       "tipTokens": "{{tokens}} token / 24 小时",
+      "tipRoles": "共享 {{providers}} · 使用 {{consumers}}",
       "tipYou": "你所在的国家/地区",
       "unknownRegion": "未填写地区"
     }

@@ -39,8 +39,12 @@ function regionFlag(code: string): string {
  * `region` is the country the signed-in user declared (`users.region`) — the
  * only location the platform has, since nothing here reads an IP. Empty when
  * signed out or never set, and then nothing is highlighted.
+ *
+ * `children` is the band under the map — the price ticker. Passed in rather
+ * than imported so the page still decides what the panel contains, which is how
+ * the landing page composes the same two pieces.
  */
-export function WorldMap({ region = "" }: { region?: string }) {
+export function WorldMap({ region = "", children }: { region?: string; children?: React.ReactNode }) {
   const { t, i18n } = useTranslation();
   const [regions, setRegions] = useState<GlobeRegion[]>([]);
   const [flows, setFlows] = useState<GlobeFlow[]>([]);
@@ -163,9 +167,64 @@ export function WorldMap({ region = "" }: { region?: string }) {
       desc={t("dashboard.map.desc")}
       className="map-card"
     >
-      {err && (
-        <div className="callout danger card-lead"><IconAlert /><span>{err}</span></div>
-      )}
+      {/* Totals on the left, key on the right, one row above the drawing — the
+          same band the landing page runs over its map. They used to sit under
+          the map behind a rule, which cost the card a horizontal line and put
+          the four figures below the fold of a tall panel. A load failure takes
+          the totals' place rather than adding a row of its own: four totals
+          that are all zero because the request failed is a worse lie than no
+          totals at all. */}
+      <div className="map-head">
+        {err ? (
+          <span className="map-err"><IconAlert />{err}</span>
+        ) : (
+          <dl className="map-stats">
+            <Metric icon={<IconGlobe />} label={t("dashboard.map.statCountries")} value={String(totals.countries)} loading={loading} />
+            <Metric icon={<IconAccount />} label={t("dashboard.map.statUsers")} value={totals.users.toLocaleString()} loading={loading} />
+            <Metric icon={<IconUsage />} label={t("dashboard.map.statTokens")} value={fmtTokens(totals.tokens)} loading={loading} />
+            <Metric icon={<IconZap />} label={t("dashboard.map.statLanes")} value={String(totals.lanes)} loading={loading} />
+          </dl>
+        )}
+
+        <div className="map-keys">
+          <span className="map-key">
+            <span className="mf-hint">{t("dashboard.map.legendUsers")}</span>
+            <span className="mf-hint">{t("dashboard.map.legendLess")}</span>
+            <span className="map-ramp">
+              {[0, 0.25, 0.5, 0.75, 1].map((s) => (
+                <span
+                  key={s}
+                  style={{ background: `color-mix(in srgb, var(--accent) ${Math.round(14 + s * 70)}%, var(--map-land))` }}
+                />
+              ))}
+            </span>
+            <span className="mf-hint">{t("dashboard.map.legendMore")}</span>
+          </span>
+
+          {/* Shown whether or not a lane happens to be drawable right now: the
+              arcs are what the card is about, and a key that comes and goes
+              with the traffic reads as a feature that was removed. */}
+          <span className="map-key">
+            <span className="mf-hint">{t("dashboard.map.legendFlow")}</span>
+            <svg width="34" height="10" aria-hidden="true">
+              <path d="M2 8 Q17 -2 32 5" fill="none" stroke="url(#asale-lane)" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+          </span>
+
+          {mine && (
+            <span className="map-key">
+              {/* The same mark the map draws, so the key explains it rather
+                  than restating the country name in a second colour. */}
+              <svg width="12" height="12" aria-hidden="true">
+                <circle cx="6" cy="6" r="1.9" fill="var(--fg)" />
+                <circle cx="6" cy="6" r="4.8" fill="none" stroke="var(--fg)" strokeWidth="1" opacity="0.45" />
+              </svg>
+              <span aria-hidden="true">{regionFlag(mine)}</span>
+              <span className="map-you-chip">{regionName(mine)}</span>
+            </span>
+          )}
+        </div>
+      </div>
 
       <div ref={wrap} className="map-frame" onMouseLeave={() => setHover(null)}>
         <svg
@@ -260,6 +319,16 @@ export function WorldMap({ region = "" }: { region?: string }) {
                 {t("dashboard.map.tipTokens", { tokens: fmtTokens(hovered.tokens) })}
               </div>
             )}
+            {/* Who the country is on the network, not just how many of them
+                there are — the same line the landing page's tooltip carries. */}
+            {hovered.providers + hovered.consumers > 0 && (
+              <div className="mt-line faint tabular">
+                {t("dashboard.map.tipRoles", {
+                  providers: hovered.providers,
+                  consumers: hovered.consumers,
+                })}
+              </div>
+            )}
             {hovered.region.toUpperCase() === mine && (
               <div className="mt-you">{t("dashboard.map.tipYou")}</div>
             )}
@@ -267,52 +336,7 @@ export function WorldMap({ region = "" }: { region?: string }) {
         )}
       </div>
 
-      {/* Legend + totals share the footer so the map keeps the full frame. */}
-      <div className="map-foot">
-        <div className="map-legend">
-          <span className="mf-label">{t("dashboard.map.legendUsers")}</span>
-          <span className="mf-hint">{t("dashboard.map.legendLess")}</span>
-          <span className="map-ramp">
-            {[0, 0.25, 0.5, 0.75, 1].map((s) => (
-              <span
-                key={s}
-                style={{ background: `color-mix(in srgb, var(--accent) ${Math.round(14 + s * 70)}%, var(--map-land))` }}
-              />
-            ))}
-          </span>
-          <span className="mf-hint">{t("dashboard.map.legendMore")}</span>
-        </div>
-
-        <div className="map-legend">
-          <span className="mf-label">{t("dashboard.map.legendFlow")}</span>
-          <svg width="52" height="12" aria-hidden="true">
-            <path d="M2 9 Q26 -3 50 6" fill="none" stroke="url(#asale-lane)" strokeWidth="2" strokeLinecap="round" />
-          </svg>
-        </div>
-
-        {mine && (
-          <div className="map-legend">
-            <span className="mf-label">{t("dashboard.map.legendYou")}</span>
-            {/* The same mark the map draws, so the legend explains it rather
-                than restating the country name in a second colour. */}
-            <svg width="14" height="14" aria-hidden="true">
-              <circle cx="7" cy="7" r="2.1" fill="var(--fg)" />
-              <circle cx="7" cy="7" r="5.6" fill="none" stroke="var(--fg)" strokeWidth="1" opacity="0.45" />
-            </svg>
-            <span className="map-you-chip">
-              <span aria-hidden="true">{regionFlag(mine)}</span>
-              {regionName(mine)}
-            </span>
-          </div>
-        )}
-
-        <dl className="map-stats">
-          <Metric icon={<IconGlobe />} label={t("dashboard.map.statCountries")} value={String(totals.countries)} loading={loading} />
-          <Metric icon={<IconAccount />} label={t("dashboard.map.statUsers")} value={totals.users.toLocaleString()} loading={loading} />
-          <Metric icon={<IconUsage />} label={t("dashboard.map.statTokens")} value={fmtTokens(totals.tokens)} loading={loading} />
-          <Metric icon={<IconZap />} label={t("dashboard.map.statLanes")} value={String(totals.lanes)} loading={loading} />
-        </dl>
-      </div>
+      {children}
     </Card>
   );
 }
@@ -354,11 +378,14 @@ function YouAreHere({ code, d }: { code: string; d?: string }) {
   );
 }
 
+/** One total in the band above the map: mark, caption and figure on one line.
+ *  Stacked label-over-figure, these four were the tallest thing in the card
+ *  after the map itself; inline they are a caption with a number after it. */
 function Metric({ icon, label, value, loading }: { icon: React.ReactNode; label: string; value: string; loading: boolean }) {
   return (
     <div className="map-stat">
       <dt>{icon}{label}</dt>
-      <dd className="tabular">{loading ? <Skeleton w={40} h={17} r={6} /> : value}</dd>
+      <dd className="tabular">{loading ? <Skeleton w={28} h={13} r={5} /> : value}</dd>
     </div>
   );
 }

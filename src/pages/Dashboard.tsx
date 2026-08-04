@@ -194,12 +194,13 @@ export function Dashboard({ onNavigate, region = "" }: { onNavigate: (t: Tab) =>
         />
       </div>
 
-      {/* What the market pays for the models most people trade. Above the map
-          because it is the number a reader acts on; the map is context. */}
-      <FeaturedPrices />
-
-      {/* Where the network is — and, once signed in, where the reader is in it */}
-      <WorldMap region={region} />
+      {/* One panel for the market: where the network is, and what it charges.
+          The prices used to be a card of their own above the map, which made
+          two blocks out of one statement — and gave four models three lines
+          each to say what a name, a share and a curve say in one row. */}
+      <WorldMap region={region}>
+        <FeaturedPrices />
+      </WorldMap>
     </div>
   );
 }
