@@ -1162,8 +1162,14 @@ select.input {
 /* ── World map ──────────────────────────────────────────────────────────────
    Country outlines come from src/lib/world.ts, so this is plain SVG: fills are
    the accent mixed into the land, and the only motion is the packet on a lane.
-   The map keeps the full width of the card; the legend sits under a rule. */
-.map-card { padding-bottom: 0; }
+
+   Same shape as the landing page's (asale-web): the map runs the full width of
+   the card, corner to corner, with one band above it holding the totals on the
+   left and the key on the right. The band sits on the card's own surface — no
+   tint, no rule — so the only line anywhere near the drawing is the drawing.
+   Legend and totals used to sit *under* the map behind a border, which put the
+   four figures below the fold of a tall card and cost the card a rule. */
+.map-card { padding-bottom: var(--s4); }
 .map-frame { position: relative; margin: 0 calc(-1 * var(--s6)); }
 .map-svg { display: block; width: 100%; height: auto; transition: opacity var(--t-slow) var(--ease); }
 .map-svg.is-loading { opacity: 0.4; }
@@ -1180,30 +1186,36 @@ select.input {
 /* Neutral, like the mark on the map: on this map the accent means "users". */
 .map-tip .mt-you { color: var(--fg); margin-top: var(--s1); font-weight: 500; }
 
-.map-foot {
-  display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3) var(--s6);
-  padding: var(--s4) 0; border-top: 1px solid var(--line);
+/* The band above the map: totals left, key right, one row when there is room
+   and two when there is not. */
+.map-head {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: var(--s2) var(--s5); padding: 0 0 var(--s3);
+  font-size: var(--fs-micro); line-height: 1;
 }
-.map-legend { display: flex; align-items: center; gap: var(--s2); }
-.map-legend .mf-label { font-size: var(--fs-micro); font-weight: 500; color: var(--fg-3); }
-.map-legend .mf-hint { font-size: var(--fs-micro); color: var(--fg-3); }
+.map-keys { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s4); }
+.map-key { display: inline-flex; align-items: center; gap: 6px; }
+.map-key .mf-hint { color: var(--fg-3); }
 .map-ramp { display: flex; border-radius: 999px; overflow: hidden; }
-.map-ramp > span { width: 20px; height: 10px; }
+.map-ramp > span { width: 16px; height: 10px; }
 /* The reader's country, next to the mark that points at it on the map. Neutral
    like the mark itself — the accent on this map means "users", nothing else. */
-.map-you-chip {
-  display: inline-flex; align-items: center; gap: 5px;
-  font-size: var(--fs-meta); font-weight: 500; color: var(--fg);
-}
+.map-you-chip { font-weight: 500; color: var(--fg); }
 
-.map-stats { display: flex; flex-wrap: wrap; gap: var(--s3) var(--s5); margin-left: auto; }
+/* A load failure takes the totals' place in the band, so the two can never
+   collide and a broken request never renders as four zeroes. */
+.map-err { display: inline-flex; align-items: center; gap: 6px; color: var(--danger); }
+.map-err svg { width: 13px; height: 13px; flex-shrink: 0; }
+
+.map-stats { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s4); }
+.map-stat { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .map-stat dt {
   display: flex; align-items: center; gap: 5px;
-  font-size: var(--fs-micro); font-weight: 500; color: var(--fg-3); white-space: nowrap;
+  font-weight: 500; color: var(--fg-3);
 }
 .map-stat dt svg { width: 13px; height: 13px; }
 .map-stat dd {
-  margin: 3px 0 0; font-size: 17px; font-weight: 600; letter-spacing: -0.03em; color: var(--fg);
+  margin: 0; font-size: var(--fs-meta); font-weight: 600; letter-spacing: -0.01em; color: var(--fg);
 }
 
 /* ── Copy chip / code ───────────────────────────────────────────────────── */
@@ -1975,30 +1987,45 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .keyform > .hint { color: var(--fg-3); font-size: var(--fs-meta); line-height: 1.5; }
 
 
-/* ── Featured prices (overview ticker) ──────────────────────────────────────
-   One tile per model the platform features: what it trades at, how far that
-   moved in a day, and the curve it moved along. `auto-fit` rather than a fixed
-   four columns because the list is admin-configurable — between one and eight
-   models — and a fixed grid would leave a lone card stretched across the panel
-   or eight of them crushed into a row. */
-.fp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--s3); }
-.fp-card {
-  padding: var(--s3) var(--s4) var(--s2);
-  border-radius: var(--r2); border: 1px solid var(--line); background: var(--bg-2);
-  display: flex; flex-direction: column; gap: var(--s2); min-width: 0;
+/* ── Price ticker (the map card's bottom band) ──────────────────────────────
+   One tile per model the platform features: its name, what it costs as a share
+   of the vendor's own rate, and the day's curve filled in behind both. The gap
+   between tiles is the separation — four area charts butted together read as
+   one chart, and a rule between them is the thing this panel is trying not to
+   draw. `auto-fit` rather than a fixed four columns because the list is
+   admin-configurable, between one and eight models. */
+.map-ticker {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--s3); margin-top: var(--s3);
 }
-.fp-top { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
-.fp-name { flex: 1; min-width: 0; font-size: var(--fs-meta); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* The discount is the reason to be on this platform at all, so it rides next
-   to the name rather than in the footnotes. */
-.fp-off {
-  flex-shrink: 0; font-family: var(--font-mono); font-size: var(--fs-micro);
-  color: var(--fg-2); padding: 1px 5px; border-radius: var(--r1); background: var(--surface);
+/* Below this the card is wide enough for three tiles and no more, which lays
+   four models out as 3 + 1 — a row with a hole in it. Two and two instead. */
+@media (max-width: 1080px) {
+  .map-ticker { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
-.fp-price { display: flex; align-items: baseline; gap: 5px; min-width: 0; }
-.fp-price > .mono { font-size: 1.15rem; font-weight: 500; letter-spacing: -0.02em; }
-.fp-unit { font-size: var(--fs-micro); color: var(--fg-3); white-space: nowrap; }
-.fp-chg { margin-left: auto; font-size: var(--fs-micro); flex-shrink: 0; }
-/* Fixed height, reserved even when there is no series to draw, so a model
-   priced for the first time does not make its card shorter than its row. */
-.fp-spark { display: block; width: 100%; height: 44px; }
+.tk-tile {
+  position: relative; overflow: hidden; min-width: 0; min-height: 52px;
+  border-radius: var(--r1);
+  /* Where the label ends and the chart begins. A flat series draws its ridge
+     through the middle of its own box; with the box starting at the tile's top
+     edge that ridge ran straight through the model name. */
+  --tick-label: 22px;
+}
+.tk-chart {
+  position: absolute; left: 0; right: 0; bottom: 0; top: var(--tick-label);
+  display: block; width: 100%; height: calc(100% - var(--tick-label));
+  transition: opacity var(--t-fast) var(--ease);
+}
+.tk-tile:hover { background: var(--surface-2); }
+.tk-face {
+  position: relative; z-index: 1; display: flex; align-items: center; gap: 6px;
+  min-width: 0; padding: 5px 8px 0;
+}
+/* Both quiet: the curve behind them carries the colour, the name is the caption
+   of a shape, and the share is the one figure worth reading. */
+.tk-name {
+  flex: 1; min-width: 0; font-size: var(--fs-meta); color: var(--fg-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tk-pct { flex-shrink: 0; font-size: var(--fs-meta); font-weight: 500; color: var(--fg); }
+.tk-tile .mark { opacity: 0.85; }

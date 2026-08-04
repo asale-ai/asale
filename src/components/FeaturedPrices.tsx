@@ -1,12 +1,17 @@
 // What the market pays right now for the models the platform features — the
-// overview's price ticker.
+// bottom band of the overview's network panel.
 //
-// The same panel the landing page draws (asale-web/src/components/home/
+// The same strip the landing page draws (asale-web/src/components/home/
 // FeaturedPrices.tsx), from the same endpoint and the same admin-chosen list.
 // Two components rather than one for the reason the two world maps are two:
 // different React majors, i18n libraries and design systems. The *data* is one
 // request, batched server-side, so neither app maintains its own idea of which
 // models matter.
+//
+// It renders as a row inside the map's card, not a card of its own. A panel of
+// four price tiles above the map made the overview two blocks that were saying
+// one thing — here is the market, here is where it is — and the prices took
+// three lines each to say what a name, a share and a shape say in one.
 //
 // Everything expensive about this is already paid for elsewhere: the server
 // batches the catalog lookup and 24h of history into one response and caches it
@@ -16,8 +21,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke, inTauri, type FeaturedModel, type FeaturedResp, type SparkPoint } from "../lib";
-import { Card, Mark, Skeleton } from "../ui";
-import { IconStore } from "../icons";
+import { Mark } from "../ui";
 
 /**
  * How often the ticker refreshes.
@@ -31,14 +35,17 @@ import { IconStore } from "../icons";
 const POLL_MS = 60_000;
 
 /** Below this a move is the pricing EMA's own noise, not a trend: shown flat,
- *  unsigned, in grey. Matches the web ticker so the two never disagree. */
+ *  in grey. Matches the web ticker so the two never disagree. */
 const FLAT_BAND = 0.001;
 
-/** Sparkline viewbox. The x axis is stretched to the card's width; only the
- *  aspect ratio and stroke weight come from these. */
+/** Sparkline viewbox. The x axis is stretched to the tile's width; only the
+ *  aspect ratio comes from these. */
 const W = 240;
 const H = 44;
-const PAD = 3;
+/** Breathing room above the highest point and under the lowest, so a peak does
+ *  not run flush into the label above and a trough still has visible fill. */
+const PAD = 4;
+const FLOOR = 6;
 /** Narrowest y range a curve is drawn against, in ratio units — what stops a
  *  0.05% wobble from being rendered as a mountain range. */
 const MIN_BAND = 0.04;
@@ -50,15 +57,6 @@ function trendOf(change: number | null): Trend {
   return change > 0 ? "up" : "down";
 }
 
-/** A signed percentage, always signed. The dead band above greys the number;
- *  it does not strip the sign, because an unsigned "0.02%" for a −0.015% move
- *  leaves the reader unable to tell which way it went. Sign is read off the
- *  *rounded* value so a −0.001% move does not render as "−0.00%". */
-function fmtChange(pct: number): string {
-  const n = Number(pct.toFixed(2));
-  return `${n > 0 ? "+" : n < 0 ? "−" : ""}${Math.abs(n).toFixed(2)}%`;
-}
-
 const COLOR: Record<Trend, string> = {
   up: "var(--success)",
   down: "var(--danger)",
@@ -66,7 +64,6 @@ const COLOR: Record<Trend, string> = {
 };
 
 export function FeaturedPrices() {
-  const { t } = useTranslation();
   const [models, setModels] = useState<FeaturedModel[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -76,9 +73,9 @@ export function FeaturedPrices() {
     const load = () =>
       invoke<FeaturedResp>("market_featured")
         .then((r) => { if (alive) setModels(r.models || []); })
-        // Silent: this panel is context, not state the reader is acting on, and
-        // a red banner over a price ticker on the overview page would be a
-        // louder failure than the missing prices warrant.
+        // Silent: this row is context, not state the reader is acting on, and a
+        // red banner under a world map would be a louder failure than the
+        // missing prices warrant.
         .catch(() => {})
         .finally(() => { if (alive) setLoading(false); });
     void load();
@@ -86,68 +83,65 @@ export function FeaturedPrices() {
     return () => { alive = false; clearInterval(id); };
   }, []);
 
+  // The band's own height while the first response is in flight, so the card
+  // does not grow under the reader when the prices land. Empty rather than
+  // shimmering: it is one row at the foot of a panel whose main content — the
+  // map — has already arrived, and a second animation there would be noise.
   if (loading) {
     return (
-      <Card icon={<IconStore />} title={t("dashboard.prices.title")}>
-        <div className="fp-grid">
-          {Array.from({ length: 4 }, (_, i) => (
-            <div key={i} className="fp-card"><Skeleton h={92} r={10} /></div>
-          ))}
-        </div>
-      </Card>
+      <div className="map-ticker" aria-hidden>
+        {Array.from({ length: 4 }, (_, i) => <div key={i} className="tk-tile" />)}
+      </div>
     );
   }
 
-  // Nothing configured, or the server is unreachable: the panel's whole content
-  // is live numbers, so it removes itself rather than sitting there as a row of
-  // dashes.
+  // Nothing configured, or the server is unreachable: the row's whole content
+  // is live numbers, so it removes itself rather than sitting under the map as
+  // four empty tiles.
   if (models.length === 0) return null;
 
   return (
-    <Card
-      icon={<IconStore />}
-      title={t("dashboard.prices.title")}
-      desc={t("dashboard.prices.sub")}
-    >
-      <div className="fp-grid">
-        {models.map((m) => <PriceCard key={m.model} m={m} />)}
-      </div>
-    </Card>
-  );
-}
-
-function PriceCard({ m }: { m: FeaturedModel }) {
-  const { t } = useTranslation();
-  const trend = trendOf(m.change_24h);
-  const pct = m.change_24h === null ? null : m.change_24h * 100;
-  // Output tokens: the price that dominates a real bill, and the one the market
-  // page leads with — so both surfaces mean the same thing by "the price".
-  const price = (m.market_prices.output / 1000).toLocaleString(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 4,
-  });
-
-  return (
-    <div className="fp-card">
-      <div className="fp-top">
-        <Mark id={m.provider} size="sm" />
-        <span className="fp-name mono" title={m.display_name}>{m.model}</span>
-        <span className="fp-off">{Math.round(m.discount * 100)}%</span>
-      </div>
-      <div className="fp-price">
-        <span className="mono tabular">{price}</span>
-        <span className="fp-unit">{t("dashboard.prices.perM")}</span>
-        <span className="fp-chg mono tabular" style={{ color: COLOR[trend] }}>
-          {pct === null ? t("dashboard.prices.new") : fmtChange(pct)}
-        </span>
-      </div>
-      <Spark points={m.points} trend={trend} />
+    <div className="map-ticker">
+      {models.map((m) => <Tick key={m.model} m={m} />)}
     </div>
   );
 }
 
-function Spark({ points, trend }: { points: SparkPoint[]; trend: Trend }) {
-  const geom = useMemo(() => {
+function Tick({ m }: { m: FeaturedModel }) {
+  const { t } = useTranslation();
+  const trend = trendOf(m.change_24h);
+  // What you pay as a share of the vendor's own rate — the inverse of the
+  // discount, and the only figure on the tile. Measured on output tokens, the
+  // price that dominates a real bill and the one the market board leads with,
+  // so every surface agrees on what "the price" of a model means.
+  const ofList = Math.max(0, Math.round((1 - m.discount) * 100));
+
+  return (
+    <div className="tk-tile">
+      <Spark id={m.model} points={m.points} trend={trend} />
+      <span className="tk-face">
+        <Mark id={m.provider} size="sm" />
+        <span className="tk-name mono" title={m.display_name}>{m.model}</span>
+        {/* Unlabelled by design — the full sentence is the tile's title, and
+            for a pointer-less reader every tile in the row is showing the same
+            thing. */}
+        <span className="tk-pct mono tabular" title={t("dashboard.prices.ofList")}>{ofList}%</span>
+      </span>
+    </div>
+  );
+}
+
+/**
+ * The day's curve as a filled area, stretched across the whole tile and dropped
+ * behind the text.
+ *
+ * Area, not line. Drawn as the ground under a row of text, a 1.5px stroke was a
+ * hairline running the width of the tile — on a quiet day a perfectly straight
+ * one, indistinguishable from a rule someone had drawn there. The filled shape
+ * says the same thing with no edge to mistake for a border.
+ */
+function Spark({ id, points, trend }: { id: string; points: SparkPoint[]; trend: Trend }) {
+  const area = useMemo(() => {
     if (points.length < 2) return null;
     const ratios = points.map((p) => p.ratio);
     const lo = Math.min(...ratios);
@@ -158,50 +152,40 @@ function Spark({ points, trend }: { points: SparkPoint[]; trend: Trend }) {
     const half = Math.max((hi - lo) / 2, MIN_BAND / 2);
     const top = mid + half;
     const span = half * 2;
-    const plotW = W - PAD * 2;
-    const plotH = H - PAD * 2;
-    const x = (i: number) => PAD + (i / (points.length - 1)) * plotW;
+    const plotH = H - PAD - FLOOR;
+    const x = (i: number) => (i / (points.length - 1)) * W;
     const y = (r: number) => PAD + ((top - r) / span) * plotH;
-    const line = points
+    const ridge = points
       .map((p, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(p.ratio).toFixed(1)}`)
       .join(" ");
-    return {
-      line,
-      area: `${line} L${x(points.length - 1).toFixed(1)},${H} L${PAD},${H} Z`,
-      endX: x(points.length - 1).toFixed(1),
-      endY: y(ratios[ratios.length - 1]).toFixed(1),
-    };
+    // Closed down to the bottom of the box: with no stroke over it this shape
+    // is the whole chart, so its top edge is the value and its depth is weight.
+    return `${ridge} L${W},${H} L0,${H} Z`;
   }, [points]);
 
-  // One point is a dot, not a line. The box is still reserved so a model with
-  // no history yet does not make its card shorter than the others.
-  if (!geom) return <div className="fp-spark" />;
-  const color = COLOR[trend];
+  // One point is a dot, not a shape. The box is still reserved so a model with
+  // no history yet does not make its tile shorter than the others.
+  if (!area) return <div className="tk-chart" />;
+
+  const tint = COLOR[trend];
+  // Ids may not start with a digit and may not contain whitespace; model names
+  // do both. Everything outside the safe set becomes a dash. Two tiles sharing
+  // an id would both take the first one's colours — the gradient is a
+  // referenced paint server, not a local style.
+  const fillId = `tk-fill-${id.replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
 
   return (
-    <svg className="fp-spark" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
-      <path d={geom.area} fill={color} opacity={0.09} />
-      {/* vectorEffect keeps the stroke out of the x-axis stretch, so the line is
-          the same weight on a wide card as on a narrow one. */}
-      <path
-        d={geom.line}
-        fill="none"
-        stroke={color}
-        strokeWidth={1.5}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        vectorEffect="non-scaling-stroke"
-      />
-      {/* "Now", as a zero-length path with a round cap rather than a <circle>:
-          a circle would be stretched into an ellipse by the same x-axis scale
-          the stroke is exempt from. */}
-      <path
-        d={`M${geom.endX},${geom.endY} l0,0`}
-        stroke={color}
-        strokeWidth={4}
-        strokeLinecap="round"
-        vectorEffect="non-scaling-stroke"
-      />
+    <svg className="tk-chart" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
+      {/* The fill fades downwards instead of sitting at one flat opacity: a
+          quiet day draws a nearly straight ridge, and under a flat wash that
+          reads as a rectangle someone forgot to fill in. */}
+      <defs>
+        <linearGradient id={fillId} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={tint} stopOpacity={0.42} />
+          <stop offset="100%" stopColor={tint} stopOpacity={0.04} />
+        </linearGradient>
+      </defs>
+      <path d={area} fill={`url(#${fillId})`} />
     </svg>
   );
 }
