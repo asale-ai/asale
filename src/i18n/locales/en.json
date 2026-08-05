@@ -266,7 +266,10 @@
     "endpointFloor": "Price floor",
     "endpointTermsHint": "The floor is the share of list price below which this endpoint stops selling — it costs real money per token, so this is what keeps it from selling under cost. One key per account: connect several keys of the same vendor under different names, or the later one replaces the earlier. Both terms can be changed later on the account below.",
     "endpointChecking": "Checking…",
-    "endpointConnected": "{{account}} connected over {{wire}}: serves {{served}} models, {{selling}} of them tradable here."
+    "endpointConnected": "{{account}} connected over {{wire}}: serves {{served}} models, {{selling}} of them tradable here.",
+    "blockedTitle": "Your listings are not being matched",
+    "blockedBody": "Reputation is {{score}}, below the {{min}} the platform requires to route traffic to a seller. Your models stay listed, but no request will reach them.",
+    "blockedHow": "Reputation is recalculated from the last 24 hours of trades — success rate, latency and metering accuracy. It recovers on its own once the failed calls age out. If failures are ongoing, check the upstream account above."
   },
   "consume": {
     "title": "Buy",
@@ -902,5 +905,40 @@
     "quitNote": "Quitting stops selling. Closing the window only hides it here.",
     "earnedToday": "Earned today",
     "calls": "{{n}} requests"
+  },
+  "upgrade": {
+    "title": "Update required",
+    "body": "This build ({{current}}) is older than the {{min}} the platform now requires.",
+    "bodyNoVersion": "This build ({{current}}) is older than the platform now requires.",
+    "reasonSell": "Selling is paused until you update.",
+    "reasonBuy": "Buying is paused until you update.",
+    "now": "Update now",
+    "checking": "Checking…",
+    "downloading": "Downloading…",
+    "downloadingPct": "Downloading {{pct}}%",
+    "restart": "Restart to finish",
+    "download": "Download",
+    "manual": "download it manually",
+    "noneAvailable": "No update is published yet — try again shortly"
+  },
+  "selfcheck": {
+    "noHome": {
+      "title": "Credentials are being stored next to the working directory",
+      "body": "No home directory could be resolved, so state goes to `{{dir}}` — which moves whenever the app is started from somewhere else, and looks like your accounts have vanished. Set HOME (or ASALE_DATA_DIR) and restart."
+    },
+    "splitState": {
+      "title": "Two credential stores on this machine",
+      "body": "This process is using {{active}}, but {{other}} also holds saved state. Accounts saved to one are invisible to the other. Start the app the same way every time, or set ASALE_DATA_DIR to pin it."
+    },
+    "regionBlocked": {
+      "title": "The provider is refusing requests from this region",
+      "body": "{{lanes}} lane(s) are failing with a regional 403. This is not a login problem — signing in again will not help. Configure an upstream proxy in Settings.",
+      "action": "Open settings"
+    },
+    "sellAllOff": {
+      "title": "Selling is off for every connected account",
+      "body": "{{accounts}} account(s) are connected but none is offered on the market, so they earn nothing. Signing in again resets this switch, which is the usual reason it is off.",
+      "action": "Open sell page"
+    }
   }
 }

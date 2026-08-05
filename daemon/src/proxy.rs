@@ -460,13 +460,29 @@ async fn send_market(
     bytes: &axum::body::Bytes,
     key: &str,
 ) -> Result<reqwest::Response, reqwest::Error> {
-    st.http
+    let mut req = st
+        .http
         .request(method.clone(), target)
         .header("authorization", format!("Bearer {key}"))
-        .header("content-type", "application/json")
-        .body(bytes.to_vec())
-        .send()
-        .await
+        .header("content-type", "application/json");
+    // The gateway answers a few refusals — "upgrade the app", "nobody is selling
+    // this", "top up" — as an assistant turn inside the user's AI session rather
+    // than as a status code their tool prints raw. It writes that sentence in
+    // the language named here, so a user who set the app to Chinese does not get
+    // told to upgrade in English.
+    if let Some(lang) = ui_language(st).await {
+        req = req.header("accept-language", lang);
+    }
+    req.body(bytes.to_vec()).send().await
+}
+
+/// The language the user picked in the app, if they picked one.
+///
+/// Same `language` setting the desktop shell and the tray read, so all three
+/// agree. A miss is not worth a log line: the gateway falls back to the
+/// deployment's own default, which is a reasonable answer and not an error.
+async fn ui_language(st: &ProxyState) -> Option<String> {
+    st.store.get_setting("language").await.ok().flatten().filter(|v| !v.trim().is_empty())
 }
 
 /// Replace the key the gateway just rejected.
@@ -529,6 +545,24 @@ async fn forward_market(
 
     let status = resp.status();
     log_provenance(resp.headers());
+    // The gateway normally answers this one as an assistant turn the user reads
+    // in their AI session, so it arrives here as a 200 and never trips this
+    // branch — but a caller the gateway does not recognise as our client (or an
+    // older gateway) still gets the real 426, and either way the desktop window
+    // should be showing an upgrade button.
+    let notice = resp.headers().get("x-asale-notice").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    if status == reqwest::StatusCode::UPGRADE_REQUIRED || notice == "client_upgrade_required" {
+        let min = resp
+            .headers()
+            .get("x-asale-notice-min-version")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        asale_client_core::upgrade::record(min, "buy");
+    } else if status.is_success() && notice.is_empty() {
+        // A trade that actually completed — not a refusal wearing a 200 — is the
+        // proof that this build is still acceptable.
+        asale_client_core::upgrade::clear();
+    }
     if !status.is_success() {
         if meter {
             let task_id = format!("c_{}", uuid::Uuid::new_v4().simple());

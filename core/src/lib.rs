@@ -16,7 +16,9 @@ pub mod pool;
 pub mod protocol;
 pub mod reconcile;
 pub mod security;
+pub mod seller_status;
 pub mod store;
+pub mod upgrade;
 pub mod ws;
 
 pub use discovery::{

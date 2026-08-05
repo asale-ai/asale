@@ -7,6 +7,7 @@ import {
 } from "../lib";
 import { StatTile, PageHead, Mark } from "../ui";
 import { FeaturedPrices } from "../components/FeaturedPrices";
+import { SelfCheck } from "../components/SelfCheck";
 import { WorldMap } from "../components/WorldMap";
 import { IconWallet, IconPublish, IconConsume, IconArrowRight, IconServer } from "../icons";
 
@@ -104,6 +105,10 @@ export function Dashboard({ onNavigate, region = "" }: { onNavigate: (t: Tab) =>
           <IconServer /><span>{t("dashboard.daemonDown")}</span>
         </div>
       )}
+
+      {/* Environment faults, above the numbers: while one of these is showing,
+          the numbers below it are explaining a system that is not fully set up. */}
+      <SelfCheck />
 
       {/* Three tiles, and that is the whole state of the account: what the
           wallet holds, what is selling, what is buying. Each used to be a tile

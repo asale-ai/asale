@@ -9,6 +9,16 @@ import { Card, Ok, Err, SkeletonRows, PageHead, IconAction, Empty, Mark, CopyChi
 import { IconTrash, IconShield, IconChip, IconRefresh, IconPlus, IconPencil, IconInfo } from "../icons";
 import { errText } from "../errors";
 
+/**
+ * How the matcher currently sees this seller. `blocked` means every lane below
+ * is declared, indexed, and skipped — the failure with no other symptom.
+ */
+interface SellerStatus {
+  score: number;
+  min_score: number;
+  blocked: boolean;
+}
+
 /** Subscriptions connected by signing in through a loopback OAuth callback. */
 const PROVIDERS = [
   { id: "claude", label: "Claude Code" },
@@ -370,6 +380,7 @@ export function Publish() {
   // Polled with the accounts would mean a keychain + filesystem scan every few
   // seconds, so this is read once and refreshed when the user rescans.
   const [buyingTools, setBuyingTools] = useState<string[]>([]);
+  const [sellerStatus, setSellerStatus] = useState<SellerStatus | null>(null);
   const [importErr, setImportErr] = useState("");
 
   // Asked once: it is an env var on the daemon, so it cannot change while the
@@ -424,6 +435,19 @@ export function Publish() {
     const tick = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
     return () => { clearInterval(id); clearInterval(tick); };
   }, [loadAccounts]);
+
+  // Reputation standing. The gateway reports it once per supply declaration
+  // (every 60s), so polling faster than that would only re-read the same value.
+  useEffect(() => {
+    if (!inTauri) return;
+    const poll = () =>
+      invoke<SellerStatus | null>("seller_status")
+        .then((s) => setSellerStatus(s ?? null))
+        .catch(() => {});
+    poll();
+    const id = setInterval(poll, 30000);
+    return () => clearInterval(id);
+  }, []);
 
   /** Put a lane the operator has fixed back on the market. */
   async function resume(lane: Lane) {
@@ -1025,6 +1049,23 @@ export function Publish() {
       />
 
       <Err>{err}</Err>
+
+      {/* Above everything on this page: while it is showing, nothing below it
+          can earn, however healthy it looks. */}
+      {sellerStatus?.blocked && (
+        <div className="callout danger" role="alert">
+          <IconInfo />
+          <div>
+            <strong>{t("publish.blockedTitle")}</strong>
+            <div className="text-sm" style={{ marginTop: 4 }}>
+              {t("publish.blockedBody", { score: sellerStatus.score, min: sellerStatus.min_score })}
+            </div>
+            <div className="text-sm faint" style={{ marginTop: 4 }}>
+              {t("publish.blockedHow")}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Connecting comes first: with no account yet the rest of the page has
           nothing to show, and the empty state points "above" for OAuth. */}

@@ -316,6 +316,17 @@ async fn sleep_or_shutdown(shutdown_rx: &mut watch::Receiver<bool>, dur: Duratio
     }
 }
 
+/// Dig the required version out of a 426 body.
+///
+/// The gateway sends `{"error":{"key":…,"params":{"min":"0.4.0",…}}}`. Falling
+/// back to an empty string is fine — the UI then says "an update is required"
+/// without naming a version, which is still the actionable half of the message.
+fn min_version_from_body(body: Option<&[u8]>) -> String {
+    body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+        .and_then(|v| v["error"]["params"]["min"].as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
 /// The gateway this client intends to reach, as it will appear in the signed
 /// handshake: the host of the WS URL, without port or path.
 ///
@@ -420,6 +431,11 @@ async fn run_session(
         set(h, protocol::H_SIG, sig);
         set(h, protocol::H_AUDIENCE, audience.clone());
         set(h, protocol::H_CHALLENGE, challenge.clone());
+        // The upgrade request carries no `User-Agent`, so this header is the
+        // only thing that tells the gateway which build is asking to publish —
+        // and therefore the only way it can refuse an outdated seller before the
+        // socket exists.
+        set(h, protocol::H_CLIENT_VERSION, crate::http::VERSION.to_string());
     }
 
     // Raise the frame/message ceiling to what the gateway advertises. Left at
@@ -435,10 +451,23 @@ async fn run_session(
     let ws = match tokio_tungstenite::connect_async_with_config(req, Some(ws_config), false).await {
         Ok((ws, _)) => ws,
         Err(e) => {
+            // 426 is the platform saying this build is too old to sell. It is
+            // not a transport failure and reconnecting will never fix it, so it
+            // is recorded for the UI instead of just being logged — the seller's
+            // only symptom otherwise is a publisher that silently never comes
+            // online.
+            if let tokio_tungstenite::tungstenite::Error::Http(resp) = &e {
+                if resp.status() == tokio_tungstenite::tungstenite::http::StatusCode::UPGRADE_REQUIRED {
+                    crate::upgrade::record(&min_version_from_body(resp.body().as_deref()), "sell");
+                    return SessionOutcome::Closed { was_online: false };
+                }
+            }
             tracing::warn!("ws connect failed: {e}");
             return SessionOutcome::Closed { was_online: false };
         }
     };
+    // Reaching this point is the proof that the build is acceptable again.
+    crate::upgrade::clear();
     let (mut ws_tx, mut ws_rx) = ws.split();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Envelope>();
 
@@ -676,6 +705,14 @@ fn handle_control(
             if let Some(l) = lanes {
                 l.on_lane_pause(&ctrl.model, &ctrl.reason, ctrl.resume_requires_user);
             }
+            ControlResult::Continue
+        }
+        // Reputation standing, reported on every supply declaration. Recorded
+        // rather than acted on: nothing the client can do about it, but a seller
+        // getting no traffic deserves to see the reason without being told to
+        // read a server log.
+        "seller.status" => {
+            crate::seller_status::record(ctrl.score, ctrl.min_score);
             ControlResult::Continue
         }
         "kick" => {

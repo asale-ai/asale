@@ -21,6 +21,7 @@ pub mod oauth;
 pub mod proxy;
 pub mod publisher;
 pub mod rpc;
+pub mod selfcheck;
 pub mod state;
 pub mod tool_config;
 pub mod usage_scan;
