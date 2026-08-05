@@ -273,6 +273,15 @@ async fn run_loop(
                 let _ = state_tx.send(ConnState::Kicked);
                 return;
             }
+            SessionOutcome::Migrate => {
+                // No sleep and no backoff growth: this was a planned handover,
+                // not a fault, and the replacement node is already accepting.
+                let _ = state_tx.send(ConnState::Reconnecting);
+                backoff = BACKOFF_START;
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+            }
             SessionOutcome::Closed { was_online } => {
                 if was_online {
                     backoff = BACKOFF_START; // healthy session → reset backoff.
@@ -292,6 +301,10 @@ async fn run_loop(
 enum SessionOutcome {
     Shutdown,
     Kicked,
+    /// The node asked us to move. Reconnect immediately: waiting out a backoff
+    /// would take this device off the market for no reason, and the whole point
+    /// of the notice is that another node is already there to take it.
+    Migrate,
     Closed { was_online: bool },
 }
 
@@ -587,6 +600,7 @@ async fn run_session(
                                     if let Ok(ctrl) = serde_json::from_value::<ControlPayload>(env.payload.clone()) {
                                         match handle_control(&ctrl, state_tx, deps.lanes.as_deref()) {
                                             ControlResult::Kick => { outcome = SessionOutcome::Kicked; break; }
+                                            ControlResult::Reconnect => { outcome = SessionOutcome::Migrate; break; }
                                             ControlResult::Continue => {}
                                         }
                                     }
@@ -645,6 +659,9 @@ fn spawn_execute(
 
 enum ControlResult {
     Kick,
+    /// The gateway node holding this socket is being replaced. End the session
+    /// and reconnect at once — a different node will pick it up.
+    Reconnect,
     Continue,
 }
 
@@ -664,6 +681,14 @@ fn handle_control(
         "kick" => {
             tracing::warn!("server kicked device: {}", ctrl.reason);
             ControlResult::Kick
+        }
+        // Deliberately *not* a kick. A kick is terminal — it stops the
+        // reconnect loop and leaves the device offline until a human acts.
+        // A node being replaced during a deploy wants the opposite: go away
+        // and come straight back somewhere else.
+        "reconnect" => {
+            tracing::info!("gateway asked us to reconnect: {}", ctrl.reason);
+            ControlResult::Reconnect
         }
         "throttle" => {
             tracing::info!("server throttle {}ms: {}", ctrl.throttle_ms, ctrl.reason);
@@ -926,5 +951,68 @@ mod tests {
         .await
         .unwrap_or(false);
         assert!(kicked, "kick control should move to Kicked and stop the loop");
+    }
+
+    #[tokio::test]
+    async fn control_reconnect_moves_the_session_instead_of_ending_it() {
+        // The distinction that makes zero-downtime deploys possible. A gateway
+        // node being replaced sends `reconnect`; if the client treated that as a
+        // kick, every release would take the whole fleet of publishers off the
+        // market until each user noticed and intervened.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (connects_tx, mut connects_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        tokio::spawn(async move {
+            for attempt in 0..2u32 {
+                serve_challenge(&listener).await;
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let ack = Envelope::new(protocol::T_HELLO_ACK, serde_json::json!({}));
+                ws.send(Message::Text(serde_json::to_string(&ack).unwrap())).await.unwrap();
+                let _ = connects_tx.send(attempt);
+                if attempt == 0 {
+                    let mv = Envelope::new(
+                        protocol::T_CONTROL,
+                        serde_json::json!({"action": "reconnect", "reason": "node draining"}),
+                    );
+                    ws.send(Message::Text(serde_json::to_string(&mv).unwrap())).await.unwrap();
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                } else {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            }
+        });
+
+        let cfg = Arc::new(FixedConfig { url: format!("ws://127.0.0.1:{port}/v1/ws") });
+        let handle = spawn_publisher(cfg, deps());
+        let mut rx = handle.state_receiver();
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), connects_rx.recv()).await.unwrap(),
+            Some(0)
+        );
+        // The point of the test: it comes back, and quickly.
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), connects_rx.recv()).await
+                .expect("a reconnect notice must not end the publisher loop"),
+            Some(1)
+        );
+        let back = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match *rx.borrow() {
+                    ConnState::Online => return true,
+                    ConnState::Kicked | ConnState::Offline => return false,
+                    _ => {}
+                }
+                if rx.changed().await.is_err() {
+                    return false;
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(back, "the device must be back online, not kicked or offline");
+        handle.stop();
     }
 }
