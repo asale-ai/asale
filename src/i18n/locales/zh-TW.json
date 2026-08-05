@@ -266,7 +266,10 @@
     "endpointFloor": "價格底線",
     "endpointTermsHint": "底價是佔原價的百分比，市場價低於它就自動停售——這個端點每個 token 都是真金白銀，底價就是防止虧本賣的那道閘。一個 key 一個帳號：同一家的多個 key 請用不同名稱連接，重名會互相覆蓋。兩項之後都能在下面的帳號裡改。",
     "endpointChecking": "驗證中…",
-    "endpointConnected": "{{account}} 已依 {{wire}} 協定連接：端點提供 {{served}} 個模型，其中 {{selling}} 個平台在交易。"
+    "endpointConnected": "{{account}} 已依 {{wire}} 協定連接：端點提供 {{served}} 個模型，其中 {{selling}} 個平台在交易。",
+    "blockedTitle": "你的掛單沒有被撮合",
+    "blockedBody": "目前信譽分 {{score}}，低於平台派單所需的 {{min}}。模型仍在掛著，但不會有任何請求進來。",
+    "blockedHow": "信譽分依最近 24 小時的成交情況重算 —— 成功率、延遲、計量準確性。失敗記錄滑出視窗後會自動恢復。若仍持續失敗，請先檢查上方的上游帳號。"
   },
   "consume": {
     "title": "買入",
@@ -902,5 +905,40 @@
     "quitNote": "結束後停止出售；關閉視窗只是收進系統列。",
     "earnedToday": "今日收入",
     "calls": "{{n}} 次請求"
+  },
+  "upgrade": {
+    "title": "需要升級",
+    "body": "目前版本 {{current}} 低於平台要求的 {{min}}。",
+    "bodyNoVersion": "目前版本 {{current}} 低於平台要求。",
+    "reasonSell": "升級前無法賣出。",
+    "reasonBuy": "升級前無法買入。",
+    "now": "立即升級",
+    "checking": "檢查中…",
+    "downloading": "下載中…",
+    "downloadingPct": "下載中 {{pct}}%",
+    "restart": "重新啟動以完成升級",
+    "download": "下載",
+    "manual": "手動下載",
+    "noneAvailable": "新版本尚未發佈，請稍後再試"
+  },
+  "selfcheck": {
+    "noHome": {
+      "title": "憑據被存到了工作目錄旁邊",
+      "body": "沒能解析出使用者主目錄，狀態存到了 `{{dir}}`。從別的位置啟動應用程式時這個目錄就會變，看起來就像帳號憑空消失了。請設定 HOME（或 ASALE_DATA_DIR）後重新啟動。"
+    },
+    "splitState": {
+      "title": "這台機器上有兩份憑據",
+      "body": "目前行程用的是 {{active}}，但 {{other}} 裡也存著狀態。存在其中一邊的帳號，另一邊完全看不到。請固定用同一種方式啟動，或用 ASALE_DATA_DIR 指定目錄。"
+    },
+    "regionBlocked": {
+      "title": "上游拒絕了來自目前地區的請求",
+      "body": "有 {{lanes}} 條車道因地區限制回傳 403。這不是登入問題，重新登入沒有用。請到設定裡配置上游代理。",
+      "action": "開啟設定"
+    },
+    "sellAllOff": {
+      "title": "所有已連接帳號都沒開賣出",
+      "body": "已連接 {{accounts}} 個帳號，但一個都沒掛到市場上，因此不會有任何收入。重新登入會重置這個開關，通常就是它被關掉的原因。",
+      "action": "開啟賣出頁"
+    }
   }
 }

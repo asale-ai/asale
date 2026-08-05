@@ -266,7 +266,10 @@
     "endpointFloor": "价格底线",
     "endpointTermsHint": "底价是占原价的百分比，市场价低于它就自动停售——这个端点每个 token 都是真金白银，底价就是防止亏本卖的那道闸。一个 key 一个账号：同一家的多个 key 请用不同名称连接，重名会互相覆盖。两项之后都能在下面的账号里改。",
     "endpointChecking": "验证中…",
-    "endpointConnected": "{{account}} 已按 {{wire}} 协议连接：端点提供 {{served}} 个模型，其中 {{selling}} 个平台在交易。"
+    "endpointConnected": "{{account}} 已按 {{wire}} 协议连接：端点提供 {{served}} 个模型，其中 {{selling}} 个平台在交易。",
+    "blockedTitle": "你的挂单没有被撮合",
+    "blockedBody": "当前信誉分 {{score}}，低于平台派单所需的 {{min}}。模型仍在挂着，但不会有任何请求进来。",
+    "blockedHow": "信誉分按最近 24 小时的成交情况重算 —— 成功率、延迟、计量准确性。失败记录滑出窗口后会自动恢复。如果还在持续失败，先检查上面的上游账号。"
   },
   "consume": {
     "title": "买入",
@@ -902,5 +905,40 @@
     "quitNote": "退出后停止出售；关闭窗口只是收进托盘。",
     "earnedToday": "今日收入",
     "calls": "{{n}} 次请求"
+  },
+  "upgrade": {
+    "title": "需要升级",
+    "body": "当前版本 {{current}} 低于平台要求的 {{min}}。",
+    "bodyNoVersion": "当前版本 {{current}} 低于平台要求。",
+    "reasonSell": "升级前无法卖出。",
+    "reasonBuy": "升级前无法买入。",
+    "now": "立即升级",
+    "checking": "检查中…",
+    "downloading": "下载中…",
+    "downloadingPct": "下载中 {{pct}}%",
+    "restart": "重启完成升级",
+    "download": "下载",
+    "manual": "手动下载",
+    "noneAvailable": "新版本尚未发布，请稍后再试"
+  },
+  "selfcheck": {
+    "noHome": {
+      "title": "凭据被存到了工作目录旁边",
+      "body": "没能解析出用户主目录，状态存到了 `{{dir}}`。从别的位置启动应用时这个目录就会变，看起来就像账号凭空消失了。请设置 HOME（或 ASALE_DATA_DIR）后重启。"
+    },
+    "splitState": {
+      "title": "这台机器上有两份凭据",
+      "body": "当前进程用的是 {{active}}，但 {{other}} 里也存着状态。存在其中一边的账号，另一边完全看不到。请固定用同一种方式启动，或用 ASALE_DATA_DIR 指定目录。"
+    },
+    "regionBlocked": {
+      "title": "上游拒绝了来自当前地区的请求",
+      "body": "有 {{lanes}} 条车道因地区限制返回 403。这不是登录问题，重新登录没有用。请到设置里配置上游代理。",
+      "action": "打开设置"
+    },
+    "sellAllOff": {
+      "title": "所有已连接账号都没开卖出",
+      "body": "已连接 {{accounts}} 个账号，但一个都没挂到市场上，因此不会有任何收入。重新登录会重置这个开关，通常就是它被关掉的原因。",
+      "action": "打开卖出页"
+    }
   }
 }

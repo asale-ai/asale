@@ -108,6 +108,15 @@ pub const H_SIG: &str = "x-asale-sig";
 pub const H_AUDIENCE: &str = "x-asale-audience";
 pub const H_CHALLENGE: &str = "x-asale-challenge";
 
+/// The client's own build version, so the platform can refuse to trade with a
+/// release too old to behave. Sent on the WS upgrade and on every HTTP call to
+/// asale's own hosts — not to providers, who have no business knowing.
+///
+/// Carried in a header of its own rather than left to `User-Agent` because the
+/// upgrade request has no `User-Agent` to piggyback on, and because a header
+/// that means exactly one thing survives a UA-string reformat.
+pub const H_CLIENT_VERSION: &str = "x-asale-client-version";
+
 /// The exact bytes both sides sign and verify. Defined once so the two can
 /// never disagree about field order or separator.
 pub fn handshake_signing_body(

@@ -42,6 +42,14 @@ const LOCAL_NO_PROXY: &str = "localhost,127.0.0.1,::1";
 
 const UA: &str = concat!("asale-client/", env!("CARGO_PKG_VERSION"));
 
+/// This build's version, as the platform's minimum-version gate sees it.
+///
+/// The whole workspace shares one version (`[workspace.package]`), so the crate
+/// this is compiled into does not matter — but it is exported so the daemon and
+/// the shell report the same number the header does, rather than each reading
+/// its own `CARGO_PKG_VERSION` and drifting apart on a partial release.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// How the user wants provider traffic routed. Persisted by the daemon and
 /// mirrored here so every call site sees the change without a restart.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -170,21 +178,25 @@ fn cached_system_proxy() -> Option<String> {
 
 /// The shared client for provider (upstream) calls.
 pub fn upstream() -> reqwest::Client {
-    cached(&UPSTREAM, upstream_proxy())
+    cached(&UPSTREAM, upstream_proxy(), false)
 }
 
 /// The shared client for asale's own server and loopback services.
 pub fn plain() -> reqwest::Client {
-    cached(&PLAIN, plain_proxy())
+    cached(&PLAIN, plain_proxy(), true)
 }
 
-fn cached(slot: &RwLock<Option<(Option<String>, reqwest::Client)>>, want: Option<String>) -> reqwest::Client {
+fn cached(
+    slot: &RwLock<Option<(Option<String>, reqwest::Client)>>,
+    want: Option<String>,
+    identify_to_asale: bool,
+) -> reqwest::Client {
     if let Some((have, client)) = slot.read().unwrap().as_ref() {
         if *have == want {
             return client.clone();
         }
     }
-    let client = build(want.as_deref());
+    let client = build_inner(want.as_deref(), identify_to_asale);
     *slot.write().unwrap() = Some((want, client.clone()));
     client
 }
@@ -192,10 +204,27 @@ fn cached(slot: &RwLock<Option<(Option<String>, reqwest::Client)>>, want: Option
 /// Build a client for `proxy` (exposed so a candidate proxy can be tested
 /// before it is saved).
 pub fn build(proxy: Option<&str>) -> reqwest::Client {
+    // A probe, not a call to asale — nothing should be told our version by it.
+    build_inner(proxy, false)
+}
+
+/// `identify_to_asale` adds the version header the platform's minimum-version
+/// gate reads. Only for asale's own hosts: a provider has no use for our build
+/// number, and every header we add to a provider request is one more thing that
+/// can differ from what their SDK sends and trip an anti-abuse heuristic.
+fn build_inner(proxy: Option<&str>, identify_to_asale: bool) -> reqwest::Client {
     // `.no_proxy()` first: left to itself reqwest re-reads `https_proxy` & co.
     // and would quietly proxy a connection we resolved as direct, making
     // "off" a lie. Resolution above is the authority, not reqwest.
     let mut b = reqwest::Client::builder().user_agent(UA).connect_timeout(Duration::from_secs(20)).no_proxy();
+    if identify_to_asale {
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert(
+            reqwest::header::HeaderName::from_static(asale_protocol::frame::H_CLIENT_VERSION),
+            reqwest::header::HeaderValue::from_static(VERSION),
+        );
+        b = b.default_headers(h);
+    }
     if let Some(url) = proxy {
         match reqwest::Proxy::all(url) {
             Ok(p) => b = b.proxy(p.no_proxy(no_proxy())),

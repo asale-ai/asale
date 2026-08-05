@@ -27,6 +27,30 @@ pub fn client_config(state: &AppState) -> Value {
 /// loopback the app is reachable only from this machine, on any other address
 /// the daemon token is the only thing between the network and the user's
 /// credentials. A page that hands out a URL has to be able to say which.
+/// Whether the platform has refused this build as too old, and what it wants.
+///
+/// `null` when there is nothing to say, so the window can render the banner on
+/// a truthy check without a second field meaning "but not really".
+///
+/// A poll rather than a push: the refusal happens in the publisher's connect
+/// loop and in the local proxy, neither of which has a channel to the window,
+/// and the shell is already polling this daemon every few seconds.
+pub fn upgrade_notice() -> Value {
+    match asale_client_core::upgrade::get() {
+        Some(n) => json!({"current": n.current, "min": n.min, "path": n.path}),
+        None => Value::Null,
+    }
+}
+
+/// This seller's standing with the matcher: `{score, min_score, blocked}`, or
+/// `null` before the gateway has reported one.
+pub fn seller_status() -> Value {
+    match asale_client_core::seller_status::get() {
+        Some(s) => json!({"score": s.score, "min_score": s.min_score, "blocked": s.blocked()}),
+        None => Value::Null,
+    }
+}
+
 pub fn daemon_info() -> Value {
     let bound = crate::bound_addr();
     json!({

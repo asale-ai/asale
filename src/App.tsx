@@ -6,6 +6,7 @@ import {
   IconRecords, IconUsage, IconGauge, IconAccount, IconSettings,
 } from "./icons";
 import { StatusWidget } from "./components/StatusWidget";
+import { UpgradeBanner, useUpgradeNotice } from "./components/UpgradeBanner";
 import { Skeleton, PageSkeleton } from "./ui";
 import type { JSX } from "react";
 
@@ -82,6 +83,10 @@ export function App() {
     const id = setInterval(poll, 4000);
     return () => { alive = false; clearInterval(id); };
   }, [booted]);
+
+  // Has the platform stopped trading with this build? Gated on `booted` for the
+  // same reason the profile poll is: the daemon is not answering before that.
+  const upgrade = useUpgradeNotice(booted);
 
   // Allow any page to request navigation (e.g. "manage limits" from Publish).
   useEffect(() => {
@@ -161,6 +166,9 @@ export function App() {
           </div>
         </div>
         <div className="main-inner fade-in" key={booted ? tab : "boot"}>
+          {/* Above the page, and on every page: what it blocks is driven from
+              several of them, and from the user's terminal besides. */}
+          {upgrade && <UpgradeBanner notice={upgrade} />}
           {!booted ? <PageSkeleton /> : (
             <Suspense fallback={<PageSkeleton />}>
               {/* The overview map calls out the reader's own country, and the

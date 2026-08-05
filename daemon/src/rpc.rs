@@ -309,6 +309,9 @@ async fn rpc(
         // ── no arguments ────────────────────────────────────────────────
         "client_config" => commands::client_config(st),
         "daemon_info" => commands::daemon_info(),
+        "upgrade_notice" => commands::upgrade_notice(),
+        "seller_status" => commands::seller_status(),
+        "self_check" => serde_json::json!({"findings": crate::selfcheck::run(st).await}),
         "proxy_settings" => commands::proxy_settings(),
         "wallet_overview" => commands::wallet_overview(st).await?,
         "wallet_history" => commands::wallet_history(st).await?,
