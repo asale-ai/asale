@@ -22,13 +22,13 @@
 # .deb/.AppImage 只能在 Linux 出。三平台要么三台机器，要么 CI 三个 job
 # （见 .github/workflows/release.yml）。
 #
-# 编译期注入的值全部来自 ./.env（见 .env.example）：
+# 编译期注入的值全部来自 ./.env.package（见 .env.package.example）：
 #   ASALE_QUOTA_PUBKEY   —— 缺了客户端拒绝上市卖出（唯一的经济保护）
 #   ASALE_SERVER_API 等  —— 装机后没有 shell 环境，地址必须编进去
 set -euo pipefail
 
 cd "$(dirname "$0")/.."   # asale-client 根目录
-ENV_FILE=".env"
+ENV_FILE=".env.package"
 UPDATER_KEY="asale-updater.key"
 
 TARGET=""
@@ -59,7 +59,7 @@ step() { echo; echo "==> $*"; }
 die()  { echo "!! $*" >&2; exit 1; }
 
 # ---------------------------------------------------------------- 打包参数
-[[ -f "$ENV_FILE" ]] || die "缺少 ${ENV_FILE}：cp .env.example $ENV_FILE 后填值"
+[[ -f "$ENV_FILE" ]] || die "缺少 ${ENV_FILE}：cp .env.package.example $ENV_FILE 后填值"
 set -a; . "./$ENV_FILE"; set +a
 
 [[ -n "${ASALE_QUOTA_PUBKEY:-}" ]] || die "ASALE_QUOTA_PUBKEY 为空（见 ${ENV_FILE}）。

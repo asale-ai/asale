@@ -7,7 +7,7 @@
     只能在 Windows 上出，所以三平台要么三台机器，要么 CI 三个 job
     （见 .github/workflows/release.yml）。
 
-    编译期注入的值全部来自 .\.env（见 .env.example）：
+    编译期注入的值全部来自 .\.env.package（见 .env.package.example）：
       ASALE_QUOTA_PUBKEY  —— 缺了客户端拒绝上市卖出（唯一的经济保护）
       ASALE_SERVER_API 等 —— 装机后没有 shell 环境，地址必须编进二进制
 
@@ -47,7 +47,7 @@ Set-StrictMode -Version Latest
 $ClientDir  = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $ClientDir
 
-$EnvFile    = Join-Path $ClientDir ".env"
+$EnvFile    = Join-Path $ClientDir ".env.package"
 $UpdaterKey = Join-Path $ClientDir "asale-updater.key"
 
 function Step($msg) { Write-Host ""; Write-Host "==> $msg" -ForegroundColor Cyan }
@@ -55,7 +55,7 @@ function Die($msg)  { Write-Host "!! $msg" -ForegroundColor Red; exit 1 }
 
 # ---------------------------------------------------------------- 打包参数
 if (-not (Test-Path $EnvFile)) {
-    Die "缺少 $EnvFile：copy .env.example .env 后填值"
+    Die "缺少 $EnvFile：copy .env.package.example .env.package 后填值"
 }
 # KEY=VALUE 逐行读进本进程环境；# 开头是注释，值里允许有 =。
 Get-Content $EnvFile | ForEach-Object {
@@ -121,7 +121,7 @@ if ($Target) { rustup target add $Target | Out-Null }
 #
 # 为什么不直接写进 tauri.conf.json：signCommand 一旦落在配置里，任何没有 Azure 凭据
 # 的机器一构建就在签名这步失败，本地试打全废。所以按环境变量存在与否，用
-# `tauri build --config` 动态合并进去。值可以放 .env，也可以由 CI 注入。
+# `tauri build --config` 动态合并进去。值可以放 .env.package，也可以由 CI 注入。
 $SignVars = @(
     "AZURE_ARTIFACT_SIGNING_ENDPOINT"             # 例 https://wus2.codesigning.azure.net，按账号所在区域
     "AZURE_ARTIFACT_SIGNING_ACCOUNT"

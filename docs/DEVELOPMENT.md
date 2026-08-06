@@ -79,7 +79,7 @@ What stays shared is the CLI tools' own configuration (`~/.claude`, `~/.codex/co
 subscribing and buying exist to rewrite those real files, so the two builds overwrite each
 other's. Don't drive both at once.
 
-OAuth client credentials are documented in [`.env.example`](../.env.example) (Gemini
+OAuth client credentials are documented in [`.env.package.example`](../.env.package.example) (Gemini
 requires your own; Claude/Codex have public defaults).
 
 ### Pointing the system `asale` command at this checkout
@@ -106,7 +106,7 @@ different versions is a miserable thing to debug.
 Anything real already sitting in `/usr/local/bin` is backed up to `~/.asale/link-backup/`
 first and restored by `--unlink`, which only ever removes symlinks pointing into this repo.
 
-Compile-time values come from `./.env`, same as packaging — without `ASALE_QUOTA_PUBKEY`
+Compile-time values come from `./.env.package`, same as packaging — without `ASALE_QUOTA_PUBKEY`
 the linked build cannot sell, exactly as a packaged one couldn't.
 
 A linked build still defaults to the release state (`~/.asale`, `127.0.0.1:9700`) and will
@@ -123,13 +123,13 @@ There is no Windows equivalent; use `cargo run -p asale-cli -- status` there.
 
 ## Packaging
 
-All packaging parameters come from `.env` (`cp .env.example .env`, then fill it in). These
+All packaging parameters come from `.env.package` (`cp .env.package.example .env.package`, then fill it in). These
 values are baked into the binary **at compile time**: a desktop app launched by
 double-click has no shell environment, so endpoints and the gateway public key must be
 compiled in.
 
 ```bash
-cp .env.example .env      # set ASALE_QUOTA_PUBKEY — without it the built client cannot sell
+cp .env.package.example .env.package      # set ASALE_QUOTA_PUBKEY — without it the built client cannot sell
 
 ./scripts/package.sh                          # macOS → .dmg (defaults to an arm64 + x86_64 universal binary)
 ./scripts/package.sh --bundles deb,appimage   # on Linux
@@ -214,7 +214,7 @@ Authenticode step, so a trial build never needs the Azure credentials.
 Windows goes through [Azure Artifact Signing](https://learn.microsoft.com/en-us/azure/trusted-signing/)
 (formerly Trusted Signing): the private key stays in Microsoft's HSM, so the build machine
 only holds an App Registration client secret and there is no `.pfx` to leak. The six
-variables are listed in `.env.example`; `package.ps1` turns them into a
+variables are listed in `.env.package.example`; `package.ps1` turns them into a
 `bundle.windows.signCommand` that calls [`artifact-signing-cli`](https://github.com/levminer/trusted-signing-cli)
 (`cargo install artifact-signing-cli`, plus .NET 8, the Azure CLI and the Windows SDK's
 signtool). Give all six or none — a partial set fails the build, because the alternative is

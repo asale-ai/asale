@@ -13,7 +13,7 @@ src-tauri/gen/schemas/
 # Env / secrets
 .env
 .env.*
-!.env.example
+!.env.package.example
 *.pem
 # Tauri updater signing key. The private half never goes in — with it anyone can
 # sign a "legitimate" update. The .pub half is fine (it is already embedded in

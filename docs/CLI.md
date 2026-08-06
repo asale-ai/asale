@@ -197,7 +197,7 @@ other architecture — an arm64 server, for instance — build the pair from sou
 
 ```sh
 git clone https://github.com/asale-ai/asale && cd asale
-cp .env.example .env          # fill in ASALE_QUOTA_PUBKEY, see the file
+cp .env.package.example .env.package          # fill in ASALE_QUOTA_PUBKEY, see the file
 ./scripts/package.sh --cli-only
 ```
 

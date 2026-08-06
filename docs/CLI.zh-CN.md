@@ -178,7 +178,7 @@ asale status >/dev/null || echo "asale 掉了：$(hostname)"
 
 ```sh
 git clone https://github.com/asale-ai/asale && cd asale
-cp .env.example .env          # 填 ASALE_QUOTA_PUBKEY，见文件里的说明
+cp .env.package.example .env.package          # 填 ASALE_QUOTA_PUBKEY，见文件里的说明
 ./scripts/package.sh --cli-only
 ```
 

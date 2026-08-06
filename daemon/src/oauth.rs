@@ -29,7 +29,7 @@ const B64URL: base64::engine::general_purpose::GeneralPurpose = base64::engine::
 //                - at build time: ASALE_OAUTH_CLIENT_ID_GEMINI /
 //                  ASALE_OAUTH_CLIENT_SECRET_GEMINI are baked in by `option_env!`
 //                - at run time:   the same two vars override whatever was baked in
-//              See .env.example. Gemini login is disabled when neither is set.
+//              See .env.package.example. Gemini login is disabled when neither is set.
 //
 // Any value may be overridden at runtime via env (compile-time defaults).
 

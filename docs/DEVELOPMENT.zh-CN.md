@@ -71,7 +71,7 @@ ASALE_DATA_DIR=~/.asale-staging ASALE_BIND=127.0.0.1:9702 pnpm dev:app
 
 仍然共用的只有 CLI 工具自己的配置（`~/.claude`、`~/.codex/config.toml`）—— 订阅和买入本来就是要改这些真实文件，两边会互相覆盖，别同时操作。
 
-OAuth 客户端凭证见 [`.env.example`](../.env.example)（Gemini 需要自备，Claude/Codex 有公开默认值）。
+OAuth 客户端凭证见 [`.env.package.example`](../.env.package.example)（Gemini 需要自备，Claude/Codex 有公开默认值）。
 
 ### 把这份源码接到系统的 `asale` 命令上
 
@@ -95,7 +95,7 @@ OAuth 客户端凭证见 [`.env.example`](../.env.example)（Gemini 需要自备
 链接前会把 `/usr/local/bin` 里正式安装的那两个真身备份到 `~/.asale/link-backup/`，
 `--unlink` 时原样放回；`--unlink` 只删指向本仓库的软链，不碰别人装的东西。
 
-编译期注入的值跟打包同源，都读 `./.env` —— 缺 `ASALE_QUOTA_PUBKEY` 一样卖不出去。
+编译期注入的值跟打包同源，都读 `./.env.package` —— 缺 `ASALE_QUOTA_PUBKEY` 一样卖不出去。
 
 链上去之后默认还是正式版那套状态（`~/.asale`、`127.0.0.1:9700`），装了桌面版就会
 跟它抢端口和数据目录。要井水不犯河水，用上面那张表里的变量：
@@ -110,11 +110,11 @@ Windows 上没有对应脚本，直接 `cargo run -p asale-cli -- status`。
 
 ## 打包
 
-打包参数全部来自 `.env`（`cp .env.example .env` 后填）。这些值在**编译期**被固定进
+打包参数全部来自 `.env.package`（`cp .env.package.example .env.package` 后填）。这些值在**编译期**被固定进
 二进制：桌面端双击启动，没有 shell 环境，地址与网关公钥必须编进去。
 
 ```bash
-cp .env.example .env      # 填 ASALE_QUOTA_PUBKEY，缺了打出来的客户端不能卖出
+cp .env.package.example .env.package      # 填 ASALE_QUOTA_PUBKEY，缺了打出来的客户端不能卖出
 
 ./scripts/package.sh                          # macOS → .dmg（默认 arm64 + x86_64 通用二进制）
 ./scripts/package.sh --bundles deb,appimage   # 在 Linux 上

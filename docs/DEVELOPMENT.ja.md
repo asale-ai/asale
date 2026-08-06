@@ -80,7 +80,7 @@ ASALE_DATA_DIR=~/.asale-staging ASALE_BIND=127.0.0.1:9702 pnpm dev:app
 購読と購入はまさにこれらの実ファイルを書き換える機能なので、両者は互いを上書きします。
 同時に操作しないでください。
 
-OAuth のクライアント認証情報は [`.env.example`](../.env.example) を参照
+OAuth のクライアント認証情報は [`.env.package.example`](../.env.package.example) を参照
 （Gemini は自前で用意が必要、Claude/Codex は公開のデフォルト値あり）。
 
 ### システムの `asale` コマンドをこのソースに向ける
@@ -107,7 +107,7 @@ OAuth のクライアント認証情報は [`.env.example`](../.env.example) を
 `/usr/local/bin` にインストール済みの実体は `~/.asale/link-backup/` に退避され、
 `--unlink` で元に戻ります。`--unlink` が消すのはこのリポジトリを指すリンクだけです。
 
-コンパイル時に埋め込む値はパッケージングと同じ `./.env` から読みます。
+コンパイル時に埋め込む値はパッケージングと同じ `./.env.package` から読みます。
 `ASALE_QUOTA_PUBKEY` が無ければリンクしたビルドも販売できません。
 
 リンクしたビルドの既定は正式版と同じ状態（`~/.asale`、`127.0.0.1:9700`）なので、
@@ -124,13 +124,13 @@ Windows 版のスクリプトはありません。`cargo run -p asale-cli -- sta
 
 ## パッケージング
 
-パッケージングのパラメータはすべて `.env` から読みます（`cp .env.example .env` の後に
+パッケージングのパラメータはすべて `.env.package` から読みます（`cp .env.package.example .env.package` の後に
 記入）。これらの値は**コンパイル時**にバイナリへ固定されます。デスクトップアプリは
 ダブルクリック起動で shell 環境を持たないため、接続先とゲートウェイ公開鍵は
 埋め込むしかありません。
 
 ```bash
-cp .env.example .env      # ASALE_QUOTA_PUBKEY を記入。無いとビルドしたクライアントは販売できない
+cp .env.package.example .env.package      # ASALE_QUOTA_PUBKEY を記入。無いとビルドしたクライアントは販売できない
 
 ./scripts/package.sh                          # macOS → .dmg（既定は arm64 + x86_64 のユニバーサルバイナリ）
 ./scripts/package.sh --bundles deb,appimage   # Linux 上で

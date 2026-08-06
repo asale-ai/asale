@@ -7,7 +7,7 @@
 # calls scripts/package.ps1), so the validation rules, default targets and output paths
 # all come from the same place as a local build — CI and local builds cannot drift apart.
 # The only extra thing CI does is write the secrets into the two files the scripts read
-# (./.env and ./asale-updater.key, both gitignored).
+# (./.env.package and ./asale-updater.key, both gitignored).
 #
 # macOS is not split into arm/intel: package.sh defaults to universal-apple-darwin, one
 # bundle covers both, and the download page is written for a single universal .dmg.
@@ -25,7 +25,7 @@
 #   Secrets (required)
 #     ASALE_QUOTA_PUBKEY              Gateway quota authorization public key. Without it the
 #                                     built client refuses to go on the market and sell.
-#                                     See .env.example for the value.
+#                                     See .env.package.example for the value.
 #     TAURI_SIGNING_PRIVATE_KEY       Contents of asale-updater.key (updater signing key)
 #
 #   Secrets (optional)
@@ -61,7 +61,7 @@
 #       (plus the three AZURE_ARTIFACT_SIGNING_* variables below — endpoint, account and
 #        certificate profile are not secrets, so they live in Variables)
 #
-#   Variables (optional; left empty, the production defaults from .env.example are used)
+#   Variables (optional; left empty, the production defaults from .env.package.example are used)
 #     ASALE_SERVER_API / ASALE_GATEWAY_API / ASALE_GATEWAY_WS / ASALE_PROXY_PORT
 #     AZURE_ARTIFACT_SIGNING_ENDPOINT      Regional endpoint of the signing account,
 #                                          e.g. https://wus2.codesigning.azure.net
@@ -164,7 +164,7 @@ jobs:
       # Both scripts read their configuration from files (an installed app has no shell
       # environment, so these values must be baked into the binary at compile time), so the
       # secrets are written out to those files first. Windows runners have bash too.
-      - name: Write .env / updater private key
+      - name: Write .env.package / updater private key
         shell: bash
         env:
           QUOTA_PUBKEY: ${{ secrets.ASALE_QUOTA_PUBKEY }}
@@ -219,7 +219,7 @@ jobs:
             echo "ASALE_GATEWAY_WS=${GATEWAY_WS:-wss://gw.asale.ai/v1/ws}"
             echo "ASALE_PROXY_PORT=${PROXY_PORT:-9787}"
             echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$KEY_PASSWORD"
-            # package.sh does `set -a; . ./.env`, so variables written here get exported and
+            # package.sh does `set -a; . ./.env.package`, so variables written here get exported and
             # the daemon's option_env! can pick them up at compile time. Using if rather than
             # `[[ ]] && echo`: the latter returns 1 when the condition is false, and as the
             # last statement of a block set -e would treat that as a failure.
@@ -229,7 +229,7 @@ jobs:
             if [[ -n "$GEMINI_SECRET" ]]; then
               echo "ASALE_OAUTH_CLIENT_SECRET_GEMINI=$GEMINI_SECRET"
             fi
-          } > .env
+          } > .env.package
 
           if [[ "$SIGN" == "true" ]]; then
             if [[ -z "$UPDATER_KEY" ]]; then

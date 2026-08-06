@@ -20,14 +20,14 @@
 # 同一次构建的 asaled。但那样 `asaled` 这个命令本身仍是旧的正式版，
 # 两个入口给出不同版本，排查问题时非常费解，所以一起链。
 #
-# 编译期注入的值来自 ./.env（见 .env.example），与 scripts/package.sh 同源：
+# 编译期注入的值来自 ./.env.package（见 .env.package.example），与 scripts/package.sh 同源：
 # ASALE_QUOTA_PUBKEY 缺了客户端拒绝上市卖出，会永远卡在「正在上线」。
 # 这里不校验地址必须是 https/wss —— 本地开发本来就指向 127.0.0.1。
 set -euo pipefail
 
 cd "$(dirname "$0")/.."   # asale-client 根目录
 ROOT="$PWD"
-ENV_FILE=".env"
+ENV_FILE=".env.package"
 # 备份放数据目录而不是 target/：`cargo clean` 不该把正式版的二进制一起删掉。
 BACKUP_DIR="${ASALE_DATA_DIR:-$HOME/.asale}/link-backup"
 
@@ -141,7 +141,7 @@ fi
 
 # ---------------------------------------------------------------- 构建
 if [[ $BUILD == 1 ]]; then
-  [[ -f "$ENV_FILE" ]] || die "缺少 ${ENV_FILE}：cp .env.example $ENV_FILE 后填值"
+  [[ -f "$ENV_FILE" ]] || die "缺少 ${ENV_FILE}：cp .env.package.example $ENV_FILE 后填值"
   set -a; . "./$ENV_FILE"; set +a
   [[ -n "${ASALE_QUOTA_PUBKEY:-}" ]] || die "ASALE_QUOTA_PUBKEY 为空（见 ${ENV_FILE}）。
    没有它，链上去的客户端无法验证网关授权，卖出会永远卡在「正在上线」。
