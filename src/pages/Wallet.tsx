@@ -9,12 +9,12 @@ import {
   invoke, inTauri, fmtUsdt,
   type Wallet, type WalletHistory,
 } from "../lib";
-import { Card, Skeleton, useCopy, PageHead, IconAction, Empty } from "../ui";
+import { Card, Skeleton, PageHead, IconAction, Empty } from "../ui";
 import { WalletDialog, type WalletMode } from "../components/WalletDialog";
 import { errText } from "../errors";
 import {
   IconWallet, IconRefresh, IconDownload, IconArrowRight,
-  IconShield, IconCheck, IconCopy, IconRecords,
+  IconShield, IconCheck, IconRecords,
 } from "../icons";
 
 type HistTab = "all" | "deposit" | "withdraw";
@@ -27,13 +27,9 @@ interface Flow {
   amount: number;
   fee: number;
   status: number;
-  hash: string | null;
-  target: string | null;
 }
 
 const fmtTime = (secs: number) => (secs ? new Date(secs * 1000).toLocaleString() : "—");
-const shorten = (s: string, head = 8, tail = 6) =>
-  s.length <= head + tail + 1 ? s : `${s.slice(0, head)}…${s.slice(-tail)}`;
 
 /** Deposit status → pill tone + i18n key. 1 seen · 2 confirmed · 3 credited. */
 const DEPOSIT_STATUS: Record<number, [string, string]> = {
@@ -57,8 +53,6 @@ export function WalletPage() {
   const [pane, setPane] = useState<WalletMode | null>(null);
   const [histTab, setHistTab] = useState<HistTab>("all");
 
-  const [copiedHash, copyHash] = useCopy();
-
   const refresh = useCallback((manual = false) => {
     if (!inTauri) return;
     if (manual) setRefreshing(true);
@@ -78,11 +72,11 @@ export function WalletPage() {
   const flows = useMemo<Flow[]>(() => {
     const d: Flow[] = (hist?.deposits ?? []).map((r) => ({
       key: `d${r.id}`, kind: "deposit", ts: r.created_ts, amount: r.amount,
-      fee: r.fee ?? 0, status: r.status, hash: r.tx_hash, target: null,
+      fee: r.fee ?? 0, status: r.status,
     }));
     const x: Flow[] = (hist?.withdrawals ?? []).map((r) => ({
       key: `w${r.id}`, kind: "withdraw", ts: r.confirmed_ts || r.requested_ts, amount: r.amount,
-      fee: r.fee ?? 0, status: r.status, hash: r.tx_hash, target: r.to_address,
+      fee: r.fee ?? 0, status: r.status,
     }));
     return [...d, ...x].sort((a, b) => b.ts - a.ts);
   }, [hist]);
@@ -186,7 +180,6 @@ export function WalletPage() {
                   <th>{t("wallet.colType")}</th>
                   <th className="num">{t("wallet.colAmount")}</th>
                   <th>{t("wallet.colStatus")}</th>
-                  <th>{t("wallet.colTx")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -206,15 +199,6 @@ export function WalletPage() {
                       {f.fee > 0 && <div className="td-note">{t("wallet.feeN", { amount: fmtUsdt(f.fee) })}</div>}
                     </td>
                     <td>{statusPill(f)}</td>
-                    <td>
-                      {f.hash ? (
-                        <button className="hash-btn mono" onClick={() => copyHash(f.hash!)} title={f.hash}>
-                          {copiedHash ? <IconCheck /> : <IconCopy />}{shorten(f.hash)}
-                        </button>
-                      ) : f.target ? (
-                        <span className="mono faint" title={f.target}>{shorten(f.target, 6, 4)}</span>
-                      ) : <span className="faint">—</span>}
-                    </td>
                   </tr>
                 ))}
               </tbody>
