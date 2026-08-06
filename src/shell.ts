@@ -54,3 +54,27 @@ export const shell = {
    *  clamps, so a broken measurement cannot produce a full-screen popup. */
   resizePanel: (height: number) => call<void>("resize_panel", { height }),
 };
+
+/**
+ * Open `url` outside the app.
+ *
+ * In a browser that is a new tab. In the desktop shell it must be the *system*
+ * browser: the webview has no tabs, no address bar and no back button, so a
+ * navigation that lands there strands the user inside the app with no way out —
+ * and `target="_blank"` in a WKWebView simply does nothing, which is worse
+ * (a link that silently ignores the click).
+ */
+export async function openExternal(url: string): Promise<void> {
+  if (!realTauri) {
+    window.open(url, "_blank", "noopener,noreferrer");
+    return;
+  }
+  // Lazy for the same reason as `core()` above — a browser build never loads it.
+  // Two gates, both in the shell's config: the `shell:allow-open` capability,
+  // and `plugins.shell.open` in tauri.conf.json. The second one only accepts
+  // `true` (the plugin's own http/mailto/tel regex) or a regex matching the
+  // *whole* URL — the plugin wraps whatever is given in `^...$`, so a prefix
+  // like "^https://" silently matches nothing and every link goes dead.
+  const { open } = await import("@tauri-apps/plugin-shell");
+  await open(url);
+}

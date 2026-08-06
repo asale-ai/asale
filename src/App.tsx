@@ -4,7 +4,10 @@ import { invoke, inTauri, isDaemonDown, waitForDaemon, type Profile } from "./li
 import {
   IconDashboard, IconPublish, IconConsume, IconWallet,
   IconRecords, IconUsage, IconGauge, IconAccount, IconSettings,
+  IconGlobe, IconGithub,
 } from "./icons";
+import { openExternal } from "./shell";
+import { SITE_URL, REPO_URL } from "./links";
 import { StatusWidget } from "./components/StatusWidget";
 import { UpgradeBanner, useUpgradeNotice } from "./components/UpgradeBanner";
 import { Skeleton, PageSkeleton } from "./ui";
@@ -143,6 +146,10 @@ export function App() {
         <div className="logo">
           <img className="logo-mark" src="/logo.svg" alt="Asale" />
           <span>Asale</span>
+          {/* The native title bar is hidden, so "Asale (Dev)" from
+              tauri.dev.conf.json is never shown — this is what tells a dev
+              instance apart from the installed release beside it. */}
+          {import.meta.env.DEV && <span className="logo-badge">dev</span>}
         </div>
         {NAV.map((g, i) =>
           g === "spacer" ? (
@@ -160,8 +167,32 @@ export function App() {
         {/* Outside the keyed page container on purpose: the status readout is
             global, so it must not remount (and re-poll from scratch) on every
             tab change. */}
-        <div className="topbar">
+        {/* `data-tauri-drag-region` only fires for the element it is on, so the
+            strip is draggable while the buttons inside it stay clickable. It is
+            what replaces the title bar removed in tauri.conf.json: without it
+            a maximised window on macOS could only be moved by its top 28px. */}
+        <div className="topbar" data-tauri-drag-region>
           <div className="topbar-inner">
+            <div className="topbar-links">
+              <button
+                type="button"
+                className="iconlink"
+                onClick={() => openExternal(SITE_URL)}
+                title={t("nav.site")}
+                aria-label={t("nav.site")}
+              >
+                <IconGlobe />
+              </button>
+              <button
+                type="button"
+                className="iconlink"
+                onClick={() => openExternal(REPO_URL)}
+                title={t("nav.github")}
+                aria-label={t("nav.github")}
+              >
+                <IconGithub />
+              </button>
+            </div>
             <StatusWidget />
           </div>
         </div>

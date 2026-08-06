@@ -20,6 +20,8 @@ import { relaunch } from "@tauri-apps/plugin-process";
 // always true. The updater plugin only exists in the desktop shell, and a
 // browser pointed at a remote daemon must fall back to the download link.
 import { invoke, realTauri } from "../lib";
+import { openExternal } from "../shell";
+import { SITE_URL } from "../links";
 import { errText } from "../errors";
 
 /** What the daemon reports; `null` while the platform is happy with us. */
@@ -29,8 +31,6 @@ export interface UpgradeNotice {
   /** Which path was refused — "sell" or "buy". */
   path: string;
 }
-
-const DOWNLOAD_URL = "https://asale.ai/";
 
 type Phase = "idle" | "checking" | "downloading" | "ready" | "error";
 
@@ -89,13 +89,16 @@ export function UpgradeBanner({ notice }: { notice: UpgradeNotice }) {
         </div>
         {err && (
           <div className="text-sm" style={{ marginTop: 4 }}>
-            {err} — <a href={DOWNLOAD_URL} target="_blank" rel="noreferrer">{t("upgrade.manual")}</a>
+            {err} —{" "}
+            <a href={SITE_URL} onClick={(e) => { e.preventDefault(); openExternal(SITE_URL); }}>
+              {t("upgrade.manual")}
+            </a>
           </div>
         )}
       </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         {!realTauri ? (
-          <a className="btn btn-sm" href={DOWNLOAD_URL} target="_blank" rel="noreferrer">
+          <a className="btn btn-sm" href={SITE_URL} target="_blank" rel="noreferrer">
             {t("upgrade.download")}
           </a>
         ) : phase === "ready" ? (

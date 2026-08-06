@@ -6,6 +6,8 @@
       {
         "label": "main",
         "title": "Asale (Dev)",
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
         "width": 1360,
         "height": 880,
         "minWidth": 900,

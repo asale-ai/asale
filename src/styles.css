@@ -207,6 +207,13 @@ h4 { font-size: var(--fs-sub); font-weight: 600; letter-spacing: -0.006em; margi
   font-size: 17px; font-weight: 600; letter-spacing: -0.02em;
   padding: 0 var(--s2) var(--s6);
 }
+.logo .logo-badge {
+  font-size: var(--fs-micro); font-weight: 600; letter-spacing: 0.04em;
+  text-transform: uppercase; line-height: 1;
+  padding: 3px 6px; border-radius: var(--r1);
+  color: var(--warning); background: var(--warning-soft);
+  border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
+}
 .logo .logo-mark {
   width: var(--nav-ico-w); height: var(--nav-ico-w); border-radius: var(--r1); flex-shrink: 0;
   object-fit: contain; display: block;
@@ -294,8 +301,33 @@ h4 { font-size: var(--fs-sub); font-weight: 600; letter-spacing: -0.006em; margi
 }
 .topbar-inner {
   max-width: var(--content-w); margin: 0 auto; padding: 0 var(--s7);
-  display: flex; justify-content: flex-end; align-items: center;
+  display: flex; justify-content: flex-end; align-items: center; gap: var(--s2);
 }
+/* Off-app links (site, source). Quiet by default — they are always on screen,
+   on every page, and they are not what anyone came here to click. */
+.topbar-links { display: flex; align-items: center; gap: 2px; margin-right: var(--s1); }
+.iconlink {
+  display: grid; place-items: center; width: 28px; height: 28px;
+  border: none; background: none; border-radius: var(--r1); cursor: pointer;
+  color: var(--fg-3);
+  transition: color var(--t-fast) var(--ease), background-color var(--t-fast) var(--ease);
+}
+.iconlink:hover { color: var(--fg); background: var(--surface-2); }
+.iconlink:focus-visible { outline: none; box-shadow: var(--ring); }
+.iconlink svg { width: 16px; height: 16px; }
+
+/* ── macOS: no title bar of its own ─────────────────────────────────────────
+   The window is built with `titleBarStyle: "Overlay"`, so the page runs to the
+   top edge and the traffic lights float over it. Both columns need clearing:
+   the lights sit where the logo was, and the top ~28px belongs to the (now
+   invisible) title bar, which still swallows clicks meant for anything under
+   it. Applied by main.tsx, and only in the desktop shell on macOS.
+
+   One value for both columns, because the logo and the status chip are the same
+   height: their first row then shares a centre line, the way the title bar used
+   to draw one for us. */
+.mac-overlay .sidebar,
+.mac-overlay .topbar { padding-top: 40px; }
 
 /* Every page opens the same way. */
 .page-head {
