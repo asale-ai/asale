@@ -6,13 +6,20 @@
 //! reports ("my accounts disappeared", "I'm selling but earn nothing") is a
 //! consequence several layers away from its cause.
 //!
-//! **On repairing automatically.** Each of these has an obvious "fix" and none
-//! of them is ours to apply unasked: moving a credential store relocates the
-//! user's secrets, and flipping the sell switch starts spending their
-//! subscription quota. What is automated is the *diagnosis* — the part that
-//! actually needs the system's knowledge — plus, where one exists, a single
-//! button that performs the fix with the user's consent. A tool that silently
-//! rearranges credentials to be helpful is a worse tool.
+//! **On repairing automatically.** None of these is ours to apply *unasked*:
+//! moving a credential store relocates the user's secrets, and flipping the sell
+//! switch starts spending their subscription quota. So the diagnosis is
+//! automatic and the repair is one button — [`fix`] — which is consent, not
+//! silence. A tool that rearranges credentials on its own to be helpful is a
+//! worse tool.
+//!
+//! What that button does has to be the *whole* fix, though. Sending the user to
+//! the page where the setting lives is where people give up: a blocked lane is
+//! fixed by finding which port the proxy on this machine is listening on, and
+//! nobody outside the top decile of users knows that about their own laptop. So
+//! `regionBlocked` probes for it and `sellAllOff` throws the switches; a finding
+//! whose repair cannot be performed from in here says so by leaving
+//! [`Finding::fixable`] false rather than by offering a button that navigates.
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -27,6 +34,10 @@ pub struct Finding {
     /// costs less than it should. `info` — worth knowing.
     pub severity: &'static str,
     pub params: Value,
+    /// Can [`fix`] resolve this from here? False for the faults whose repair
+    /// lives outside the app — an environment variable, how the app is
+    /// launched — where the honest answer is the sentence, not a button.
+    pub fixable: bool,
 }
 
 /// Where this process keeps its state, and where the *other* copy is if the
@@ -61,6 +72,10 @@ pub fn check_state_dir(
             id: "noHome",
             severity: "error",
             params: json!({ "dir": ".asale" }),
+            // Setting HOME for a process that is already running would move the
+            // state dir out from under this daemon and change nothing about the
+            // next launch, which is the one that matters.
+            fixable: false,
         });
     };
     // Two homes, both already holding state: whichever this process picked, the
@@ -72,6 +87,11 @@ pub fn check_state_dir(
                 id: "splitState",
                 severity: "error",
                 params: json!({ "active": a, "other": b }),
+                // Merging two credential stores means deciding which copy of a
+                // clashing account wins, and getting that wrong loses a
+                // subscription's refresh token. Pinning `ASALE_DATA_DIR` is the
+                // real fix and it belongs to whatever launches the app.
+                fixable: false,
             });
         }
     }
@@ -101,6 +121,7 @@ pub fn check_lanes<'a>(lane_errors: impl Iterator<Item = &'a str>) -> Option<Fin
         id: "regionBlocked",
         severity: "warn",
         params: json!({ "lanes": blocked }),
+        fixable: true,
     })
 }
 
@@ -116,6 +137,7 @@ pub fn check_sell_switches(total: usize, enabled: usize) -> Option<Finding> {
         id: "sellAllOff",
         severity: "warn",
         params: json!({ "accounts": total }),
+        fixable: true,
     })
 }
 
@@ -167,6 +189,136 @@ fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+// ── repairs ────────────────────────────────────────────────────────────────
+
+/// Loopback ports a proxy on this machine is plausibly listening on.
+///
+/// This list is the whole reason `regionBlocked` can be fixed by a button
+/// instead of by a support conversation: the user knows they "have a VPN on",
+/// and does not know it exposes an HTTP proxy, let alone on which port. These
+/// are the defaults the common clients ship with — Clash and its forks (7890,
+/// and 7897 since Verge), v2rayN (10809), the v2ray/shadowsocks convention
+/// (1087), Privoxy (8118), Surge on macOS (6152). A port that answers but is not
+/// a proxy simply fails the probe below, so a wrong guess costs one request.
+const PROXY_PORTS: &[u16] = &[7890, 7897, 10809, 1087, 8118, 6152];
+
+/// Apply the repair for `id`, or explain that there is not one.
+///
+/// Returns `{fixed, key, params}` — a translation key rather than a sentence,
+/// like every other command, so the four locales stay in the frontend catalog.
+/// `fixed: false` is a normal outcome, not an error: "we looked for a proxy on
+/// this machine and there is none" is an answer the user needs, and raising it
+/// as a failure would render it as a red toast with a stack trace in it.
+pub async fn fix(state: &crate::state::AppState, id: &str) -> crate::commands::R<Value> {
+    match id {
+        "sellAllOff" => fix_sell_all_off(state).await,
+        "regionBlocked" => fix_region_blocked(state).await,
+        other => Err(crate::cmd_err!(
+            "errors.selfcheck.notFixable",
+            format!("no automatic repair for `{other}`"),
+            id = other
+        )),
+    }
+}
+
+/// Put every connected account back on the market.
+///
+/// All of them, not the first: the finding fires only when *none* is selling, so
+/// there is no per-account intent here to preserve — the state it repairs is the
+/// one a re-login leaves behind, which switched off accounts the user had
+/// already chosen to sell.
+async fn fix_sell_all_off(state: &crate::state::AppState) -> crate::commands::R<Value> {
+    let tools = state.store.list_tools().await.map_err(crate::commands::err)?;
+    let mut turned_on = 0usize;
+    for t in tools.iter().filter(|t| !t.sell_enabled) {
+        // Propagated, not swallowed: the first failure here is almost always
+        // "sign in before selling", and that is exactly what the user has to be
+        // told. Accounts already switched on stay on — this is not a rollback.
+        crate::commands::set_account_sell(
+            state,
+            t.provider.clone(),
+            t.account_id.clone(),
+            true,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await?;
+        turned_on += 1;
+    }
+    Ok(json!({
+        "fixed": turned_on > 0,
+        "key": "selfcheck.sellAllOff.fixed",
+        "params": { "accounts": turned_on },
+    }))
+}
+
+/// Find the proxy this machine already runs and route provider calls through it.
+///
+/// Two phases on purpose. A TCP connect answers in milliseconds and rules out
+/// every port with nothing behind it, so the expensive part — an actual request
+/// to a provider endpoint, the only thing that proves the block is lifted — runs
+/// against the one or two candidates that could possibly work. Probing all six
+/// the slow way would take a minute of a user staring at a spinner.
+async fn fix_region_blocked(state: &crate::state::AppState) -> crate::commands::R<Value> {
+    let mut candidates: Vec<(&'static str, String)> = Vec::new();
+    // Whatever the environment or the OS already says, first: if that works, the
+    // fault was only that the saved preference had it switched off, and `auto`
+    // is a better thing to leave behind than a hard-coded port.
+    if let Some(url) = asale_client_core::http::auto_proxy() {
+        candidates.push(("auto", url));
+    }
+    for port in PROXY_PORTS {
+        let url = format!("http://127.0.0.1:{port}");
+        // A proxy the environment already named does not need probing twice.
+        if candidates.iter().any(|(_, u)| u == &url) {
+            continue;
+        }
+        if listening(*port).await {
+            candidates.push(("manual", url));
+        }
+    }
+
+    let mut tried = Vec::new();
+    for (mode, url) in &candidates {
+        tried.push(url.clone());
+        let probe = crate::commands::test_proxy(mode.to_string(), url.clone()).await?;
+        if probe["ok"].as_bool().unwrap_or(false) {
+            crate::commands::set_proxy_settings(state, mode.to_string(), url.clone()).await?;
+            tracing::info!(%url, mode, "self-check repaired a region block by routing through a local proxy");
+            return Ok(json!({
+                "fixed": true,
+                "key": "selfcheck.regionBlocked.fixed",
+                "params": { "proxy": url },
+            }));
+        }
+    }
+    // Nothing worked. Saying which ports were looked at is what turns this from
+    // "it failed" into something the user can carry to their proxy app.
+    Ok(json!({
+        "fixed": false,
+        "key": if tried.is_empty() { "selfcheck.regionBlocked.fixNoneFound" } else { "selfcheck.regionBlocked.fixNoneWorked" },
+        "params": { "tried": tried.join(", "), "count": tried.len() },
+    }))
+}
+
+/// Is anything accepting connections on `port` of this machine?
+///
+/// Short timeout by design: a local port either answers immediately or is not
+/// there, and six of these run before the user's first spinner frame.
+async fn listening(port: u16) -> bool {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await,
+        Ok(Ok(_))
+    )
 }
 
 #[cfg(test)]
@@ -233,5 +385,37 @@ mod tests {
         assert!(check_sell_switches(0, 0).is_none(), "no accounts is not a fault");
         assert!(check_sell_switches(3, 1).is_none(), "one is earning; the others may be deliberate");
         assert_eq!(check_sell_switches(3, 0).unwrap().id, "sellAllOff");
+    }
+
+    /// A finding claims a button only when pressing it does the whole job. The
+    /// failure this guards against is the one the button rework existed to
+    /// remove: an offer to fix something that then hands the user back the same
+    /// question somewhere else.
+    #[test]
+    fn only_the_findings_this_process_can_actually_repair_offer_a_button() {
+        assert!(check_lanes(["forbidden: Request not allowed"].into_iter()).unwrap().fixable);
+        assert!(check_sell_switches(3, 0).unwrap().fixable);
+        // Both of these are repaired by changing how the app is launched, which
+        // a running process cannot do to itself.
+        assert!(!check_state_dir(None, None, None, &none).unwrap().fixable);
+        assert!(!check_state_dir(None, Some("C:/msys/home/u"), Some("C:/Users/u"), &all).unwrap().fixable);
+    }
+
+    /// The candidate list is the whole value of the region-block repair, so it
+    /// has to stay a list of *proxy* defaults. A port that is merely common —
+    /// 8080, 3000 — would send a probe at whatever dev server the user has
+    /// running and, on a machine behind a transparent proxy, could even succeed
+    /// and route provider traffic through it.
+    #[test]
+    fn the_probed_ports_are_proxy_defaults_and_nothing_else() {
+        assert!(PROXY_PORTS.contains(&7890), "clash");
+        assert!(PROXY_PORTS.contains(&10809), "v2rayN");
+        for p in [8080u16, 3000, 5173, 9700] {
+            assert!(!PROXY_PORTS.contains(&p), "{p} is not a proxy default");
+        }
+        let mut sorted = PROXY_PORTS.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), PROXY_PORTS.len(), "a duplicate would probe the same port twice");
     }
 }

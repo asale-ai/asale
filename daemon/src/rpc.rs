@@ -195,6 +195,8 @@ macro_rules! rpc_args {
 
 rpc_args! {
     ProxyArgs      { mode: String, #[serde(default)] url: Option<String> }
+    // Which self-check finding to repair, by its stable `Finding::id`.
+    SelfCheckFixArgs { id: String }
     CredentialArgs { email: String, password: String }
     // Registration takes the country the sign-up screen collected; the server
     // requires it, and it is the only moment the platform can learn one.
@@ -342,6 +344,10 @@ async fn rpc(
         "test_proxy" => {
             let p: ProxyArgs = args(&a)?;
             commands::test_proxy(p.mode, p.url.unwrap_or_default()).await?
+        },
+        "selfcheck_fix" => {
+            let p: SelfCheckFixArgs = args(&a)?;
+            crate::selfcheck::fix(st, &p.id).await?
         },
         "get_setting" => {
             let p: GetSettingArgs = args(&a)?;

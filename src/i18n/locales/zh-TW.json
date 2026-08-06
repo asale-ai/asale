@@ -884,6 +884,9 @@
       "unknownProxyMode": "未知的代理模式：{{value}}。",
       "badConsumeMode": "模式必須是 direct、market 或 auto。"
     },
+    "selfcheck": {
+      "notFixable": "`{{id}}` 沒有自動修復方式，請按提示裡的說明處理。"
+    },
     "usage": {
       "regionBlocked": "上游在目前地區不可用，請在設定中設定上游代理。",
       "upstreamStatus": "上游回傳 HTTP {{status}}。{{detail}}",
@@ -932,13 +935,18 @@
     },
     "regionBlocked": {
       "title": "上游拒絕了來自目前地區的請求",
-      "body": "有 {{lanes}} 條車道因地區限制回傳 403。這不是登入問題，重新登入沒有用。請到設定裡配置上游代理。",
-      "action": "開啟設定"
+      "body": "有 {{lanes}} 條車道因地區限制回傳 403。這不是登入問題，重新登入沒有用。如果這台機器上已經在跑代理，Asale 可以自動找到它並把上游請求走過去。",
+      "fix": "自動找代理",
+      "fixed": "上游請求已改走 {{proxy}}。被擋住的車道會在下次嘗試時恢復。",
+      "fixNoneFound": "這台機器上沒有監聽中的代理。請先啟動你的代理再試一次，或到「設定 → 網路」裡手動填地址。",
+      "fixNoneWorked": "試了 {{count}} 個位址（{{tried}}），都沒能連通上游。請到「設定 → 網路」裡填正確的那個。"
     },
     "sellAllOff": {
       "title": "所有已連接帳號都沒開賣出",
       "body": "已連接 {{accounts}} 個帳號，但一個都沒掛到市場上，因此不會有任何收入。重新登入會重置這個開關，通常就是它被關掉的原因。",
-      "action": "開啟賣出頁"
-    }
+      "fix": "重新開始賣出",
+      "fixed": "{{accounts}} 個帳號已重新掛上市場。"
+    },
+    "fixing": "處理中…"
   }
 }

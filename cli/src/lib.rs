@@ -266,15 +266,82 @@ fn cmd_status(args: &[&str]) -> Result<u8> {
                 .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
                 .unwrap_or_default();
             row("buying", if buying.is_empty() { "nothing routed through the proxy" } else { buying.as_str() });
+            if let Some(line) = reputation_line(&c["reputation"]) {
+                row("reputation", &line);
+            }
         }
         None if s.running => row("note", "could not read the service token — try again as the user that owns ~/.asale"),
         None => {}
+    }
+
+    // Last, and outside the aligned rows, because it is the one thing here that
+    // means "nothing above this is working" — a row would let it scroll past as
+    // just another field.
+    if let Some(c) = &s.client {
+        if let Some(block) = upgrade_block(&c["upgrade"]) {
+            println!("\n{block}");
+        }
     }
 
     if !s.running {
         println!("\nStart it with:  asale start");
     }
     Ok(if s.running { 0 } else { 3 })
+}
+
+/// The reputation row, or `None` when the gateway has not reported a standing.
+///
+/// This is the quietest way for a seller to earn nothing: connected, lanes
+/// declared, console saying "selling", and no request ever arrives because the
+/// score is under the floor matching applies. Only the gateway knows both
+/// numbers, so before it has said anything (an older gateway, or a session that
+/// has not declared supply yet) there is nothing to print — and printing a
+/// reassuring "ok" from no data would be worse than silence.
+fn reputation_line(v: &serde_json::Value) -> Option<String> {
+    let (score, min) = (v["score"].as_i64()?, v["min_score"].as_i64()?);
+    if v["blocked"].as_bool().unwrap_or(false) {
+        return Some(format!(
+            "{score} — under the matching floor of {min}, so nothing is routed here"
+        ));
+    }
+    // A zero floor is a deployment that does not gate on reputation at all;
+    // "700 (floor 0)" reads like a setting the user should worry about.
+    Some(match min {
+        0 => format!("{score}"),
+        _ => format!("{score} — above the matching floor of {min}"),
+    })
+}
+
+/// The "this build is too old to trade" block, or `None` while the platform is
+/// happy with us.
+///
+/// The desktop shell answers this with a banner and a one-click update. A
+/// headless install has neither, and the refusal reaches it in the two places
+/// least likely to be read: a `tracing::warn` in the publisher's reconnect loop,
+/// and an HTTP status inside a proxied request. So the same fact is stated here,
+/// with the command that fixes it — `asale update` re-runs the installer, which
+/// is the headless equivalent of that button.
+fn upgrade_block(v: &serde_json::Value) -> Option<String> {
+    let current = v["current"].as_str().unwrap_or("");
+    if current.is_empty() {
+        return None;
+    }
+    let min = v["min"].as_str().unwrap_or("");
+    // Which path was refused decides what has already stopped working; a seller
+    // and a buyer read the same refusal as two different symptoms.
+    let what = match v["path"].as_str().unwrap_or("") {
+        "sell" => "This build can no longer sell: the platform refused its market session as too old.",
+        "buy" => "This build can no longer buy: the platform refused its requests as too old.",
+        _ => "The platform has refused this build as too old to trade.",
+    };
+    let versions = if min.is_empty() {
+        // An older gateway answers 426 without naming a floor. Saying "needs "
+        // followed by nothing would read as a bug in this output.
+        format!("  This build is {current}.")
+    } else {
+        format!("  This build is {current}; the platform requires {min} or newer.")
+    };
+    Some(format!("!! {what}\n{versions}\n  Upgrade with:  asale update"))
 }
 
 fn cmd_logs(args: &[&str]) -> Result<u8> {
@@ -597,7 +664,7 @@ SERVICE
   start                Start the service in the background, then print its URL
   stop                 Stop the service
   restart              Stop and start it again
-  status               Is it running, what is it selling, is autostart on
+  status               Is it running, what is it selling, is anything stopping it
   logs [-f] [-n N]     Show (or follow) the service log
 
 ACCESS
@@ -769,6 +836,60 @@ mod tests {
     fn ipv6_keeps_its_brackets() {
         assert_eq!(exposed_bind("[::1]:9700", true, None, Some("::")), "[::]:9700");
         assert_eq!(exposed_bind("[::1]:9700", true, None, Some("[fd00::1]")), "[fd00::1]:9700");
+    }
+
+    // ── status: the two facts a headless install has no other way to learn ──
+
+    #[test]
+    fn nothing_is_said_about_a_standing_the_gateway_has_not_reported() {
+        // The shape before the first supply declaration, and the shape an older
+        // gateway leaves behind. Inventing a reassuring line from no data is how
+        // a seller ends up trusting a screen that knows nothing.
+        assert_eq!(reputation_line(&serde_json::Value::Null), None);
+        assert_eq!(reputation_line(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn a_blocked_seller_is_told_it_is_earning_nothing_and_why() {
+        let line = reputation_line(&serde_json::json!({"score": 526, "min_score": 600, "blocked": true}))
+            .expect("a standing was reported");
+        assert!(line.contains("526") && line.contains("600"), "both numbers: {line}");
+        assert!(line.contains("nothing is routed here"), "the consequence: {line}");
+    }
+
+    #[test]
+    fn a_deployment_with_no_floor_does_not_advertise_one() {
+        // `min_score: 0` means this deployment does not gate on reputation.
+        // "700 — above the matching floor of 0" reads like a setting to worry
+        // about, and there is none.
+        let line = reputation_line(&serde_json::json!({"score": 700, "min_score": 0, "blocked": false})).unwrap();
+        assert_eq!(line, "700");
+        let line = reputation_line(&serde_json::json!({"score": 700, "min_score": 600, "blocked": false})).unwrap();
+        assert!(line.contains("600"), "a real floor is worth naming: {line}");
+    }
+
+    #[test]
+    fn a_build_the_platform_still_trades_with_prints_nothing() {
+        assert_eq!(upgrade_block(&serde_json::Value::Null), None);
+        assert_eq!(upgrade_block(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn a_refused_build_gets_both_versions_and_the_command_that_fixes_it() {
+        let b = upgrade_block(&serde_json::json!({"current": "0.2.3", "min": "0.3.0", "path": "sell"}))
+            .expect("a refusal was recorded");
+        assert!(b.contains("0.2.3") && b.contains("0.3.0"), "both versions: {b}");
+        assert!(b.contains("asale update"), "a way out: {b}");
+        assert!(b.contains("sell"), "which half stopped working: {b}");
+    }
+
+    #[test]
+    fn a_refusal_that_names_no_floor_still_reads_as_a_sentence() {
+        // What an older gateway's 426 leaves behind. The bug this guards is
+        // "requires  or newer".
+        let b = upgrade_block(&serde_json::json!({"current": "0.2.3", "min": "", "path": "buy"})).unwrap();
+        assert!(!b.contains("requires"), "no dangling requirement: {b}");
+        assert!(b.contains("0.2.3") && b.contains("asale update"), "{b}");
     }
 
     /// The whole point of the command: what it produces has to read back as

@@ -884,6 +884,9 @@
       "unknownProxyMode": "Unknown proxy mode: {{value}}.",
       "badConsumeMode": "The mode must be direct, market or auto."
     },
+    "selfcheck": {
+      "notFixable": "`{{id}}` has no automatic repair — follow the instructions in the notice."
+    },
     "usage": {
       "regionBlocked": "The provider blocks requests from this region. Configure an upstream proxy in Settings.",
       "upstreamStatus": "The provider returned HTTP {{status}}. {{detail}}",
@@ -932,13 +935,18 @@
     },
     "regionBlocked": {
       "title": "The provider is refusing requests from this region",
-      "body": "{{lanes}} lane(s) are failing with a regional 403. This is not a login problem — signing in again will not help. Configure an upstream proxy in Settings.",
-      "action": "Open settings"
+      "body": "{{lanes}} lane(s) are failing with a regional 403. This is not a login problem — signing in again will not help. If you already run a proxy on this machine, Asale can find it and route provider calls through it.",
+      "fix": "Find my proxy",
+      "fixed": "Provider calls now go through {{proxy}}. The blocked lanes recover on their next attempt.",
+      "fixNoneFound": "No proxy is listening on this machine. Start yours, then try again — or enter its address in Settings → Network.",
+      "fixNoneWorked": "Tried {{count}} address(es) — {{tried}} — and none of them got through to the provider. Enter the right one in Settings → Network."
     },
     "sellAllOff": {
       "title": "Selling is off for every connected account",
       "body": "{{accounts}} account(s) are connected but none is offered on the market, so they earn nothing. Signing in again resets this switch, which is the usual reason it is off.",
-      "action": "Open sell page"
-    }
+      "fix": "Start selling again",
+      "fixed": "{{accounts}} account(s) are back on the market."
+    },
+    "fixing": "Working…"
   }
 }

@@ -91,6 +91,13 @@ pub async fn publish_wanted(state: &AppState) -> bool {
 /// no single existing command does: not just "is the link up", but whether
 /// being up is currently worth anything (signed in, accounts selling, lanes
 /// actually serving).
+///
+/// `upgrade` and `reputation` are here for the second question rather than the
+/// first, and are the two answers a headless install could not otherwise get:
+/// the desktop window polls them separately to draw a banner, and on a server
+/// there is no window, so `asale status` reads them from here. Both are the same
+/// shape the dedicated commands return — see `settings::upgrade_notice` and
+/// `settings::seller_status` — and both are `null` when there is nothing to say.
 pub async fn client_status(state: &AppState) -> R<Value> {
     let publish_state = match state.publisher.read().await.as_ref() {
         Some(h) => h.state().as_str().to_string(),
@@ -134,6 +141,8 @@ pub async fn client_status(state: &AppState) -> R<Value> {
         "lanes_blocked": lanes_blocked,
         "buying": buying,
         "version": env!("CARGO_PKG_VERSION"),
+        "upgrade": super::settings::upgrade_notice(),
+        "reputation": super::settings::seller_status(),
     }))
 }
 
