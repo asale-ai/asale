@@ -429,7 +429,8 @@
     "statusDone": "已完成",
     "statusFailed": "失败",
     "statusDisputed": "争议中",
-    "fee": "平台扣费",
+    "discount": "折扣（占原价）",
+    "discountHint": "本次调用成交价占厂商原价的比例",
     "refresh": "刷新",
     "emptyProviderDesc": "你为市场提供的每次请求，都会连同收益显示在这里。",
     "emptyConsumerDesc": "你的 CLI 通过 Asale 买入的每次请求，都会连同花费显示在这里。"

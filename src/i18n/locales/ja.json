@@ -429,7 +429,8 @@
     "statusDone": "完了",
     "statusFailed": "失敗",
     "statusDisputed": "係争中",
-    "fee": "手数料",
+    "discount": "割引（定価比）",
+    "discountHint": "このリクエストの請求額がベンダー定価に占める割合",
     "refresh": "更新",
     "emptyProviderDesc": "市場に提供したリクエストが、その収益とともにここに表示されます。",
     "emptyConsumerDesc": "CLI が Asale 経由で購入したリクエストが、その費用とともにここに表示されます。"

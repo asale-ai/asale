@@ -91,7 +91,7 @@ export function Records() {
                   <th>{t("records.model")}</th>
                   <th>{t("records.tokens")}</th>
                   <th>{t("records.amount")}</th>
-                  <th>{t("records.fee")}</th>
+                  <th>{t("records.discount")}</th>
                   <th>{t("records.status")}</th>
                 </tr>
               </thead>
@@ -124,7 +124,7 @@ export function Records() {
                   <th>{t("records.model")}</th>
                   <th>{t("records.tokens")}</th>
                   <th>{t("records.amount")}</th>
-                  <th>{t("records.fee")}</th>
+                  <th>{t("records.discount")}</th>
                   <th>{t("records.status")}</th>
                 </tr>
               </thead>
@@ -135,11 +135,8 @@ export function Records() {
                     <td className="mono">{r.model}</td>
                     <td className="mono tabular">{r.in_tokens}<span className="faint"> / </span>{r.out_tokens}</td>
                     <td className="mono tabular">{fmtUsdt(role === "provider" ? r.provider_income : r.amount_usdt)}</td>
-                    <td className="mono tabular">
-                      {fmtUsdt(r.platform_fee)}
-                      {r.amount_usdt > 0 && (
-                        <span className="faint"> ({Math.round((r.platform_fee / r.amount_usdt) * 100)}%)</span>
-                      )}
+                    <td className="mono tabular" title={t("records.discountHint")}>
+                      {r.mkt_ratio == null ? <span className="faint">—</span> : `${Math.round(r.mkt_ratio * 100)}%`}
                     </td>
                     <td>{statusBadge(r.status)}</td>
                   </tr>
