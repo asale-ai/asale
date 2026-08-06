@@ -1430,6 +1430,14 @@ impl RecordSink for StoreRecordSink {
             )
             .await;
     }
+
+    /// Codex states its remaining quota on every accepted response. Serving a
+    /// task is therefore a free reading of the seller's own subscription, and
+    /// banking it here is what keeps the Limits page current without paying for
+    /// a probe.
+    async fn observe_quota(&self, provider: &str, account_id: &str, headers: &std::collections::BTreeMap<String, String>) {
+        crate::commands::usage::record_quota_headers(&self.store, provider, account_id, headers).await;
+    }
 }
 
 // ── Public entry points (called by commands.rs) ─────────────────────────────

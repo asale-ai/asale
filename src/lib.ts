@@ -643,6 +643,14 @@ export interface LimitProvider {
   plan_label?: string | null;
   windows?: LimitWindow[];
   live?: boolean;   // true when windows came from the provider's live API
+  /** When the reading was taken (unix seconds), for providers whose numbers are
+   *  banked off response headers rather than fetched on demand (Codex). Absent
+   *  when the read was live at request time. */
+  as_of?: number | null;
+  /** Why a real reading could not be refreshed, when `as_of` has stopped
+   *  advancing. The numbers are still the provider's own — this explains their
+   *  age, it does not make them an estimate. */
+  stale_reason?: string | null;
   /** Why `live` is false, when a live read was attempted and failed. Absent for
    *  providers that expose no usage endpoint at all. */
   fallback_reason?: string | null;

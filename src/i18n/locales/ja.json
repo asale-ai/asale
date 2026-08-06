@@ -517,11 +517,17 @@
     "note": "上限は端末で計測した販売使用量に基づき、UTC 日でリセットされます。「購読の日次上限」はプランの 5 時間ウィンドウ上限を全日換算（×4.8）した参考値です。",
     "refresh": "更新",
     "live": "ライブ",
+    "measuredAt": "取得時刻：{{ago}}",
+    "ageJustNow": "たった今",
+    "ageMinutes": "{{n}} 分前",
+    "ageHours": "{{n}} 時間前",
+    "ageDays": "{{n}} 日前",
     "connect": "接続する",
     "estimate": "推定",
     "estimateUnsupported": "このプロバイダーにはリアルタイムの上限APIがないため、以下はこの端末の販売量からの推定値です。",
     "estimateFailed": "上流のリアルタイム上限を取得できませんでした。以下はこの端末の販売量からの推定値です。",
     "estimateReason": "理由: {{reason}}",
+    "staleReason": "読み取りを更新できませんでした：{{reason}}",
     "fixProxy": "プロキシ設定"
   },
   "account": {

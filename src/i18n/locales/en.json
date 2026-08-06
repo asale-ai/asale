@@ -517,11 +517,17 @@
     "note": "Limits track locally-metered sold usage and reset each UTC day. The \"subscription daily cap\" is the plan's 5h-window cap scaled to a full-day equivalent (×4.8) and is a reference figure only.",
     "refresh": "Refresh",
     "live": "Live",
+    "measuredAt": "Measured {{ago}}",
+    "ageJustNow": "just now",
+    "ageMinutes": "{{n}}m ago",
+    "ageHours": "{{n}}h ago",
+    "ageDays": "{{n}}d ago",
     "connect": "Connect",
     "estimate": "Estimate",
     "estimateUnsupported": "This provider exposes no live limits endpoint; the bars below estimate from what this device has served.",
     "estimateFailed": "Could not read the provider's live limits; the bars below estimate from what this device has served.",
     "estimateReason": "Reason: {{reason}}",
+    "staleReason": "Could not refresh the reading: {{reason}}",
     "fixProxy": "Set up proxy"
   },
   "account": {

@@ -3,9 +3,10 @@
 
 use crate::keychain;
 use crate::state::AppState;
-use asale_client_core::store::ToolRow;
+use asale_client_core::store::{LocalStore, ToolRow};
 use asale_client_core::{discovery, Provider};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use super::{R, day_start_ts, day_str, err, now_secs};
 use crate::cmd_err;
 
@@ -144,16 +145,19 @@ pub(crate) async fn provider_caps(state: &AppState) -> R<std::collections::HashM
 
 /// Rate-limit / quota windows per provider for the Limits page (mirrors
 /// TokenTracker's usage-limits payload). Each provider reports whether it is
-/// connected, a plan label, and a list of windows — 5h rolling + daily — with
-/// `used_percent`, an absolute `reset_at` (unix seconds), and `window_seconds`
-/// so the UI can compute pace markers and reset countdowns.
+/// connected, a plan label, and a list of windows with `used_percent`, an
+/// absolute `reset_at` (unix seconds), and `window_seconds` so the UI can
+/// compute pace markers and reset countdowns. The windows are whichever ones
+/// the provider itself keeps — not a fixed 5h/daily pair, which named both of
+/// Codex's wrong.
 ///
-/// `live` says whether those windows are the provider's own numbers, and
-/// `fallback_reason` says why they are not when a live read was attempted and
-/// failed. Without that second field a geo-blocked upstream (403 "Request not
-/// allowed" — the usual state when no upstream proxy is configured) silently
-/// degrades to a served-vs-cap estimate that looks like real data and hides
-/// whole windows, e.g. the weekly per-model ones.
+/// `live` says whether those windows are the provider's own numbers, `as_of`
+/// when they were measured for the providers whose numbers are banked rather
+/// than fetched, and `fallback_reason` why they are not the provider's when a
+/// read was attempted and failed. Without that last field a geo-blocked
+/// upstream (403 "Request not allowed" — the usual state when no upstream proxy
+/// is configured) silently degrades to a served-vs-cap estimate that looks like
+/// real data and hides whole windows, e.g. the weekly per-model ones.
 pub async fn usage_limits(state: &AppState, force: Option<bool>) -> R<Value> {
     let force = force.unwrap_or(false);
     let caps = provider_caps(state).await?;
@@ -166,19 +170,28 @@ pub async fn usage_limits(state: &AppState, force: Option<bool>) -> R<Value> {
             continue;
         }
 
-        // Prefer the provider's *real* rate-limit windows (Claude oauth/usage),
-        // cached for 60s. Fall back to the local served-vs-cap estimate.
-        let (windows, live, fallback_reason) = match claude_windows_cached(state, provider, &tools, force).await {
-            LiveWindows::Ok(w) => (w, true, None),
-            other => {
-                let est = estimate_windows(state, provider, window_cap).await?;
-                let reason = match other {
-                    LiveWindows::Failed(e) => Some(e),
-                    _ => None, // provider has no usage endpoint we can read
-                };
-                (est, false, reason)
-            }
-        };
+        // Prefer the provider's *real* rate-limit windows. Fall back to the
+        // local served-vs-cap estimate.
+        //
+        // `stale_reason` and `fallback_reason` are different answers to
+        // different questions and must not be collapsed: the first says why a
+        // real reading could not be refreshed, the second why there is no real
+        // reading at all. Only the second makes the numbers an estimate.
+        let (windows, live, as_of, stale_reason, fallback_reason) =
+            match live_windows(state, provider, &tools, force).await {
+                LiveWindows::Ok { windows, as_of, stale_reason } => (windows, true, as_of, stale_reason, None),
+                other => {
+                    let est = estimate_windows(state, provider, window_cap).await?;
+                    let reason = match other {
+                        LiveWindows::Failed(e) => Some(e),
+                        // Not an error, but still owed an explanation: without
+                        // one the "estimate" badge is a label with nothing
+                        // behind it.
+                        _ => None,
+                    };
+                    (est, false, None, None, reason)
+                }
+            };
 
         providers.push(json!({
             "id": provider,
@@ -186,10 +199,45 @@ pub async fn usage_limits(state: &AppState, force: Option<bool>) -> R<Value> {
             "plan_label": plan,
             "windows": windows,
             "live": live,
+            "as_of": as_of,
+            "stale_reason": stale_reason,
             "fallback_reason": fallback_reason,
         }));
     }
     Ok(json!({ "providers": providers }))
+}
+
+/// The real rate-limit windows for a provider, however that provider can be
+/// asked. Two mechanisms exist and they are not interchangeable:
+///
+///   - Claude answers a dedicated endpoint (`oauth/usage`) on demand, so it is
+///     fetched live and cached briefly.
+///   - Codex has no endpoint a ChatGPT bearer may read; its numbers only ride
+///     back on `x-codex-*` headers attached to an accepted API call. Those are
+///     banked whenever this device serves a Codex task, and topped up by a
+///     minimal probe when the bank is stale.
+///
+/// Everything else reports nothing at all, and says so rather than quietly
+/// becoming an estimate.
+///
+/// Whichever route was taken, a read that fails falls back to the last one that
+/// worked before it falls back to the estimate. `oauth/usage` shares Claude
+/// Code's own budget and answers 429 for minutes at a time on a busy account —
+/// and replacing a real 94% with an estimated 0% for the duration is the worst
+/// of the three answers available. Yesterday's real number, labelled with its
+/// age, is worth more than a fresh guess.
+pub(crate) async fn live_windows(state: &AppState, provider: &str, tools: &[ToolRow], force: bool) -> LiveWindows {
+    let outcome = match provider {
+        "claude" | "claude_work" => claude_windows_cached(state, provider, tools, force).await,
+        "codex" => codex_windows(state, provider, tools, force).await,
+        _ => return LiveWindows::Unsupported,
+    };
+    if let LiveWindows::Failed(reason) = &outcome {
+        if let Some((at, windows)) = banked_quota(state, provider, tools).await {
+            return LiveWindows::Ok { windows, as_of: Some(at), stale_reason: Some(reason.clone()) };
+        }
+    }
+    outcome
 }
 
 /// Local stand-in for a provider that has no readable usage endpoint (or whose
@@ -214,8 +262,13 @@ async fn estimate_windows(state: &AppState, provider: &str, window_cap: u64) -> 
 
 /// Outcome of a live rate-limit read.
 pub(crate) enum LiveWindows {
-    /// The provider's own windows (a JSON array of LimitWindow).
-    Ok(Value),
+    /// The provider's own windows (a JSON array of LimitWindow). `as_of` is
+    /// when they were measured, for readings that are banked rather than
+    /// fetched on demand — an hour-old snapshot is still the provider's own
+    /// number, but the page has to be able to say how old it is. `stale_reason`
+    /// is set when a refresh was attempted and failed, so the age has an
+    /// explanation rather than just being a number that stops moving.
+    Ok { windows: Value, as_of: Option<i64>, stale_reason: Option<String> },
     /// This provider exposes no usage endpoint we can read.
     Unsupported,
     /// A read was attempted and failed; the string says why, verbatim enough to
@@ -225,8 +278,14 @@ pub(crate) enum LiveWindows {
 
 /// Live Claude rate-limit windows via `api.anthropic.com/api/oauth/usage`,
 /// cached per provider (60s on success — the upstream endpoint shares Claude
-/// Code's budget and 429s easily; 30s on failure, so a page poll every 30s does
-/// not queue up 12-second timeouts). `force` bypasses the cache.
+/// Code's budget and 429s easily; on failure long enough that a page poll every
+/// 30s does not queue up 12-second timeouts). `force` bypasses the cache.
+///
+/// A 429 waits considerably longer than other failures. It is not a transient
+/// glitch worth retrying at once — it means this account has spent the budget
+/// the endpoint shares with Claude Code, and it clears in minutes, not seconds.
+/// Re-asking every half minute could not succeed and only deepens the hole the
+/// account is already in.
 pub(crate) async fn claude_windows_cached(
     state: &AppState,
     provider: &str,
@@ -238,14 +297,19 @@ pub(crate) async fn claude_windows_cached(
     }
     const TTL: i64 = 60;
     const FAIL_TTL: i64 = 30;
+    const RATE_LIMITED_TTL: i64 = 5 * 60;
     let now = now_secs();
     if !force {
         let cache = state.limits_cache.read().await;
         if let Some((at, cached)) = cache.get(provider) {
-            let fresh = now - at < if cached.is_ok() { TTL } else { FAIL_TTL };
-            if fresh {
+            let ttl = match cached {
+                Ok(_) => TTL,
+                Err(e) if is_rate_limited(e) => RATE_LIMITED_TTL,
+                Err(_) => FAIL_TTL,
+            };
+            if now - at < ttl {
                 return match cached {
-                    Ok(w) => LiveWindows::Ok(w.clone()),
+                    Ok(w) => LiveWindows::Ok { windows: w.clone(), as_of: None, stale_reason: None },
                     Err(e) => LiveWindows::Failed(e.clone()),
                 };
             }
@@ -264,8 +328,11 @@ pub(crate) async fn claude_windows_cached(
         match fetch_claude_windows(&token).await {
             Ok(w) => {
                 let v = Value::Array(w);
+                // Bank it: the next 429 — and on a busy account there will be
+                // one — then still has a real reading to show.
+                record_quota_windows(&state.store, provider, &account.account_id, &v).await;
                 state.limits_cache.write().await.insert(provider.to_string(), (now, Ok(v.clone())));
-                return LiveWindows::Ok(v);
+                return LiveWindows::Ok { windows: v, as_of: None, stale_reason: None };
             }
             Err(e) => last_err = Some(format!("{}: {e}", account.account_id)),
         }
@@ -388,6 +455,279 @@ pub fn normalize_claude_windows(body: &Value) -> Vec<Value> {
     windows
 }
 
+// ── Codex ───────────────────────────────────────────────────────────────────
+//
+// Codex reports its rate-limit state only as `x-codex-*` headers on an accepted
+// API call. Everything cheaper was tried and does not work: `codex/usage` and
+// `codex/rate_limits` answer a ChatGPT bearer 403 (an HTML edge page, not JSON),
+// `codex/models` answers 200 but carries no such headers, and a request the API
+// rejects at validation — bad model, empty input — is answered *before* the
+// rate-limit middleware runs and so carries none either. So the reading is
+// banked whenever this device serves a Codex task and, failing that, bought
+// with the smallest request that will be accepted.
+
+/// How long a banked reading counts as current. Long, because refreshing it
+/// costs subscription quota and the windows it describes are hours to days
+/// wide; the Limits page reports the age either way.
+const CODEX_SNAPSHOT_TTL: i64 = 10 * 60;
+/// Backoff after a failed probe, so a broken upstream is not re-asked on every
+/// 30-second page poll.
+const CODEX_PROBE_FAIL_TTL: i64 = 5 * 60;
+
+/// Settings key for the last quota reading taken off a provider's own headers.
+fn quota_snapshot_key(provider: &str, account_id: &str) -> String {
+    format!("quota_snapshot:{provider}:{account_id}")
+}
+
+/// Bank the windows carried by a provider's response headers.
+///
+/// Called from the serving path (`RecordSink::observe_quota`) and from the
+/// probe, so both routes leave the same record behind.
+pub(crate) async fn record_quota_headers(
+    store: &LocalStore,
+    provider: &str,
+    account_id: &str,
+    headers: &BTreeMap<String, String>,
+) {
+    let windows = match provider {
+        "codex" => normalize_codex_headers(headers, now_secs()),
+        _ => return,
+    };
+    record_quota_windows(store, provider, account_id, &Value::Array(windows)).await;
+}
+
+/// Bank a reading, however it was obtained — Codex's response headers or
+/// Claude's usage endpoint. What makes it worth storing is the same either way:
+/// it is the provider's own number, and the next time the provider cannot be
+/// reached it is the best answer left.
+pub(crate) async fn record_quota_windows(store: &LocalStore, provider: &str, account_id: &str, windows: &Value) {
+    if !windows.as_array().is_some_and(|a| !a.is_empty()) {
+        return;
+    }
+    let snap = json!({ "at": now_secs(), "windows": windows });
+    let _ = store.set_setting(&quota_snapshot_key(provider, account_id), &snap.to_string()).await;
+}
+
+/// Whether a failure reason is an upstream rate limit. These strings are built
+/// by `fetch_claude_windows` a few screens down, so this reads our own output
+/// rather than guessing at the upstream's wording.
+fn is_rate_limited(reason: &str) -> bool {
+    reason.contains("HTTP 429")
+}
+
+/// The freshest banked reading across a provider's accounts, as `(measured_at,
+/// windows)`. Accounts on one subscription report the same numbers, so the
+/// newest answer is the right one rather than something to merge.
+async fn banked_quota(state: &AppState, provider: &str, tools: &[ToolRow]) -> Option<(i64, Value)> {
+    let mut best: Option<(i64, Value)> = None;
+    for tool in tools.iter().filter(|t| t.provider == provider) {
+        // `continue`, not `?`: one account with nothing banked must not hide a
+        // reading another account already has.
+        let Some(raw) = state.store.get_setting(&quota_snapshot_key(provider, &tool.account_id)).await.ok().flatten()
+        else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&raw) else { continue };
+        let at = v.get("at").and_then(Value::as_i64).unwrap_or(0);
+        let Some(windows) = v.get("windows").filter(|w| w.as_array().is_some_and(|a| !a.is_empty())) else { continue };
+        if best.as_ref().is_none_or(|(prev, _)| at > *prev) {
+            best = Some((at, windows.clone()));
+        }
+    }
+    best
+}
+
+/// Codex windows: the banked reading if it is current, else a probe.
+async fn codex_windows(state: &AppState, provider: &str, tools: &[ToolRow], force: bool) -> LiveWindows {
+    let now = now_secs();
+    if !force {
+        if let Some((at, windows)) = banked_quota(state, provider, tools).await {
+            if now - at < CODEX_SNAPSHOT_TTL {
+                return LiveWindows::Ok { windows, as_of: Some(at), stale_reason: None };
+            }
+        }
+        // A probe that just failed is not retried on the next page poll.
+        // `live_windows` substitutes the stale-but-real reading, if there is
+        // one, for whatever this returns.
+        let cache = state.limits_cache.read().await;
+        if let Some((at, Err(e))) = cache.get(provider) {
+            if now - at < CODEX_PROBE_FAIL_TTL {
+                return LiveWindows::Failed(e.clone());
+            }
+        }
+    }
+
+    match probe_codex_windows(state, provider, tools).await {
+        Ok(windows) => {
+            state.limits_cache.write().await.remove(provider);
+            LiveWindows::Ok { windows, as_of: Some(now_secs()), stale_reason: None }
+        }
+        Err(reason) => {
+            state.limits_cache.write().await.insert(provider.to_string(), (now, Err(reason.clone())));
+            LiveWindows::Failed(reason)
+        }
+    }
+}
+
+/// Buy one reading of Codex's rate-limit state with the smallest request the
+/// backend will accept, and bank it.
+///
+/// The response is dropped the moment its headers land, so the stream is torn
+/// down before the model has produced anything of consequence — the cost is the
+/// handful of input tokens, against a window measured in millions.
+async fn probe_codex_windows(state: &AppState, provider: &str, tools: &[ToolRow]) -> Result<Value, String> {
+    let mut last_err: Option<String> = None;
+    for tool in tools.iter().filter(|t| t.provider == provider) {
+        let key = keychain::token_ref(provider, &tool.account_id);
+        let Some(token) = keychain::get(&key).ok().flatten() else {
+            last_err = Some(format!("{}: no OAuth token in the local secret store", tool.account_id));
+            continue;
+        };
+        let account_id = asale_client_core::executor::chatgpt_account_id(&token).unwrap_or_default();
+        let model = match codex_probe_model(state, &token, &account_id).await {
+            Ok(m) => m,
+            Err(e) => {
+                last_err = Some(format!("{}: {e}", tool.account_id));
+                continue;
+            }
+        };
+        match fetch_codex_headers(&token, &account_id, &model).await {
+            Ok(headers) => {
+                let windows = normalize_codex_headers(&headers, now_secs());
+                if windows.is_empty() {
+                    last_err = Some(format!("{}: response carried no x-codex-* rate-limit headers", tool.account_id));
+                    continue;
+                }
+                record_quota_headers(&state.store, provider, &tool.account_id, &headers).await;
+                return Ok(Value::Array(windows));
+            }
+            Err(e) => {
+                // The entitled model set moves with each Codex release, so a
+                // rejected slug means the cached pick has aged out, not that the
+                // account is broken. Drop it and let the next attempt re-ask.
+                if e.contains("not supported when using Codex") {
+                    let _ = state.store.set_setting(CODEX_PROBE_MODEL_KEY, "").await;
+                }
+                last_err = Some(format!("{}: {e}", tool.account_id));
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "no codex account to ask".into()))
+}
+
+/// Cached slug for the probe request.
+const CODEX_PROBE_MODEL_KEY: &str = "codex:probe_model";
+
+/// A model slug this account is entitled to. The set is per-account and per
+/// release, so it is asked for rather than assumed — `codex/models` is free and
+/// the answer is cached until a request is refused for naming it.
+async fn codex_probe_model(state: &AppState, token: &str, account_id: &str) -> Result<String, String> {
+    if let Some(m) = state.store.get_setting(CODEX_PROBE_MODEL_KEY).await.ok().flatten().filter(|s| !s.is_empty()) {
+        return Ok(m);
+    }
+    let models = discovery::codex_servable_models(token, account_id).await.map_err(|e| e.to_string())?;
+    let model = models.into_iter().next().ok_or("this account is not entitled to the Codex surface")?;
+    let _ = state.store.set_setting(CODEX_PROBE_MODEL_KEY, &model).await;
+    Ok(model)
+}
+
+/// One accepted Codex call, kept only for its headers.
+async fn fetch_codex_headers(
+    token: &str,
+    account_id: &str,
+    model: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    let body = json!({
+        "model": model,
+        "input": [{ "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "." }] }],
+        "stream": true,
+        "store": false,
+        "instructions": "Reply with a single period.",
+        "reasoning": { "effort": "low" },
+    });
+    let mut req = asale_client_core::http::upstream()
+        .post("https://chatgpt.com/backend-api/codex/responses")
+        .header("content-type", "application/json")
+        .header("accept", "text/event-stream")
+        .header("openai-beta", "responses=experimental")
+        .header("originator", "codex_cli_rs")
+        .header("user-agent", format!("codex_cli_rs/{}", discovery::CODEX_CLIENT_VERSION))
+        .header("session_id", uuid::Uuid::new_v4().to_string())
+        .header("authorization", format!("Bearer {token}"))
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(20));
+    if !account_id.is_empty() {
+        req = req.header("chatgpt-account-id", account_id);
+    }
+    let resp = req.send().await.map_err(|e| format!("request to chatgpt.com failed: {e}"))?;
+    let status = resp.status();
+    let headers = asale_client_core::executor::quota_headers("codex", resp.headers());
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        let detail: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+        let msg = detail
+            .pointer("/detail")
+            .or_else(|| detail.pointer("/error/message"))
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| body.trim())
+            .chars()
+            .take(200)
+            .collect::<String>();
+        return Err(format!("HTTP {status} {msg}"));
+    }
+    // Headers in hand; dropping the response aborts the stream before the model
+    // gets far enough to cost anything worth counting.
+    drop(resp);
+    Ok(headers)
+}
+
+/// Map Codex's `x-codex-*` headers onto our LimitWindow shape.
+///
+/// Codex names its windows by ordinal — "primary" and "secondary" — not by
+/// duration, and which is which moves with the plan and the active limit: a
+/// Plus account on the premium limit reports its 7-day window as the primary
+/// and leaves the secondary unset. So the label has to be derived from
+/// `window-minutes`, and a slot reporting zero minutes is one the account does
+/// not have rather than a window sitting at 0%.
+pub fn normalize_codex_headers(h: &BTreeMap<String, String>, now: i64) -> Vec<Value> {
+    let num = |k: String| -> Option<f64> { h.get(&k)?.parse::<f64>().ok() };
+    let mut out = Vec::new();
+    for slot in ["primary", "secondary"] {
+        let minutes = num(format!("x-codex-{slot}-window-minutes")).unwrap_or(0.0);
+        if minutes <= 0.0 {
+            continue;
+        }
+        let Some(pct) = num(format!("x-codex-{slot}-used-percent")) else { continue };
+        let seconds = (minutes * 60.0) as i64;
+        // The absolute reset first: `reset-after-seconds` is only meaningful
+        // beside the instant it was read, which a banked snapshot no longer is.
+        let reset_at = num(format!("x-codex-{slot}-reset-at"))
+            .map(|v| v as i64)
+            .filter(|v| *v > 0)
+            .or_else(|| num(format!("x-codex-{slot}-reset-after-seconds")).map(|v| now + v as i64));
+        let label = window_label(seconds);
+        out.push(json!({
+            "key": label, "label": label,
+            "used_percent": pct.clamp(0.0, 100.0),
+            "reset_at": reset_at, "window_seconds": seconds,
+        }));
+    }
+    out
+}
+
+/// A window's duration is the only name Codex gives it. Render it the way the
+/// fixed Claude windows are labelled ("5h", "7d"), so one column reads the same
+/// whichever provider filled it.
+fn window_label(seconds: i64) -> String {
+    if seconds % 86_400 == 0 {
+        format!("{}d", seconds / 86_400)
+    } else if seconds % 3_600 == 0 {
+        format!("{}h", seconds / 3_600)
+    } else {
+        format!("{}m", (seconds / 60).max(1))
+    }
+}
+
 /// LIKE-prefix used to attribute local publisher usage to a provider family
 /// (mirrors `publisher::provider_model_prefix`).
 pub(crate) fn provider_model_prefix(provider: &str) -> Option<&'static str> {
@@ -450,5 +790,76 @@ mod tests {
     fn error_body_yields_no_windows() {
         let body = json!({ "error": { "type": "forbidden", "message": "Request not allowed" } });
         assert!(normalize_claude_windows(&body).is_empty());
+    }
+
+    /// A 429 must be told apart from other failures: it backs off for minutes
+    /// rather than seconds, because re-asking cannot succeed and only spends
+    /// more of the budget the endpoint shares with Claude Code.
+    #[test]
+    fn a_rate_limit_is_distinguished_from_other_failures() {
+        assert!(is_rate_limited("ohyear09@gmail.com: HTTP 429 Rate limited. Please try again later."));
+        assert!(is_rate_limited("acct: HTTP 429 Too Many Requests"));
+        assert!(!is_rate_limited("acct: HTTP 403 Request not allowed (region-blocked upstream)"));
+        assert!(!is_rate_limited("acct: request to api.anthropic.com failed: timed out"));
+        assert!(!is_rate_limited("acct: no OAuth token in the local secret store"));
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    /// A real Plus account's header block: the primary window is the weekly
+    /// one and the secondary is unset. Labelling the pair "5h" and "24h" — what
+    /// the served-vs-cap estimate reports — would have named both wrong.
+    #[test]
+    fn codex_windows_are_named_by_their_own_duration() {
+        let w = normalize_codex_headers(
+            &headers(&[
+                ("x-codex-plan-type", "plus"),
+                ("x-codex-active-limit", "premium"),
+                ("x-codex-primary-used-percent", "9"),
+                ("x-codex-primary-window-minutes", "10080"),
+                ("x-codex-primary-reset-at", "1786430385"),
+                ("x-codex-primary-reset-after-seconds", "430172"),
+                ("x-codex-secondary-used-percent", "0"),
+                ("x-codex-secondary-window-minutes", "0"),
+                ("x-codex-secondary-reset-at", ""),
+            ]),
+            1_786_000_213,
+        );
+        assert_eq!(w.len(), 1, "the secondary slot is unset, not a window at 0%");
+        assert_eq!(w[0]["label"], "7d");
+        assert_eq!(w[0]["used_percent"], 9.0);
+        assert_eq!(w[0]["window_seconds"], 604_800);
+        assert_eq!(w[0]["reset_at"], 1_786_430_385_i64);
+    }
+
+    /// Both slots in use, and only the relative reset available — the shape a
+    /// 5h + weekly plan reports.
+    #[test]
+    fn codex_falls_back_to_the_relative_reset() {
+        let w = normalize_codex_headers(
+            &headers(&[
+                ("x-codex-primary-used-percent", "42.5"),
+                ("x-codex-primary-window-minutes", "300"),
+                ("x-codex-primary-reset-after-seconds", "600"),
+                ("x-codex-secondary-used-percent", "7"),
+                ("x-codex-secondary-window-minutes", "10080"),
+                ("x-codex-secondary-reset-after-seconds", "86400"),
+            ]),
+            1_000,
+        );
+        let labels: Vec<&str> = w.iter().map(|x| x["label"].as_str().unwrap()).collect();
+        assert_eq!(labels, ["5h", "7d"]);
+        assert_eq!(w[0]["used_percent"], 42.5);
+        assert_eq!(w[0]["reset_at"], 1_600_i64);
+        assert_eq!(w[1]["reset_at"], 87_400_i64);
+    }
+
+    /// A response with no `x-codex-*` block at all — what a 400 rejected before
+    /// the rate-limit middleware looks like. It must not read as "0% used".
+    #[test]
+    fn codex_headerless_response_yields_no_windows() {
+        assert!(normalize_codex_headers(&headers(&[("content-type", "application/json")]), 0).is_empty());
     }
 }

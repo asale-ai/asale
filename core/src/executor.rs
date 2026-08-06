@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use futures_util::StreamExt;
 use serde_json::json;
+use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
@@ -167,6 +168,31 @@ pub trait RecordSink: Send + Sync {
     /// failure happened before an account could be leased. Metering is keyed on
     /// it so per-account sell limits and quota estimates stay separate.
     async fn record(&self, task_id: &str, provider: &str, account_id: &str, model: &str, usage: &Usage, status: &str);
+
+    /// Quota headers a provider volunteered on an upstream response.
+    ///
+    /// Serving a task is the one moment those numbers arrive for free, so they
+    /// are handed over here rather than paid for again later by a probe. The
+    /// default is a no-op: a sink that only meters need not care.
+    async fn observe_quota(&self, _provider: &str, _account_id: &str, _headers: &BTreeMap<String, String>) {}
+}
+
+/// The quota headers on an upstream response, as `name -> value`.
+///
+/// Empty for every provider that does not report its rate-limit state this way
+/// — which today is all of them but Codex, whose `x-codex-*` block is the only
+/// reading a ChatGPT bearer can get at all (`/backend-api/codex/usage` answers
+/// that credential 403).
+pub fn quota_headers(provider: &str, headers: &reqwest::header::HeaderMap) -> BTreeMap<String, String> {
+    let prefix = match provider {
+        "codex" => "x-codex-",
+        _ => return BTreeMap::new(),
+    };
+    headers
+        .iter()
+        .filter(|(k, _)| k.as_str().starts_with(prefix))
+        .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.as_str().to_string(), s.trim().to_string())))
+        .collect()
 }
 
 /// Execute one relayed request and stream results back via `out`.
@@ -361,6 +387,17 @@ pub async fn execute(
     };
 
     let status = resp.status().as_u16();
+
+    // Bank whatever the provider said about its own quota on the way past —
+    // including on the 429 that follows exhaustion, which is the reading the
+    // Limits page most wants and the one a later probe could no longer obtain.
+    if let Some(sink) = records {
+        let observed = quota_headers(&provider, resp.headers());
+        if !observed.is_empty() {
+            sink.observe_quota(&provider, &lease.account_id, &observed).await;
+        }
+    }
+
     if status >= 400 {
         let code = if status < 500 { "UPSTREAM_4XX" } else { "UPSTREAM_5XX" };
         let retriable = status >= 500 || status == 429;

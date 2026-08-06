@@ -32,6 +32,18 @@ function barTone(displayPct: number, mode: DisplayMode): "ok" | "warn" | "danger
   return "ok";
 }
 
+type TFn = ReturnType<typeof useTranslation>["t"];
+
+/** How long ago a banked reading was taken, or null when it was read live. */
+function formatAge(asOf: number | null | undefined, t: TFn): string | null {
+  if (!asOf) return null;
+  const secs = Math.max(0, Math.floor(Date.now() / 1000) - asOf);
+  if (secs < 90) return t("limits.ageJustNow");
+  if (secs < 3600) return t("limits.ageMinutes", { n: Math.round(secs / 60) });
+  if (secs < 86400) return t("limits.ageHours", { n: Math.round(secs / 3600) });
+  return t("limits.ageDays", { n: Math.round(secs / 86400) });
+}
+
 function formatPercentValue(value: number, subOne: string): string {
   const pct = Math.max(0, Math.min(100, Number(value) || 0));
   const rounded = Math.round(pct);
@@ -206,8 +218,20 @@ export function Limits() {
     // data — and hides the windows the provider reports that we cannot derive
     // (the weekly per-model ones).
     const reason = p.fallback_reason || "";
+    // Codex has no endpoint to poll — its numbers ride back on the headers of
+    // an accepted API call, so the freshest reading can be minutes old. Still
+    // the provider's own number, but the page has to say when it was taken.
+    const age = p.live ? formatAge(p.as_of, t) : null;
+    const liveTitle = [
+      age ? t("limits.measuredAt", { ago: age }) : "",
+      p.stale_reason ? t("limits.staleReason", { reason: p.stale_reason }) : "",
+    ].filter(Boolean).join("\n");
     const badge = p.live
-      ? <span className="pill on tiny">{t("limits.live")}</span>
+      ? (
+        <span className="pill on tiny" title={liveTitle || undefined}>
+          {t("limits.live")}{age ? ` · ${age}` : ""}
+        </span>
+      )
       : (
         <span
           className="pill warn tiny"
@@ -229,15 +253,22 @@ export function Limits() {
             mode={mode} pace={pace} title={hoverFor(w, pace)}
           />
         ))}
-        {reason && (
-          <div className="limit-fallback" title={reason}>
-            <span>{t("limits.estimateFailed")}</span>
-            <button
-              className="lane-resume"
-              onClick={(e) => { e.stopPropagation(); window.dispatchEvent(new CustomEvent("asale:nav", { detail: "settings" })); }}
-            >
-              {t("limits.fixProxy")}
-            </button>
+        {/* An estimate always owes its explanation. Gating this on `reason`
+            left the providers with no usage endpoint at all — every one but
+            Claude and Codex — showing bars derived from what this device sold,
+            under a bare "estimate" chip that said nothing about why. */}
+        {!p.live && (
+          <div className="limit-fallback" title={reason || undefined}>
+            <span>{reason ? t("limits.estimateFailed") : t("limits.estimateUnsupported")}</span>
+            {/* Only a failed read is something the user can act on. */}
+            {reason && (
+              <button
+                className="lane-resume"
+                onClick={(e) => { e.stopPropagation(); window.dispatchEvent(new CustomEvent("asale:nav", { detail: "settings" })); }}
+              >
+                {t("limits.fixProxy")}
+              </button>
+            )}
           </div>
         )}
         {expanded && (
@@ -252,6 +283,11 @@ export function Limits() {
               );
             })}
             {reason && <div className="ld-line">{t("limits.estimateReason", { reason })}</div>}
+            {/* Real numbers that stopped refreshing. Says why they are old
+                without calling them an estimate, which they are not. */}
+            {p.stale_reason && (
+              <div className="ld-line">{t("limits.staleReason", { reason: p.stale_reason })}</div>
+            )}
           </div>
         )}
       </ToolGroup>

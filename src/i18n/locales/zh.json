@@ -517,11 +517,17 @@
     "note": "限额基于本机计量的出售用量，按 UTC 日重置。「订阅日额度」由套餐 5 小时窗口上限换算为全天等效值（×4.8），仅作参考。",
     "refresh": "刷新",
     "live": "实时",
+    "measuredAt": "读数时间：{{ago}}",
+    "ageJustNow": "刚刚",
+    "ageMinutes": "{{n}} 分钟前",
+    "ageHours": "{{n}} 小时前",
+    "ageDays": "{{n}} 天前",
     "connect": "去连接",
     "estimate": "估算",
     "estimateUnsupported": "该服务商没有实时限额接口，下列进度按本机已售出的用量估算。",
     "estimateFailed": "未能读取上游实时限额，下列进度按本机已售出的用量估算。",
     "estimateReason": "原因：{{reason}}",
+    "staleReason": "读数未能刷新：{{reason}}",
     "fixProxy": "设置代理"
   },
   "account": {
