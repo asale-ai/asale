@@ -429,7 +429,8 @@
     "statusDone": "已完成",
     "statusFailed": "失敗",
     "statusDisputed": "爭議中",
-    "fee": "平台扣費",
+    "discount": "折扣（佔原價）",
+    "discountHint": "本次呼叫成交價佔廠商原價的比例",
     "refresh": "重新整理",
     "emptyProviderDesc": "你為市場提供的每次請求，都會連同收益顯示在這裡。",
     "emptyConsumerDesc": "你的 CLI 透過 Asale 買入的每次請求，都會連同花費顯示在這裡。"

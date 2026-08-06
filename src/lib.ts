@@ -691,6 +691,9 @@ export interface ServerRecord {
   amount_usdt: number;
   provider_income: number;
   platform_fee: number;
+  /** Share of the vendor's list price this task was billed at (0.82 = 82% of
+   *  list). Null for tasks settled before the server recorded it. */
+  mkt_ratio: number | null;
   status: number;
   created_ts: number;
 }
