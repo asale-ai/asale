@@ -17,6 +17,8 @@ const inTauri = true;
 // Server response shapes live in ../../shared/api-types.ts so asale-web
 // describes the same JSON with the same types. Re-exported so pages keep
 // importing them from "./lib".
+import type { DepositSession } from "@shared/api-types";
+
 export type {
   DepositSession,
   DepositSessionStatus,
@@ -357,6 +359,20 @@ export interface WithdrawLimits {
   withdraw_max_per_hour: number;
   whitelist_only: boolean;
 }
+/** The card rail's terms, or `null` where the deployment has no processor.
+ *
+ *  Unlike a chain, the fee is charged **on top**: the wallet is credited the
+ *  figure the user picked and the card is billed that plus `fee_bps`/`fee_flat`.
+ *  Both parts are here so the dialog can show the difference between the listed
+ *  amount and what will actually be charged before the user commits to it. */
+export interface CardLimits {
+  deposit_min: number;
+  deposit_max: number;
+  /** Basis points of the top-up: 500 = 5%. */
+  fee_bps: number;
+  /** Flat part, in micro-USDT. */
+  fee_flat: number;
+}
 export interface WalletHistory {
   deposits: DepositRow[];
   withdrawals: WithdrawalRow[];
@@ -366,6 +382,18 @@ export interface WalletHistory {
   chains: WithdrawLimits[];
   /** The default rail's schedule, flat, for callers that want just one. */
   limits: WithdrawLimits;
+  /** The card rail, when the deployment has one configured. */
+  card?: CardLimits | null;
+}
+
+/** What `wallet_card_session` answers with: the session to poll, plus the
+ *  hosted checkout to open and the arithmetic behind the charge. */
+export interface CardSession extends DepositSession {
+  checkout_url: string;
+  /** Surcharge, micro-USDT. */
+  fee: number;
+  /** What the card is billed, micro-USDT — the top-up plus the fee. */
+  charge: number;
 }
 
 /** Base58 alphabet Solana (and Bitcoin) use — no 0, O, I or l. */
@@ -539,9 +567,9 @@ export interface AccountStatus {
   /** This account's daily sell cap in tokens; 0 = unlimited. */
   sell_daily_limit: number;
   /** The price floor this account sells at, in whole percent *of* list price: a
-   *  model the market prices below it is withheld until it comes back. `10` —
-   *  the default, and below every price the server can quote — never withholds
-   *  anything.
+   *  model the market prices below it is withheld until it comes back. `10` is
+   *  the default; `5` — the platform's own floor, and below every price the
+   *  server can quote — is the lowest settable and never withholds anything.
    *
    *  `sell_max_ratio` is the band's other end, which the UI no longer sets: no
    *  price is too good to accept, so it stays at list price. */
@@ -582,7 +610,8 @@ export interface ConsumeModeInfo {
 }
 
 // ── Buy side: one switch + model multi-select per installed CLI (flow §4/§6) ──
-export type BuyToolId = "claude" | "codex" | "gemini";
+/** Keep in sync with `tool_config::TOOLS` — the daemon is the list's owner. */
+export type BuyToolId = "claude" | "codex" | "gemini" | "openclaw" | "hermes" | "opencode";
 export interface BuyTool {
   id: BuyToolId;
   label: string;
@@ -610,6 +639,26 @@ export interface BuyTools {
    *  instead of silently disagreeing with what the user saw a moment ago. */
   repaired: string[];
 }
+/** One running instance of a buy-side CLI, as the daemon found it. */
+export interface ToolProcess {
+  pid: number;
+  /** The command line it was started with — what tells two sessions apart. */
+  cmd: string;
+}
+/** Which buy-side CLIs are running right now, keyed by tool id.
+ *
+ *  A buy switch is read by these tools once, at startup, so a session that was
+ *  already up is still on the old config. This is what lets the page name the
+ *  sessions that have to be restarted instead of only asking for it.
+ *
+ *  `scanned: false` means the daemon could not read the machine's process table
+ *  at all — an empty list then means "we do not know", not "nothing is running",
+ *  and must not be drawn as the latter. */
+export interface ToolProcesses {
+  scanned: boolean;
+  running: Record<string, ToolProcess[]>;
+}
+
 /** Market prices are micro-USDT per 1K tokens; bill sheets quote per 1M. */
 export const pricePerMillion = (micros: number) => micros / 1000;
 

@@ -295,8 +295,8 @@ pub struct AccountRuntime {
     /// Per-account daily sell cap in tokens; 0 = unlimited.
     pub sell_daily_limit: i64,
     /// The price band this account sells inside, in whole percent *of* list
-    /// price. `(10, 100)` — the default and the whole legal range — never
-    /// withholds anything.
+    /// price. `(5, 100)` is the whole legal range and never withholds anything;
+    /// a fresh account starts at the default floor of 10 instead.
     pub sell_min_ratio: i64,
     pub sell_max_ratio: i64,
     pub cooldown_until: Option<i64>,
@@ -330,7 +330,7 @@ impl AccountRuntime {
             origin: None,
             used_today: 0,
             sell_daily_limit: 0,
-            sell_min_ratio: crate::store::RATIO_BAND_FULL.0,
+            sell_min_ratio: crate::store::DEFAULT_SELL_MIN_RATIO,
             sell_max_ratio: crate::store::RATIO_BAND_FULL.1,
             cooldown_until: None,
             auth_failed: false,

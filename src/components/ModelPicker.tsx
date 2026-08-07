@@ -11,7 +11,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { groupModelsByFamily } from "@shared/model-groups";
-import { IconSearch, IconCheck, IconX, IconPlus, IconChip, IconChevronDown } from "../icons";
+import { FoldToggle } from "../ui";
+import { IconSearch, IconCheck, IconX, IconPlus, IconChip } from "../icons";
 
 export interface ModelOption {
   /** Value stored when this model is picked — the id the proxy routes on. */
@@ -144,7 +145,7 @@ function ModelDialog({
         const shown = unfolded
           ? family.all
           : [family.latest, ...family.older.filter((o) => draft.includes(o.id))];
-        return { family, unfolded, shown, buried: family.all.length - shown.length };
+        return { family, unfolded, shown };
       }),
     [families, expanded, draft],
   );
@@ -234,41 +235,50 @@ function ModelDialog({
               )}
             </div>
           ) : (
-            view.map(({ family, unfolded, shown, buried }) => (
+            view.map(({ family, unfolded, shown }) => (
               <div key={family.key} className="opt-family">
                 {shown.map((o) => {
                   const on = draft.includes(o.id);
                   const blocked = !!o.unavailable && !on;
+                  // The newest version carries the family's expander, so the
+                  // older ones stay one line each.
+                  const head = o === family.latest;
                   return (
-                    <button
+                    // A div, not a button: the expander below is a real button
+                    // and a button cannot nest inside one. The row keeps a
+                    // button's behaviour — focusable, Enter/Space activates.
+                    <div
                       key={o.id}
-                      type="button"
-                      className={`opt ${on ? "on" : ""} ${blocked ? "off" : ""} ${o === family.latest ? "" : "sub"}`}
+                      role="button"
+                      tabIndex={blocked ? -1 : 0}
+                      className={`opt ${on ? "on" : ""} ${blocked ? "off" : ""} ${head ? "" : "sub"}`}
                       aria-disabled={blocked}
                       onClick={() => { if (!blocked) pick(o.id); }}
+                      onKeyDown={(e) => {
+                        if (blocked || (e.key !== "Enter" && e.key !== " ")) return;
+                        e.preventDefault(); // Space would scroll the list
+                        pick(o.id);
+                      }}
                     >
                       <span className={`opt-box ${multiple ? "" : "radio"} ${on ? "on" : ""}`}><IconCheck /></span>
                       <span className="opt-main">
-                        <span className="opt-name" title={o.id}>{o.label ?? o.id}</span>
+                        <span className="opt-title">
+                          <span className="opt-name" title={o.id}>{o.label ?? o.id}</span>
+                          {head && family.older.length > 0 && (
+                            <FoldToggle
+                              n={family.older.length}
+                              open={unfolded}
+                              onToggle={() => toggleFamily(family.key)}
+                            />
+                          )}
+                        </span>
                         <span className="opt-meta mono">{o.id}{o.meta && ` · ${o.meta}`}</span>
                       </span>
                       {o.unavailable && <span className="opt-tag muted">{o.unavailable}</span>}
                       {o.tag && <span className="opt-tag">{o.tag}</span>}
-                    </button>
+                    </div>
                   );
                 })}
-                {/* A sibling of the rows, not a child: each row is a button. */}
-                {(unfolded || buried > 0) && (
-                  <button
-                    type="button"
-                    className={`opt-more ${unfolded ? "on" : ""}`}
-                    aria-expanded={unfolded}
-                    onClick={() => toggleFamily(family.key)}
-                  >
-                    <IconChevronDown />
-                    {unfolded ? t("modelPicker.hideOlder") : t("modelPicker.showOlder", { n: buried })}
-                  </button>
-                )}
               </div>
             ))
           )}

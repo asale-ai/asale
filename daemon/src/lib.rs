@@ -18,6 +18,7 @@ pub mod commands;
 pub mod keychain;
 pub mod logging;
 pub mod oauth;
+pub mod proc_scan;
 pub mod proxy;
 pub mod publisher;
 pub mod rpc;

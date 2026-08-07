@@ -30,9 +30,10 @@ use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 
 /// The tools a buy switch can be turned on for.
-pub const TOOLS: &[&str] = &["claude", "codex", "gemini", "openclaw", "hermes"];
+pub const TOOLS: &[&str] = &["claude", "codex", "gemini", "openclaw", "hermes", "opencode"];
 
-/// Display name for a tool id.
+/// Display name for a tool id. Lowercase where the tool's own name is — asale
+/// is not the one who decides how somebody else's product is spelled.
 pub fn label(tool: &str) -> &'static str {
     match tool {
         "claude" => "Claude Code",
@@ -40,6 +41,7 @@ pub fn label(tool: &str) -> &'static str {
         "gemini" => "Gemini CLI",
         "openclaw" => "OpenClaw",
         "hermes" => "Hermes",
+        "opencode" => "opencode",
         _ => "unknown",
     }
 }
@@ -147,6 +149,27 @@ const OPENCLAW_MODELS_MODE: &str = "merge";
 /// proven to work rather than the one only documented.
 const OPENCLAW_API: &str = "openai-completions";
 
+// ── opencode keys ──────────────────────────────────────────────────────────
+//
+// Shapes verified against opencode 1.18.14 itself, not the docs: a provider
+// block written as below shows up in `opencode models`, and a real
+// `opencode run` against a recording stub sent
+// `POST {baseURL}/chat/completions` with `Authorization: Bearer {apiKey}` and
+// the bare model key in the body. (Worth knowing, because opencode's tracker
+// carries a report that `options` are dropped for custom providers — they are
+// not, at this version.)
+/// The `provider.<id>` entry asale owns, named so a restore finds exactly what
+/// we added.
+const OPENCODE_PROVIDER_ID: &str = "asale";
+/// The adapter opencode loads for an ordinary OpenAI-compatible endpoint. Its
+/// sibling `@ai-sdk/openai` is for `/v1/responses`, which the proxy does serve
+/// — but under Codex's own dialect, not this tool's prefix.
+const OPENCODE_NPM: &str = "@ai-sdk/openai-compatible";
+/// Written on a file we may have created, so the user gets completion in their
+/// editor. Tracked as ours: a file that is *only* this line is a husk we left,
+/// not a config anybody wrote — see `strip_opencode`.
+const OPENCODE_SCHEMA: &str = "https://opencode.ai/config.json";
+
 // ── Hermes keys ────────────────────────────────────────────────────────────
 //
 // Shapes read from the repo's own `cli-config.yaml.example`, not the docs —
@@ -177,8 +200,53 @@ pub fn tool_dir(tool: &str) -> PathBuf {
         "gemini" => home().join(".gemini"),
         "openclaw" => home().join(".openclaw"),
         "hermes" => hermes_home(),
+        "opencode" => opencode_config_dir(),
         _ => home().join(".asale-unknown"),
     }
+}
+
+/// opencode's config directory.
+///
+/// XDG on *every* platform, Windows included: `opencode debug paths` on Windows
+/// 11 answers `C:\Users\<u>\.config\opencode`, not `%APPDATA%\opencode` as the
+/// per-OS table in the docs has it. Believing the docs here would have written a
+/// config opencode never reads — the same bug [`hermes_home`] exists to
+/// remember, on the same day of the week.
+///
+/// `XDG_CONFIG_HOME` still wins when it is set, because opencode honours it and
+/// a machine that sets it means it.
+fn opencode_config_dir() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| home().join(".config"))
+        .join("opencode")
+}
+
+/// The file opencode will actually read.
+///
+/// It accepts two names, and `opencode.jsonc` **wins** when both are present —
+/// verified by giving each a different `username` and asking `opencode debug
+/// config` which one it got. opencode also writes an `opencode.jsonc` stub of
+/// its own the first time it starts, so on any machine that has ever run it,
+/// that is the live file.
+///
+/// Writing `opencode.json` beside it would therefore land a config opencode
+/// reads second and ignores: a buy switch that reports success and changes
+/// nothing. Hence: edit whichever file is already live, and when there is none,
+/// create the name opencode itself would — so asale is never the one who
+/// introduces a second file that shadows the other.
+fn opencode_config_file() -> PathBuf {
+    let d = opencode_config_dir();
+    let jsonc = d.join("opencode.jsonc");
+    if jsonc.is_file() {
+        return jsonc;
+    }
+    let json = d.join("opencode.json");
+    if json.is_file() {
+        return json;
+    }
+    jsonc
 }
 
 /// Hermes' own home — the one tool that does not keep its config in a
@@ -225,6 +293,7 @@ pub fn config_paths(tool: &str) -> Vec<PathBuf> {
         "gemini" => vec![d.join(".env"), d.join("settings.json")],
         "openclaw" => vec![d.join("openclaw.json")],
         "hermes" => vec![d.join("config.yaml")],
+        "opencode" => vec![opencode_config_file()],
         _ => vec![],
     }
 }
@@ -246,6 +315,7 @@ pub fn installed(tool: &str) -> bool {
         "gemini" => "gemini",
         "openclaw" => "openclaw",
         "hermes" => "hermes",
+        "opencode" => "opencode",
         _ => return false,
     })
 }
@@ -299,6 +369,20 @@ pub fn current_base_url(tool: &str) -> Option<String> {
                 .as_str()
                 .map(String::from)
         }
+        // Same rule again: the top-level `model` is what opencode starts on, so
+        // it decides which provider block is the live one. A leftover `asale`
+        // block the user has since stopped selecting is not "in effect".
+        "opencode" => {
+            let v = read_json(&primary_config_path(tool));
+            let model = v.get("model")?.as_str()?;
+            let active = model.split_once('/').map(|(p, _)| p).unwrap_or(model);
+            v.get("provider")?
+                .get(active)?
+                .get("options")?
+                .get("baseURL")?
+                .as_str()
+                .map(String::from)
+        }
         _ => None,
     }
 }
@@ -313,7 +397,7 @@ pub fn proxy_base_for(tool: &str) -> String {
     let base = proxy_base();
     match tool {
         "codex" => format!("{base}/v1"),
-        "openclaw" | "hermes" => format!("{base}/{tool}/v1"),
+        "openclaw" | "hermes" | "opencode" => format!("{base}/{tool}/v1"),
         _ => base,
     }
 }
@@ -479,6 +563,7 @@ pub fn apply(tool: &str, base_url: &str, token: &str, models: &[String]) -> Resu
         "gemini" => apply_gemini(base_url, token)?,
         "openclaw" => apply_openclaw(token, models)?,
         "hermes" => apply_hermes(token, models)?,
+        "opencode" => apply_opencode(token, models)?,
         _ => unreachable!("known() checked above"),
     }
     Ok(backup)
@@ -664,6 +749,116 @@ fn openclaw_model_entry(id: &str) -> Value {
         "input": ["text"],
         "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
     })
+}
+
+// ── opencode ───────────────────────────────────────────────────────────────
+
+/// Point opencode at the proxy by adding a provider block it can select.
+///
+/// Like OpenClaw and unlike Claude Code, opencode takes the model from its own
+/// config rather than from the caller's request — so the bought models are
+/// written into the provider's `models` map and are the only ones it can offer.
+/// A buy switch with an empty selection therefore leaves it with a provider and
+/// nothing to pick; the Buy page says so rather than letting that pass as
+/// working (the same warning Codex carries, for the same reason).
+///
+/// `base_url` is not a parameter: opencode is addressed under its own `/{tool}`
+/// prefix, which [`proxy_base_for`] owns.
+fn apply_opencode(token: &str, models: &[String]) -> Result<()> {
+    let path = primary_config_path("opencode");
+    // The live file may be a `.jsonc`, and this writer emits plain JSON. A
+    // document carrying comments would come back stripped of them, so refuse it
+    // instead: a switch that fails loudly is recoverable, one that silently
+    // eats the user's annotated config is not. (opencode's own generated stub
+    // is comment-free, which is the case that matters in practice.)
+    let mut root = match read_raw(&path) {
+        Some(raw) if !raw.trim().is_empty() => serde_json::from_str::<Value>(&raw)
+            .with_context(|| {
+                format!(
+                    "{} is not plain JSON — asale will not rewrite a config whose comments it would drop",
+                    path.display()
+                )
+            })?
+            .as_object()
+            .cloned()
+            .unwrap_or_default(),
+        _ => Map::new(),
+    };
+
+    let mut options = Map::new();
+    options.insert("baseURL".into(), Value::String(proxy_base_for("opencode")));
+    options.insert("apiKey".into(), Value::String(token.to_string()));
+
+    let mut entry = Map::new();
+    entry.insert("npm".into(), Value::String(OPENCODE_NPM.to_string()));
+    entry.insert("name".into(), Value::String("Asale".into()));
+    entry.insert("options".into(), Value::Object(options));
+    entry.insert(
+        "models".into(),
+        Value::Object(models.iter().map(|id| (id.clone(), opencode_model_entry(id))).collect()),
+    );
+
+    root.entry("$schema".to_string())
+        .or_insert_with(|| Value::String(OPENCODE_SCHEMA.to_string()));
+    obj_entry(&mut root, "provider").insert(OPENCODE_PROVIDER_ID.into(), Value::Object(entry));
+
+    // Start on the first bought model. With no selection there is nothing
+    // specific to point at, so opencode keeps whatever it was on.
+    if let Some(first) = models.first() {
+        root.insert("model".into(), Value::String(format!("{OPENCODE_PROVIDER_ID}/{first}")));
+    }
+    write_atomic(&path, &serde_json::to_string_pretty(&Value::Object(root))?)
+}
+
+/// One `models` entry. Only the display name: the limits opencode also accepts
+/// there are the vendor's, and asale does not have a per-model answer for them
+/// that is better than opencode's own default.
+fn opencode_model_entry(id: &str) -> Value {
+    serde_json::json!({ "name": id })
+}
+
+/// Drop the provider block asale added, and — if it still selects us — the
+/// model opencode starts on. Everything else the user configured stays.
+fn strip_opencode(raw: &str) -> Option<String> {
+    // A document this parser cannot read is one asale never wrote to (`apply`
+    // refuses those), so it is the user's — hand it back untouched rather than
+    // let `None` be read as "nothing of theirs left, delete it".
+    let Some(root) = serde_json::from_str::<Value>(raw).ok().and_then(|v| v.as_object().cloned())
+    else {
+        return Some(raw.to_string());
+    };
+    let mut root = root;
+
+    if let Some(Value::Object(providers)) = root.get_mut("provider") {
+        providers.remove(OPENCODE_PROVIDER_ID);
+        if providers.is_empty() {
+            root.remove("provider");
+        }
+    }
+    // Only when it still names our provider — a model the user picked
+    // themselves since is theirs to keep.
+    let ours = root
+        .get("model")
+        .and_then(Value::as_str)
+        .is_some_and(|m| m.split_once('/').map(|(p, _)| p) == Some(OPENCODE_PROVIDER_ID));
+    if ours {
+        root.remove("model");
+    }
+
+    // A document that is only the `$schema` we wrote is a husk, not a config —
+    // leaving it would make a file asale created itself survive the restore
+    // that is supposed to remove it.
+    //
+    // The one case this gets slightly wrong is `strip_all` (restore with no
+    // backup recorded) on a machine where opencode had written its own
+    // `$schema`-only stub: that stub is deleted too. Chosen deliberately — the
+    // stub is the exact file opencode writes for itself on its next start, so
+    // the cost is that it regenerates it, whereas the alternative leaves asale's
+    // own leftovers on every machine that never had opencode running.
+    if root.is_empty() || (root.len() == 1 && root.contains_key("$schema")) {
+        return None;
+    }
+    serde_json::to_string_pretty(&Value::Object(root)).ok()
 }
 
 /// The object at `parent[key]`, created (or replaced, if it is not an object)
@@ -1088,6 +1283,7 @@ fn strip_ours(tool: &str, path: &Path) -> Result<()> {
         ("codex", "auth.json") => strip_json_keys(&raw, &[CODEX_API_KEY]),
         ("openclaw", _) => strip_openclaw(&raw),
         ("hermes", _) => strip_hermes(&raw),
+        ("opencode", _) => strip_opencode(&raw),
         ("gemini", "settings.json") => strip_gemini_settings(&raw),
         ("gemini", _) => strip_dotenv(&raw, &[GEMINI_BASE_URL, GEMINI_API_KEY]),
         _ => Some(raw),
@@ -1235,7 +1431,16 @@ mod tests {
         // machine's actual Hermes config.
         let prev_hermes = std::env::var("HERMES_HOME").ok();
         std::env::set_var("HERMES_HOME", tmp.join(".hermes"));
+        // Same trap on opencode's side: it resolves its config directory from
+        // `XDG_CONFIG_HOME` when that is set, so a developer whose shell exports
+        // one would have these tests rewriting their real opencode config.
+        let prev_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        std::env::set_var("XDG_CONFIG_HOME", tmp.join(".config"));
         let out = f();
+        match prev_xdg {
+            Some(p) => std::env::set_var("XDG_CONFIG_HOME", p),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
         match prev {
             Some(p) => std::env::set_var("HOME", p),
             None => std::env::remove_var("HOME"),
@@ -1434,6 +1639,10 @@ mod tests {
         // tools, one dialect, told apart only by this prefix.
         assert_eq!(for_request_path("/hermes/v1/chat/completions"), Some("hermes"));
         assert_eq!(strip_tool_prefix("/hermes/v1/chat/completions"), "/v1/chat/completions");
+        // And opencode, which is the fourth on that dialect. `/chat/completions`
+        // under its prefix is exactly what a real `opencode run` sends.
+        assert_eq!(for_request_path("/opencode/v1/chat/completions"), Some("opencode"));
+        assert_eq!(strip_tool_prefix("/opencode/v1/chat/completions"), "/v1/chat/completions");
         // Unprefixed keeps the old dialect inference, so existing configs work.
         assert_eq!(for_request_path("/v1/messages"), Some("claude"));
         assert_eq!(for_request_path("/v1/chat/completions"), Some("codex"));
@@ -1499,6 +1708,138 @@ mod tests {
         let theirs = r#"{"models": {"providers": {"asale": {}}}, "agents": {"defaults": {"model": {"primary": "qwen/qwen3.5-plus"}}}}"#;
         let v: Value = serde_json::from_str(&strip_openclaw(theirs).unwrap()).unwrap();
         assert_eq!(v["agents"]["defaults"]["model"]["primary"], "qwen/qwen3.5-plus");
+    }
+
+    /// The shape asserted here is the shape opencode 1.18.14 was *observed*
+    /// accepting: written to `~/.config/opencode/opencode.json`, it shows up in
+    /// `opencode models` and a real run sends
+    /// `POST {baseURL}/chat/completions` with `Authorization: Bearer {apiKey}`.
+    #[test]
+    fn opencode_adds_a_provider_and_restore_is_verbatim() {
+        with_temp_home(|| {
+            let path = primary_config_path("opencode");
+            assert!(
+                path.ends_with("opencode/opencode.jsonc"),
+                "config goes where opencode reads it, not %APPDATA%: {}",
+                path.display()
+            );
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let original = r#"{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "anthropic/claude-sonnet-4",
+  "provider": {"ollama": {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": "http://127.0.0.1:11434/v1"}}},
+  "theme": "tokyonight"
+}"#;
+            std::fs::write(&path, original).unwrap();
+
+            let backup = apply(
+                "opencode",
+                "http://127.0.0.1:9787",
+                "sk-asale-ocode",
+                &models(&["claude-fable-5", "gpt-5.5"]),
+            )
+            .unwrap();
+
+            let v = read_json(&path);
+            let ours = &v["provider"][OPENCODE_PROVIDER_ID];
+            assert_eq!(ours["npm"], OPENCODE_NPM);
+            assert_eq!(ours["options"]["baseURL"], "http://127.0.0.1:9787/opencode/v1", "own prefix");
+            assert_eq!(ours["options"]["apiKey"], "sk-asale-ocode");
+            let mut ids: Vec<&str> = ours["models"].as_object().unwrap().keys().map(String::as_str).collect();
+            ids.sort_unstable();
+            assert_eq!(ids, ["claude-fable-5", "gpt-5.5"], "market ids travel as themselves");
+            assert_eq!(v["model"], "asale/claude-fable-5", "starts on the first bought model");
+            assert!(v["provider"]["ollama"].is_object(), "the user's own provider survives");
+            assert_eq!(v["theme"], "tokyonight", "unrelated settings survive");
+            assert_eq!(current_base_url("opencode").as_deref(), Some("http://127.0.0.1:9787/opencode/v1"));
+            assert!(points_at_proxy("opencode"));
+
+            restore("opencode", &backup).unwrap();
+            assert_eq!(read_raw(&path).unwrap(), original, "restore is byte-exact");
+        });
+    }
+
+    #[test]
+    fn opencode_strip_keeps_what_the_user_configured() {
+        let raw = r#"{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "asale/claude-fable-5",
+  "provider": {"asale": {"options": {"baseURL": "http://x/opencode/v1"}}, "ollama": {"options": {"baseURL": "http://y"}}},
+  "theme": "tokyonight"
+}"#;
+        let out = strip_opencode(raw).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert!(v["provider"].get("asale").is_none(), "our block goes");
+        assert!(v["provider"]["ollama"].is_object(), "theirs stays");
+        assert!(v.get("model").is_none(), "the selection of us goes with it");
+        assert_eq!(v["theme"], "tokyonight");
+
+        // A model the user picked since is theirs, not ours to remove.
+        let theirs = r#"{"model": "ollama/qwen3", "provider": {"asale": {}}}"#;
+        let v: Value = serde_json::from_str(&strip_opencode(theirs).unwrap()).unwrap();
+        assert_eq!(v["model"], "ollama/qwen3");
+
+        // A file that is only the schema line we wrote is a husk of ours.
+        assert!(
+            strip_opencode(r#"{"$schema": "https://opencode.ai/config.json", "provider": {"asale": {}}}"#).is_none(),
+            "nothing of the user's left → the file goes"
+        );
+    }
+
+    /// The bug this guards, found by asking the real binary rather than the
+    /// docs: opencode accepts both names, prefers `opencode.jsonc`, and writes
+    /// a `.jsonc` stub of its own on first run. Targeting `opencode.json` on
+    /// such a machine writes a file opencode reads second and ignores — a
+    /// switch that reports success and does nothing.
+    #[test]
+    fn opencode_edits_the_file_opencode_actually_reads() {
+        with_temp_home(|| {
+            let dir = tool_dir("opencode");
+            std::fs::create_dir_all(&dir).unwrap();
+
+            // Nothing yet → create the name opencode itself creates.
+            assert!(primary_config_path("opencode").ends_with("opencode.jsonc"));
+
+            // Only the plain name exists → edit that one, rather than create a
+            // second file that would take precedence over the user's.
+            std::fs::write(dir.join("opencode.json"), "{}").unwrap();
+            assert!(primary_config_path("opencode").ends_with("opencode.json"));
+
+            // Both exist → the one opencode actually reads wins.
+            std::fs::write(dir.join("opencode.jsonc"), "{}").unwrap();
+            assert!(primary_config_path("opencode").ends_with("opencode.jsonc"));
+        });
+    }
+
+    #[test]
+    fn opencode_refuses_a_config_it_would_strip_comments_from() {
+        with_temp_home(|| {
+            let path = primary_config_path("opencode");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let commented = "{\n  // my own notes\n  \"theme\": \"tokyonight\"\n}\n";
+            std::fs::write(&path, commented).unwrap();
+
+            let err = apply("opencode", "http://127.0.0.1:9787", "sk-1", &models(&["claude-fable-5"]))
+                .expect_err("a commented .jsonc must not be silently rewritten");
+            assert!(format!("{err:#}").contains("not plain JSON"), "{err:#}");
+            assert_eq!(read_raw(&path).unwrap(), commented, "and it is left exactly as it was");
+
+            // Nor may a later restore delete it as "nothing of the user's left".
+            strip_all("opencode").unwrap();
+            assert_eq!(read_raw(&path).unwrap(), commented, "still theirs after a strip");
+        });
+    }
+
+    #[test]
+    fn opencode_apply_creates_a_usable_file_and_restore_removes_it() {
+        with_temp_home(|| {
+            let path = primary_config_path("opencode");
+            let backup = apply("opencode", "http://127.0.0.1:9787", "sk-1", &models(&["claude-fable-5"])).unwrap();
+            assert!(!backup.had_existing());
+            assert!(read_json(&path)["provider"]["asale"].is_object());
+            restore("opencode", &backup).unwrap();
+            assert!(read_raw(&path).is_none(), "file removed since it never existed");
+        });
     }
 
     #[test]
@@ -1753,3 +2094,4 @@ auxiliary:
         assert!(strip_dotenv("GOOGLE_GEMINI_BASE_URL=http://x\n", &[GEMINI_BASE_URL]).is_none());
     }
 }
+

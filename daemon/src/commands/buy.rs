@@ -209,6 +209,32 @@ pub async fn buy_tools(state: &AppState) -> R<Value> {
     Ok(json!({ "tools": out, "proxy_base": proxy_base, "repaired": repaired }))
 }
 
+/// Which buy-side CLIs are running right now, per tool.
+///
+/// A buy switch takes effect at the tool's *next* start, so the page has to ask
+/// the user to restart it. This is what turns that request from advice into a
+/// checkable fact — "two Claude Code sessions are still on the old config, pids
+/// 29932 and 38652" — and it is deliberately all this does: see
+/// [`crate::proc_scan`] for why there is no button here that restarts anything.
+///
+/// `scanned: false` means this machine's process table could not be read, which
+/// the frontend must not draw as "nothing is running". Every known tool gets a
+/// key either way, so the caller never has to distinguish absent from empty.
+pub async fn tool_processes() -> R<Value> {
+    let found = tokio::task::spawn_blocking(crate::proc_scan::scan).await.map_err(err)?;
+    let mut running = serde_json::Map::new();
+    for tool in tool_config::TOOLS {
+        let list: Vec<&crate::proc_scan::Running> = found
+            .iter()
+            .flatten()
+            .filter(|(t, _)| t == tool)
+            .map(|(_, r)| r)
+            .collect();
+        running.insert(tool.to_string(), serde_json::to_value(list).map_err(err)?);
+    }
+    Ok(json!({ "scanned": found.is_some(), "running": running }))
+}
+
 /// Open one of the buy-side config files in whatever the OS opens it with.
 ///
 /// The Buy page lists the files the switch rewrites; reading one meant copying
@@ -570,5 +596,18 @@ mod tests {
         // A path *inside* a tool's directory is still not one of its files.
         let sneaky = tool_config::tool_dir("claude").join("../../.ssh/id_rsa");
         assert_eq!(buy_config(&sneaky.to_string_lossy()), None);
+    }
+
+    /// Every tool answers, whatever the machine looks like. The frontend reads
+    /// `running[tool]` straight off the object, so a tool missing here would
+    /// read as "nothing running" on a page whose whole point is the difference
+    /// between that and "we could not look".
+    #[tokio::test]
+    async fn the_process_scan_answers_for_every_tool() {
+        let v = tool_processes().await.expect("scan");
+        assert!(v["scanned"].is_boolean());
+        for tool in tool_config::TOOLS {
+            assert!(v["running"][tool].is_array(), "{tool} missing from the scan");
+        }
     }
 }

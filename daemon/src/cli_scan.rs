@@ -74,39 +74,77 @@ fn read_os_keychain(_service: &str, _account: Option<&str>) -> Option<String> {
     None
 }
 
+/// Where opencode keeps the logins it was signed into.
+///
+/// XDG data home on every platform, Windows included — `opencode debug paths`
+/// on Windows 11 answers `C:\Users\<u>\.local\share\opencode`. See
+/// `tool_config::opencode_config_dir` for the same story on the config side.
+fn opencode_auth_path() -> String {
+    let base = std::env::var("XDG_DATA_HOME")
+        .ok()
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| format!("{}/.local/share", home()));
+    format!("{base}/opencode/auth.json")
+}
+
+/// How to read one credential store. Carried with the source rather than
+/// derived from the provider: a provider can be reachable through more than one
+/// tool's store, and those stores do not share a file format — opencode holds a
+/// Claude login in a shape nothing else writes.
+type Parser = fn(&str) -> anyhow::Result<CliCred>;
+
 /// One provider's candidate sources, in import-priority order:
-/// (label, loader) pairs — keychain first, then the credential file.
-fn sources(provider: &str) -> Vec<(String, Option<String>)> {
+/// (label, loader, parser) — keychain first, then credential files.
+fn sources(provider: &str) -> Vec<(String, Option<String>, Parser)> {
     let h = home();
     match provider {
         "claude" => vec![
             (
                 "keychain:Claude Code-credentials".to_string(),
                 read_os_keychain("Claude Code-credentials", None),
+                cli_import::parse_claude_credentials as Parser,
             ),
-            (format!("{h}/.claude/.credentials.json"), std::fs::read_to_string(format!("{h}/.claude/.credentials.json")).ok()),
+            (
+                format!("{h}/.claude/.credentials.json"),
+                std::fs::read_to_string(format!("{h}/.claude/.credentials.json")).ok(),
+                cli_import::parse_claude_credentials as Parser,
+            ),
+            // A Claude subscription signed into through opencode instead. It is
+            // the same login, so when both stores hold it the two sources merge
+            // by fingerprint into one account; when only this one does, the
+            // subscription is still sellable rather than invisible.
+            {
+                let p = opencode_auth_path();
+                let raw = std::fs::read_to_string(&p).ok();
+                (p, raw, cli_import::parse_opencode_auth as Parser)
+            },
         ],
         "codex" => vec![
-            ("keychain:Codex Auth".to_string(), read_os_keychain("Codex Auth", None)),
-            (format!("{h}/.codex/auth.json"), std::fs::read_to_string(format!("{h}/.codex/auth.json")).ok()),
+            (
+                "keychain:Codex Auth".to_string(),
+                read_os_keychain("Codex Auth", None),
+                cli_import::parse_codex_auth as Parser,
+            ),
+            (
+                format!("{h}/.codex/auth.json"),
+                std::fs::read_to_string(format!("{h}/.codex/auth.json")).ok(),
+                cli_import::parse_codex_auth as Parser,
+            ),
         ],
         "gemini" => vec![
             (
                 "keychain:gemini-cli-oauth".to_string(),
                 read_os_keychain("gemini-cli-oauth", Some("main-account")),
+                cli_import::parse_gemini_oauth_creds as Parser,
             ),
-            (format!("{h}/.gemini/oauth_creds.json"), std::fs::read_to_string(format!("{h}/.gemini/oauth_creds.json")).ok()),
+            (
+                format!("{h}/.gemini/oauth_creds.json"),
+                std::fs::read_to_string(format!("{h}/.gemini/oauth_creds.json")).ok(),
+                cli_import::parse_gemini_oauth_creds as Parser,
+            ),
         ],
         _ => vec![],
-    }
-}
-
-fn parse(provider: &str, content: &str) -> anyhow::Result<CliCred> {
-    match provider {
-        "claude" => cli_import::parse_claude_credentials(content),
-        "codex" => cli_import::parse_codex_auth(content),
-        "gemini" => cli_import::parse_gemini_oauth_creds(content),
-        other => anyhow::bail!("unsupported CLI provider: {other}"),
     }
 }
 
@@ -141,11 +179,14 @@ pub fn scan() -> Vec<DiscoveredCred> {
 /// no longer silently dropped in favour of the first store scanned.
 pub fn load_all(provider: &str) -> Vec<SourcedCred> {
     let mut out = Vec::new();
-    for (source, content) in sources(provider) {
+    for (source, content, parse) in sources(provider) {
         let Some(content) = content else { continue };
-        match parse(provider, &content) {
+        match parse(&content) {
             Ok(cred) => out.push(SourcedCred { cred, source }),
-            Err(e) => tracing::warn!(provider, source, "cli credential parse failed: {e}"),
+            // A store that holds no login for *this* provider is the ordinary
+            // case now that one file can hold several — opencode's `auth.json`
+            // exists the moment you sign into anything with it. Debug, not warn.
+            Err(e) => tracing::debug!(provider, source, "cli credential not usable: {e}"),
         }
     }
     out

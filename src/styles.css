@@ -901,12 +901,17 @@ select.input {
 .dr-rows { display: flex; flex-direction: column; gap: 5px; }
 .dr-row {
   display: grid;
-  grid-template-columns: minmax(88px, 160px) minmax(60px, 1fr) 46px minmax(64px, auto) auto;
+  grid-template-columns: minmax(96px, 184px) minmax(60px, 1fr) 46px minmax(64px, auto) auto;
   align-items: center; gap: var(--s2);
   font-size: var(--fs-micro);
 }
-.dr-model { color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Name and, on a family's newest version, the fold holding its older ones. */
+.dr-model { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--fg-2); }
+.dr-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dr-row.selling .dr-model { color: var(--fg); }
+/* A superseded version, revealed by unfolding its family: stepped in under the
+   newest one so the chart still scans as one bar per model. */
+.dr-row.sub .dr-model { padding-left: var(--s3); color: var(--fg-3); }
 .dr-track { position: relative; height: 8px; border-radius: 999px; background: var(--bg-2); overflow: hidden; }
 /* The window the operator said they would sell in. The tint alone is too quiet
    to be a threshold, so the edge that matters — where selling stops — is drawn
@@ -1315,6 +1320,14 @@ code { background: var(--bg-2); padding: 1px 5px; border-radius: 5px; font-size:
 /* The one-click fix for what a callout reports — far edge like the dismiss
    button, but centred on the block: it is an action, not a corner control. */
 .callout-act { margin-left: auto; flex-shrink: 0; align-self: center; }
+/* A callout that carries evidence under its sentence — what was found, and the
+   control that looks again. One column beside the icon, so the finding reads as
+   part of the same statement rather than as a second callout. */
+.callout-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.callout-found { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--fs-micro); }
+/* The callout's own tint is already a background; a pill needs the card's
+   surface under it to stay legible on top of one. */
+.callout-found .pill { background: var(--surface); font-size: var(--fs-micro); }
 .callout .callout-x svg { width: 11px; height: 11px; margin-top: 0; color: currentColor; }
 /* A callout (or control) closing a card, below whatever it qualifies — and its
    mirror, opening one above whatever it introduces. */
@@ -1655,6 +1668,37 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .pay-done-split { font-size: var(--fs-meta); color: var(--fg-3); margin: -2px 0 0; font-variant-numeric: tabular-nums; }
 .pay-done-desc { font-size: var(--fs-sub); color: var(--fg-3); max-width: 300px; line-height: 1.6; margin: 0; }
 
+/* ── Card top-up ────────────────────────────────────────────────────────────
+   The rail with no address and no QR: an amount, a receipt for what it will
+   cost, and one button. The receipt is the part that earns its place — the
+   wallet gains the round figure on the chip and the card is billed more than
+   that, so the difference is itemised above the button rather than discovered
+   on a statement afterwards. */
+.card-pay { display: flex; flex-direction: column; gap: var(--s4); }
+.card-quote {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: var(--s3) var(--s4); border-radius: var(--r2); background: var(--bg-2);
+  font-size: var(--fs-sub);
+}
+.cq-row { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s3); color: var(--fg-2); }
+/* The line the card is actually charged: the one figure on this panel that has
+   to survive being skimmed. */
+.cq-row.total {
+  margin-top: 2px; padding-top: 8px; border-top: 1px solid var(--line);
+  color: var(--fg); font-weight: 600;
+}
+.cq-note { margin: 4px 0 0; font-size: var(--fs-micro); color: var(--fg-3); line-height: 1.6; }
+.card-pay-btn { width: 100%; justify-content: center; }
+.card-waiting {
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2);
+  font-size: var(--fs-meta); color: var(--fg-2);
+}
+.card-waiting a { color: var(--accent); }
+.card-waiting .dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex-shrink: 0;
+  animation: pulse 1.6s var(--ease) infinite;
+}
+
 /* ── Amount picker ──────────────────────────────────────────────────────────
    The common top-ups as chips, with a free field in the last cell. One row: the
    choice is small enough not to earn a second line, and the height it saves is
@@ -1825,7 +1869,10 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .opt-box.on { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 .opt-box svg { width: 11px; height: 11px; }
 .opt-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.opt-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+/* Name plus the family's fold, on one line: the fold belongs to the model it
+   names, and giving it a line of its own made a family of three read as four. */
+.opt-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.opt-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 .opt-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-micro); color: var(--fg-3); }
 .opt-tag {
   flex-shrink: 0; white-space: nowrap; font-size: var(--fs-micro); font-weight: 500;
@@ -1836,17 +1883,22 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .opt-empty svg { width: 22px; height: 22px; color: var(--fg-3); margin-bottom: var(--s2); }
 .opt-empty .btn { margin-top: var(--s3); }
 
-/* Expander for a family's older versions — deliberately quieter than a row, so
-   the list still scans as one line per model. */
-.opt-more {
-  display: flex; align-items: center; gap: 6px;
-  margin-left: calc(var(--s3) + 16px + var(--s3)); padding: 3px var(--s2);
-  border: none; border-radius: var(--r1); background: transparent;
-  color: var(--fg-3); cursor: pointer; font-size: var(--fs-micro);
+/* Expander for a model family's older versions — a count and a chevron, sitting
+   inline after the name it belongs to. Quiet by default: it is a property of
+   the row ("six more versions of this"), not an action the list is offering.
+   Shared by the model picker and the sell page's price list. */
+.fold-toggle {
+  flex: none; display: inline-flex; align-items: center; gap: 2px;
+  height: 16px; padding: 0 5px 0 6px;
+  border: none; border-radius: 999px;
+  background: var(--surface-2); color: var(--fg-3);
+  font-size: var(--fs-micro); font-weight: 500; font-variant-numeric: tabular-nums;
+  line-height: 1; cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
 }
-.opt-more:hover { background: var(--surface-2); color: var(--fg-2); }
-.opt-more svg { width: 12px; height: 12px; transition: transform var(--t-fast) var(--ease); }
-.opt-more.on svg { transform: rotate(180deg); }
+.fold-toggle:hover { background: var(--accent-soft); color: var(--accent); }
+.fold-toggle svg { width: 10px; height: 10px; transition: transform var(--t-fast) var(--ease); }
+.fold-toggle.on svg { transform: rotate(180deg); }
 
 /* Single-select trigger — looks like a field, opens the model dialog. */
 .model-select {

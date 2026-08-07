@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { groupModelsByFamily } from "@shared/model-groups";
 import {
   invoke, inTauri, realTauri, runOAuthFlow, submitOAuthCode, fmtTokens,
   isSignedOut, gotoSignIn, requireSignIn, DaemonError,
   type AccountStatus, type ClientStatus, type ImportAllResult, type Lane,
 } from "../lib";
-import { Card, Ok, Err, SkeletonRows, PageHead, IconAction, Empty, Mark, CopyChip } from "../ui";
+import { Card, Ok, Err, SkeletonRows, PageHead, IconAction, Empty, Mark, CopyChip, FoldToggle } from "../ui";
 import { IconTrash, IconShield, IconChip, IconRefresh, IconPlus, IconPencil, IconInfo } from "../icons";
 import { errText } from "../errors";
 
@@ -108,21 +109,32 @@ const shortSource = (s: string) =>
     : s.split("/").filter(Boolean).slice(-2).join("/");
 
 /** The legal range for a price ratio: the server clamps the market ratio to
- *  [0.10, 1.00], so a floor of 10 percent *of* list price is below every price a
- *  model can have and therefore means "sell at whatever the market pays".
+ *  [0.05, 1.00], so 5 percent *of* list price is the deepest the market can
+ *  ever price a model at and therefore the lowest floor worth accepting here.
  *
  *  A seller's decision is only ever "not below X" — there is no such thing as a
  *  price too good to accept — so the setting is that one number and nothing
- *  else. */
-const RATIO_MIN = 10;
+ *  else. There is no "any price" any more: every account sells against a floor,
+ *  and an account that has not chosen one sells against `RATIO_DEFAULT` rather
+ *  than against the market's own bottom.
+ *
+ *  `RATIO_MIN` is the platform's floor and `RATIO_DEFAULT` is the one a seller
+ *  starts on — they are deliberately different numbers, so that the default is
+ *  a price somebody would plausibly have picked rather than the cheapest the
+ *  market is allowed to go. */
+const RATIO_MIN = 5;
 const RATIO_MAX = 100;
-const noFloor = (lo: number) => lo <= RATIO_MIN;
+const RATIO_DEFAULT = 10;
 const clampRatio = (n: number) => Math.min(RATIO_MAX, Math.max(RATIO_MIN, n));
-/** The floor in force for an account, with "unset" reading as "any price". */
-const floorOf = (a: { sell_min_ratio?: number | null }) => clampRatio(a.sell_min_ratio ?? RATIO_MIN);
+/** The floor in force for an account. Unset — null, or the 0 a row written
+ *  before this setting existed carries — reads as the default rather than as
+ *  the platform floor: nobody chose 0, and answering it with 5% would quietly
+ *  halve what an upgraded seller asks. */
+const floorOf = (a: { sell_min_ratio?: number | null }) =>
+  a.sell_min_ratio && a.sell_min_ratio > 0 ? clampRatio(a.sell_min_ratio) : RATIO_DEFAULT;
 
 /** Floors worth one click. */
-const BAND_PRESETS = [RATIO_MIN, 50, 60, 70, 80];
+const BAND_PRESETS = [RATIO_MIN, RATIO_DEFAULT, 50, 60, 80];
 
 /** How many requests one subscription serves at once. The market is told this
  *  number and stops offering the lane work past it, so it is a ceiling the
@@ -157,9 +169,9 @@ const laneTone = (l: Lane): LaneTone =>
     : l.status === "off" ? "off"
     : "blocked";
 
-/** How many models a chart shows before it needs asking. Enough that the whole
- *  price question is answerable at a glance for every provider we sell, without
- *  a hundred-row catalog burying the account below it. */
+/** How many model families a chart shows before it needs asking. Enough that
+ *  the whole price question is answerable at a glance for every provider we
+ *  sell, without a hundred-row catalog burying the account below it. */
 const RANK_VISIBLE = 8;
 
 /** One subscription's models, ranked by what the market currently pays for
@@ -186,18 +198,50 @@ function DiscountRank({
 }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
-  const open = noFloor(floor);
+  /** Families whose older versions the operator asked to see, by family key. */
+  const [openFamilies, setOpenFamilies] = useState<string[]>([]);
 
   // Cheapest first: the models the market has pushed furthest down are the ones
   // a floor is about, so they are the ones worth reading first. A lane with no
   // known price sorts last — it has nothing to rank on.
-  const rows = [...lanes].sort((a, b) => {
-    const ra = a.ratio ?? 1e9;
-    const rb = b.ratio ?? 1e9;
-    return ra - rb || a.model.localeCompare(b.model);
-  });
-  const shown = expanded ? rows : rows.slice(0, RANK_VISIBLE);
-  const hidden = rows.length - shown.length;
+  const rows = useMemo(
+    () => [...lanes].sort((a, b) => {
+      const ra = a.ratio ?? 1e9;
+      const rb = b.ratio ?? 1e9;
+      return ra - rb || a.model.localeCompare(b.model);
+    }),
+    [lanes],
+  );
+
+  // One line per model family, same as the buy-side picker: an account that
+  // sells seven `claude-opus-*` is answering one question about Opus, and
+  // seven near-identical bars is the shape that hides it. Grouping runs on the
+  // sorted rows, so a family lands where its newest version's price put it.
+  //
+  // The provider qualifies the key for the same reason it does in the picker —
+  // two upstreams' same-named models are not versions of each other.
+  const families = useMemo(
+    () => groupModelsByFamily(rows, (l) => `${l.provider}/${l.model}`),
+    [rows],
+  );
+
+  const view = useMemo(
+    () => families.map((f) => {
+      const open = openFamilies.includes(f.key);
+      // An older version that needs the operator stays on screen whatever the
+      // fold says: its resume button is the only way to clear it, and a chart
+      // that folds away the one row carrying an action is worse than a long one.
+      const shown = open ? f.all : [f.latest, ...f.older.filter((l) => l.requires_user)];
+      return { key: f.key, latest: f.latest, older: f.older.length, open, shown };
+    }),
+    [families, openFamilies],
+  );
+
+  const visible = expanded ? view : view.slice(0, RANK_VISIBLE);
+  const hidden = view.length - visible.length;
+  // Counted over every lane, not over what the fold left on screen: these are
+  // the account's totals, and a number that changed when a family was collapsed
+  // would be answering a different question from the one it is labelled with.
   const sellingCount = rows.filter((l) => l.status === "selling").length;
   const priceCount = rows.filter((l) => l.status === "withheld").length;
   const priced = rows.filter((l) => l.ratio != null).length;
@@ -223,31 +267,42 @@ function DiscountRank({
       {priced === 0 && <div className="dr-nodata">{t("publish.rank.noPrices")}</div>}
 
       <div className="dr-rows">
-        {shown.map((l) => {
+        {visible.flatMap((fam) => fam.shown.map((l) => {
           const lk = `${l.provider}:${l.account_id}:${l.model}`;
           const tone = laneTone(l);
           const r = l.ratio;
           const back = countdown(Math.max(l.resume_at, l.cooldown_until ?? 0), now);
           const state = stateText(l);
+          // The newest version leads its family and carries the fold; the rest
+          // are its history, set back a step.
+          const head = l === fam.latest;
           return (
             <div
               key={lk}
-              className={`dr-row ${tone}${l.requires_user ? " attention" : ""}`}
+              className={`dr-row ${tone}${l.requires_user ? " attention" : ""}${head ? "" : " sub"}`}
               title={`${l.model} · ${state}${l.last_error ? `\n${l.last_error}` : ""}`}
             >
-              <span className="dr-model mono">{l.model}</span>
+              <span className="dr-model mono">
+                <span className="dr-name">{l.model}</span>
+                {head && fam.older > 0 && (
+                  <FoldToggle
+                    n={fam.older}
+                    open={fam.open}
+                    onToggle={() =>
+                      setOpenFamilies((o) =>
+                        o.includes(fam.key) ? o.filter((x) => x !== fam.key) : [...o, fam.key])}
+                  />
+                )}
+              </span>
               <div className="dr-track">
                 {/* The zone the operator said they would sell in: everything at
                     or above the floor, with no upper edge to draw — there is no
-                    such thing as a price too good to accept. Left out when no
-                    floor is set: a tint over the whole track would read as a
-                    threshold where there is none. */}
-                {!open && (
-                  <span
-                    className="dr-band to-top"
-                    style={{ left: `${floor}%`, width: `${RATIO_MAX - floor}%` }}
-                  />
-                )}
+                    such thing as a price too good to accept. Always drawn:
+                    every account has a floor now. */}
+                <span
+                  className="dr-band to-top"
+                  style={{ left: `${floor}%`, width: `${RATIO_MAX - floor}%` }}
+                />
                 {r != null && (
                   <span className="dr-fill" style={{ width: `${clampRatio(r)}%` }} />
                 )}
@@ -269,7 +324,7 @@ function DiscountRank({
               )}
             </div>
           );
-        })}
+        }))}
       </div>
 
       {/* A cap that hides rows has to say so — a chart that quietly stops at
@@ -279,7 +334,7 @@ function DiscountRank({
           {t("publish.rank.showAll", { n: hidden })}
         </button>
       )}
-      {expanded && rows.length > RANK_VISIBLE && (
+      {expanded && view.length > RANK_VISIBLE && (
         <button className="lane-resume dr-more" onClick={() => setExpanded(false)}>
           {t("publish.rank.showLess")}
         </button>
@@ -296,7 +351,7 @@ function DiscountRank({
           <i className="dr-swatch blocked" /> {t("publish.rank.otherwiseOff")}
         </span>
         <span className="dr-scale">
-          {open ? t("publish.rank.noBand") : t("publish.rank.bandFloor", { lo: floor })}
+          {t("publish.rank.bandFloor", { lo: floor })}
           {priceCount > 0 && ` · ${t("publish.rank.heldCount", { n: priceCount })}`}
         </span>
       </div>
@@ -528,16 +583,15 @@ export function Publish() {
   }
 
   /** Save one account's price floor. An empty or unreadable number falls back to
-   *  the bottom of the range, so a half-typed form means "any price" rather than
-   *  a floor nobody chose — the failure that costs nothing, not the one that
-   *  quietly takes the subscription off the market.
+   *  the default rather than to the platform floor: a half-typed form must not
+   *  quietly offer the subscription at the cheapest price the market allows.
    *
    *  The ceiling always goes up with it: the daemon still holds a band, and
    *  anything less than list price there would withhold models on a rule this
    *  page no longer offers a way to see or unset. */
   async function saveBand(a: AccountStatus) {
     const raw = parseInt(bandDraft[keyOf(a)] ?? "", 10);
-    const minRatio = Number.isFinite(raw) ? clampRatio(raw) : RATIO_MIN;
+    const minRatio = Number.isFinite(raw) ? clampRatio(raw) : RATIO_DEFAULT;
     setBandEditing("");
     setBandDraft((d) => ({ ...d, [keyOf(a)]: String(minRatio) }));
     await setSell(a, a.sell_enabled, { minRatio, maxRatio: RATIO_MAX });
@@ -697,8 +751,8 @@ export function Publish() {
           // Empty means "find out" — the daemon probes each protocol in turn.
           wire: epWire,
           label: epName.trim(),
-          // Empty floor means "any price"; the daemon clamps it either way.
-          minRatio: epFloor.trim() ? clampRatio(parseInt(epFloor, 10) || RATIO_MIN) : RATIO_MIN,
+          // Empty floor means the default; the daemon clamps it either way.
+          minRatio: epFloor.trim() ? clampRatio(parseInt(epFloor, 10) || RATIO_DEFAULT) : RATIO_DEFAULT,
           concurrency: clampSlots(parseInt(epSlots, 10) || SLOTS_DEFAULT),
         },
       );
@@ -992,7 +1046,7 @@ export function Publish() {
                   min={RATIO_MIN}
                   max={RATIO_MAX}
                   value={epFloor}
-                  placeholder={String(RATIO_MIN)}
+                  placeholder={String(RATIO_DEFAULT)}
                   onChange={(e) => setEpFloor(e.target.value)}
                 />
                 <span className="unit">%</span>
@@ -1281,7 +1335,7 @@ export function Publish() {
                                 if (e.key === "Enter") saveBand(a);
                                 if (e.key === "Escape") setBandEditing("");
                               }}
-                              placeholder={String(RATIO_MIN)}
+                              placeholder={String(RATIO_DEFAULT)}
                             />
                             <span className="unit">%</span>
                           </div>
@@ -1293,7 +1347,7 @@ export function Publish() {
                                 className={`chip${Number(bandDraft[k]) === preset ? " on" : ""}`}
                                 onClick={() => setBandDraft((d) => ({ ...d, [k]: String(preset) }))}
                               >
-                                {noFloor(preset) ? t("publish.bandNone") : `≥ ${preset}%`}
+                                {`≥ ${preset}%`}
                               </button>
                             ))}
                           </div>
@@ -1309,11 +1363,9 @@ export function Publish() {
                       ) : (
                         <div className="value-row">
                           <span className="value-strong mono tabular">
-                            {noFloor(floor) ? t("publish.bandNone") : `≥ ${floor}%`}
+                            {`≥ ${floor}%`}
                           </span>
-                          {!noFloor(floor) && (
-                            <span className="unit">{t("publish.unitOfList")}</span>
-                          )}
+                          <span className="unit">{t("publish.unitOfList")}</span>
                           <button
                             className="icon-btn sm"
                             onClick={() => editBand(a)}
@@ -1329,9 +1381,7 @@ export function Publish() {
                       {/* Say what the setting *does*, in the same words the
                           chart below uses, rather than restating its units. */}
                       <div className="hint">
-                        {noFloor(floor)
-                          ? t("publish.bandHintOff")
-                          : t("publish.bandHintFloor", { lo: floor })}
+                        {t("publish.bandHintFloor", { lo: floor })}
                       </div>
 
                       {/* How much of this subscription is on offer at any one

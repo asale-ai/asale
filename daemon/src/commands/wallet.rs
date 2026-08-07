@@ -140,6 +140,41 @@ pub async fn wallet_deposit_session(state: &AppState, chain: String, amount: Opt
     .await
 }
 
+/// Open a card top-up: a Dodo checkout for `amount`, plus a session to poll.
+///
+/// The reply carries `checkout_url` — the hosted page the user pays on — and
+/// the `fee`/`charge` breakdown, which is the server's own arithmetic rather
+/// than a client-side copy of it: the figure shown before the card is presented
+/// has to be the figure that was actually asked for.
+///
+/// Nothing is credited here. The wallet moves when the processor's webhook
+/// reaches the server, which is why the same `wallet_deposit_session_get` poll
+/// is what tells the sheet it landed.
+/// `open_local` asks the daemon to open the checkout in this machine's browser,
+/// the way the OAuth flows do. The Tauri webview cannot host a third party's
+/// payment page — its CSP forbids the frame, and a card form inside somebody
+/// else's shell is the shape a phishing page has — so the desktop build pays in
+/// a real browser and watches the session from here.
+pub async fn wallet_card_session(state: &AppState, amount: Option<i64>, open_local: bool) -> R<Value> {
+    let out = authed(
+        state,
+        reqwest::Method::POST,
+        "/api/v1/wallet/card-session",
+        Some(json!({ "amount": amount })),
+    )
+    .await?;
+    if open_local {
+        if let Some(url) = out.get("checkout_url").and_then(|u| u.as_str()) {
+            // Best effort: the URL is in the reply either way, and the sheet
+            // shows it as a link when this does nothing (a headless box).
+            if let Err(e) = open::that_detached(url) {
+                tracing::warn!("could not open the checkout page: {e}");
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Poll one session. Each read advances it against what is on chain, so this
 /// call is the whole detection mechanism — there is no background job.
 pub async fn wallet_deposit_session_get(state: &AppState, session_ref: String) -> R<Value> {

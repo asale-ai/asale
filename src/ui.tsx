@@ -1,7 +1,7 @@
 // Small reusable UI primitives shared across pages.
 import { useState, type ReactNode, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
-import { IconCopy, IconCheck, IconAlert } from "./icons";
+import { IconCopy, IconCheck, IconAlert, IconChevronDown } from "./icons";
 import { brandGlyph } from "./brand-marks";
 
 /* Copy-to-clipboard hook: returns [copied, copy]. */
@@ -264,6 +264,41 @@ export function Section({
       {desc && <p className="section-desc">{desc}</p>}
       {children}
     </div>
+  );
+}
+
+/**
+ * The control that folds a model family's older versions away, and the only
+ * thing that marks a row as having any.
+ *
+ * It sits inline after the model's name rather than on a line of its own: every
+ * list that groups by family is a list of models, and a whole row spent on "3
+ * older versions" reads as a fourth model in a list of three. All it needs to
+ * carry is how many are behind it and which way the fold currently is, so it
+ * shows a count and a chevron and puts the words in the tooltip.
+ *
+ * Used by the model picker and by the sell page's per-model price list, so the
+ * same fold looks and behaves the same on both sides of the market.
+ */
+export function FoldToggle({
+  n, open, onToggle,
+}: { n: number; open: boolean; onToggle: () => void }) {
+  const { t } = useTranslation();
+  const label = open ? t("modelPicker.hideOlder") : t("modelPicker.showOlder", { n });
+  return (
+    <button
+      type="button"
+      className={`fold-toggle${open ? " on" : ""}`}
+      aria-expanded={open}
+      aria-label={label}
+      title={label}
+      // Every list that uses this has a clickable row under it; the fold is a
+      // control on that row, not a way of activating it.
+      onClick={(e) => { e.stopPropagation(); onToggle(); }}
+    >
+      {n}
+      <IconChevronDown />
+    </button>
   );
 }
 

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   invoke, inTauri, pricePerMillion, fmtContext, isSignedOut, gotoSignIn, requireSignIn,
-  DaemonError, type BuyTool, type BuyTools, type MarketModel,
+  DaemonError, type BuyTool, type BuyTools, type MarketModel, type ToolProcesses,
 } from "../lib";
 import { Card, Ok, Err, SkeletonRows, PageHead, IconAction, Mark } from "../ui";
 import { ModelMultiSelect, type ModelOption } from "../components/ModelPicker";
@@ -64,6 +64,11 @@ export function Consume() {
    *  once at startup, so neither the switch nor a model edit reaches a session
    *  that is already up — the row keeps saying so until the user dismisses it. */
   const [restart, setRestart] = useState<Record<string, boolean>>({});
+  /** The sessions that reminder is actually about, or null before anything has
+   *  been changed — the scan costs a process-table read, so it is only worth
+   *  doing once there is a restart to ask for. */
+  const [procs, setProcs] = useState<ToolProcesses | null>(null);
+  const [scanning, setScanning] = useState(false);
   /** Config files with an open in flight, keyed by path. */
   const [opening, setOpening] = useState<Record<string, boolean>>({});
   const [msg, setMsg] = useState("");
@@ -89,6 +94,22 @@ export function Consume() {
     setRefreshing(true);
     loadTools().finally(() => setRefreshing(false));
   }, [loadTools]);
+
+  /** Look for CLI sessions still running on the config we just replaced.
+   *
+   *  Best-effort by design: a machine whose process table the daemon cannot
+   *  read answers `scanned: false`, and the reminder stays the plain sentence it
+   *  has always been rather than claiming nothing is running. A failed call is
+   *  the same case and is deliberately not shown as an error — nothing the user
+   *  asked for has failed. */
+  const scanProcs = useCallback(() => {
+    if (!inTauri) return;
+    setScanning(true);
+    invoke<ToolProcesses>("tool_processes")
+      .then(setProcs)
+      .catch(() => setProcs({ scanned: false, running: {} }))
+      .finally(() => setScanning(false));
+  }, []);
 
   useEffect(() => {
     if (!inTauri) { setLoading(false); return; }
@@ -128,6 +149,9 @@ export function Consume() {
         setMsg(t("consume.modelsDone", { tool: tool.label }));
       }
       setRestart((r) => ({ ...r, [tool.id]: true }));
+      // Which sessions are on the config that just changed — asked for now
+      // rather than on page load, because this is the first moment it matters.
+      scanProcs();
       await loadTools();
     } catch (e) {
       setErr(errText(e));
@@ -249,11 +273,47 @@ export function Consume() {
 
                   {/* The change is on disk; the tool won't see it until it is
                       started again. Dismissible — it is a reminder, not a state
-                      we can observe. */}
+                      we can observe.
+
+                      Under the sentence, the sessions the reminder is about:
+                      the daemon can find the processes still holding the old
+                      config, which turns "restart it" from advice into a list
+                      you can check off. It only ever looks — a process attached
+                      to somebody's terminal cannot be restarted from here, and
+                      killing one would throw away whatever it was doing (see
+                      `proc_scan`). */}
                   {restart[tool.id] && (
                     <div className="callout info compact">
                       <IconRefresh />
-                      <span>{t("consume.restartNeeded", { tool: tool.label })}</span>
+                      <div className="callout-body">
+                        <span>{t("consume.restartNeeded", { tool: tool.label })}</span>
+                        {procs?.scanned && (
+                          <div className="callout-found">
+                            {(procs.running[tool.id] ?? []).length === 0 ? (
+                              <span className="muted">{t("consume.restartNoneRunning", { tool: tool.label })}</span>
+                            ) : (
+                              <>
+                                <span className="muted">
+                                  {t("consume.restartRunning", { n: procs.running[tool.id].length })}
+                                </span>
+                                {procs.running[tool.id].map((p) => (
+                                  <span key={p.pid} className="pill mono plain" title={p.cmd}>
+                                    PID {p.pid}
+                                  </span>
+                                ))}
+                              </>
+                            )}
+                            <button
+                              type="button"
+                              className="btn sm subtle"
+                              onClick={scanProcs}
+                              disabled={!inTauri || scanning}
+                            >
+                              {t("consume.restartRescan")}
+                            </button>
+                          </div>
+                        )}
+                      </div>
                       <button
                         type="button"
                         className="callout-x"
@@ -290,6 +350,14 @@ export function Consume() {
                       {tool.id === "codex" && tool.models.length === 0 && (
                         <div className="callout warn compact card-foot">
                           <IconAlert /><span>{t("consume.codexNeedsModel")}</span>
+                        </div>
+                      )}
+                      {/* Same shape, different reason: opencode offers exactly
+                          the models its config names, so an empty selection
+                          leaves the provider installed with nothing to pick. */}
+                      {tool.id === "opencode" && tool.models.length === 0 && (
+                        <div className="callout warn compact card-foot">
+                          <IconAlert /><span>{t("consume.opencodeNeedsModel")}</span>
                         </div>
                       )}
                     </div>

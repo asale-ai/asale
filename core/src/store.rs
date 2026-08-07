@@ -67,7 +67,7 @@ pub struct ToolRow {
     /// This is the ratio, not the discount off it, because that is the number
     /// the seller is actually deciding about ("I will not sell below 60% of
     /// list") and because it shares its range with the server's own
-    /// `mkt_ratio`, which is clamped to `[0.10, 1.00]`.
+    /// `mkt_ratio`, which is clamped to `[0.05, 1.00]`.
     pub sell_min_ratio: i64,
     pub sell_max_ratio: i64,
     /// How many requests this account will serve at once.
@@ -81,11 +81,19 @@ pub struct ToolRow {
 }
 
 /// The band's legal range, and the widest one there is: the server clamps
-/// `mkt_ratio` to `[0.10, 1.00]`, so `10..=100` covers every price a model can
-/// ever have and therefore can never withhold anything. It is also the default,
-/// which is what keeps a fresh account — and an upgraded database — selling
-/// exactly as it did before the band existed.
-pub const RATIO_BAND_FULL: (i64, i64) = (10, 100);
+/// `mkt_ratio` to `[0.05, 1.00]`, so `5..=100` covers every price a model can
+/// ever have and therefore can never withhold anything. It is the platform's
+/// floor, not anybody's asking price.
+pub const RATIO_BAND_FULL: (i64, i64) = (5, 100);
+
+/// The floor an account sells at when nobody has said otherwise.
+///
+/// Deliberately above `RATIO_BAND_FULL.0`: the platform allows a seller to go
+/// down to 5% of list, but a seller who has not thought about it should not be
+/// offering their subscription at the cheapest price the market can reach.
+/// There is no "any price" setting any more — every account trades against a
+/// floor, and this is the one it starts on.
+pub const DEFAULT_SELL_MIN_RATIO: i64 = 10;
 
 /// What one subscription account serves at once when nobody has said
 /// otherwise. Five is the number a single interactive CLI session comfortably
@@ -115,12 +123,17 @@ pub fn normalise_concurrency(n: i64) -> i64 {
 }
 
 /// Clamp a price band into the legal range and put its ends the right way
-/// round. A value from before the band existed (0) lands on the floor, i.e. on
-/// "no floor at all" — an upgrade must not take a subscription off the market.
+/// round.
+///
+/// A non-positive end reads as "unset" rather than as the bottom of the range —
+/// that is what a row written before this column existed carries, and what a
+/// half-typed form produces. Unset means the default floor and list price
+/// respectively; answering an unset floor with the platform's own 5% would
+/// quietly halve what an upgraded seller asks.
 pub fn normalise_band(min_ratio: i64, max_ratio: i64) -> (i64, i64) {
     let (floor, ceiling) = RATIO_BAND_FULL;
-    let lo = min_ratio.clamp(floor, ceiling);
-    let hi = max_ratio.clamp(floor, ceiling);
+    let lo = if min_ratio <= 0 { DEFAULT_SELL_MIN_RATIO } else { min_ratio }.clamp(floor, ceiling);
+    let hi = if max_ratio <= 0 { ceiling } else { max_ratio }.clamp(floor, ceiling);
     if lo > hi {
         (hi, lo)
     } else {
@@ -224,9 +237,9 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE tools ADD COLUMN sell_enabled INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE tools ADD COLUMN sell_daily_limit INTEGER NOT NULL DEFAULT 0",
     // The price band the account sells inside, as percent of list price.
-    // Defaulting to the full `[10, 100]` — the whole range the server's
-    // `mkt_ratio` can occupy — is what keeps an upgraded database selling
-    // exactly as it did.
+    // The floor defaults to `DEFAULT_SELL_MIN_RATIO`, not to the bottom of the
+    // legal range: an account nobody has set a price on sells at 10% of list or
+    // better, rather than at whatever the market's own floor happens to be.
     "ALTER TABLE tools ADD COLUMN sell_min_ratio INTEGER NOT NULL DEFAULT 10",
     "ALTER TABLE tools ADD COLUMN sell_max_ratio INTEGER NOT NULL DEFAULT 100",
     // How many requests the account serves at once, declared to the market as

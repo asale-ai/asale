@@ -95,6 +95,9 @@ async fn buy_switch_rewrites_and_restores_every_tool() {
             // refuses to edit a file the tool would ignore, so the old seed was
             // testing the refusal rather than the round trip.
             "hermes" => "# mine\nmy_flag: 1\n",
+            // opencode reads JSON, and its switch refuses to rewrite a file it
+            // cannot round-trip — same reason as Hermes above.
+            "opencode" => "{\n  \"theme\": \"tokyonight\"\n}",
             _ => "# mine\nMY_FLAG=1\n",
         };
         std::fs::write(&path, original).unwrap();
@@ -1044,7 +1047,7 @@ async fn a_custom_endpoint_sells_the_catalog_it_can_serve_under_market_ids() {
         "sk-endpoint-key".into(),
         None,
         Some("house".into()),
-        Some(10),
+        Some(5),
         Some(12),
         None,
     )
@@ -1069,7 +1072,7 @@ async fn a_custom_endpoint_sells_the_catalog_it_can_serve_under_market_ids() {
         .into_iter()
         .find(|t| t.provider == "custom" && t.account_id == "house")
         .expect("account row");
-    assert_eq!(tool.sell_min_ratio, 10, "price floor");
+    assert_eq!(tool.sell_min_ratio, 5, "price floor");
     assert_eq!(tool.sell_concurrency, 12, "concurrency ceiling");
     assert!(tool.sell_enabled);
 

@@ -238,6 +238,12 @@ rpc_args! {
     ChainArgs      { chain: String }
     // `amount` absent or null → an open-ended session ("send any amount").
     PaySessionArgs { chain: String, #[serde(default)] amount: Option<i64> }
+    // The card rail names no chain — there is no address to derive — and the
+    // amount is not optional there: a card has to be presented with a figure.
+    CardSessionArgs {
+        #[serde(default)] amount: Option<i64>,
+        #[serde(default, alias = "open_local")] open_local: bool,
+    }
     PaySessionRefArgs { #[serde(alias = "session_ref")] session_ref: String }
     WithdrawArgs   {
         chain: String,
@@ -335,6 +341,8 @@ async fn rpc(
         "market_globe" => commands::market_globe(st).await?,
         "market_featured" => commands::market_featured(st).await?,
         "buy_tools" => commands::buy_tools(st).await?,
+        // Which of those tools are running — the restart advice, made checkable.
+        "tool_processes" => commands::tool_processes().await?,
 
         // ── upstream proxy + settings ───────────────────────────────────
         "set_proxy_settings" => {
@@ -517,6 +525,11 @@ async fn rpc(
         "wallet_deposit_session" => {
             let p: PaySessionArgs = args(&a)?;
             commands::wallet_deposit_session(st, p.chain, p.amount).await?
+        },
+        // The card rail. No chain: there is no address, and no withdrawal.
+        "wallet_card_session" => {
+            let p: CardSessionArgs = args(&a)?;
+            commands::wallet_card_session(st, p.amount, p.open_local).await?
         },
         "wallet_deposit_session_get" => {
             let p: PaySessionRefArgs = args(&a)?;

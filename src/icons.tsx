@@ -40,6 +40,12 @@ export const IconConsume = (p: P) => (
 export const IconWallet = (p: P) => (
   <Svg {...p}><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H18a1 1 0 0 1 1 1v1" /><path d="M3 7.5V17a2 2 0 0 0 2 2h14a1 1 0 0 0 1-1v-3" /><path d="M21 10h-4a2 2 0 0 0 0 4h4a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1Z" /></Svg>
 );
+/* The card rail's tab, beside the two wallets. A plain card outline with its
+   magnetic stripe — the shape every payment sheet uses, so it needs no label to
+   be read as "pay with a card". */
+export const IconCard = (p: P) => (
+  <Svg {...p}><rect x="2" y="5" width="20" height="14" rx="2.5" /><path d="M2 10h20" /><path d="M6 15h4" /></Svg>
+);
 export const IconRecords = (p: P) => (
   <Svg {...p}><path d="M6 2h8l4 4v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Z" /><path d="M14 2v4a2 2 0 0 0 2 2h4" /><path d="M8 13h8M8 17h5" /></Svg>
 );

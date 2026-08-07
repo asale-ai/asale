@@ -160,6 +160,60 @@ pub fn parse_codex_auth(content: &str) -> anyhow::Result<CliCred> {
     })
 }
 
+/// Parse opencode's `auth.json` for a subscription asale can actually sell.
+///
+/// opencode is not a vendor — it is a client that stores whatever you signed
+/// into it with, keyed by provider:
+///
+/// ```json
+/// {"anthropic": {"type": "oauth", "refresh": "sk-ant-ort01-…",
+///                "access": "sk-ant-oat01-…", "expires": 1767225600000}}
+/// ```
+///
+/// Only the `anthropic` OAuth entry is read, and it comes back as a **`claude`**
+/// credential, because that is what it is: the same Claude subscription the
+/// Claude Code CLI would have stored, reached through a different front door.
+/// Two stores holding one login therefore share a token fingerprint and merge
+/// into a single sellable account instead of showing up twice.
+///
+/// The other entries are deliberately left alone. An `api` entry is a
+/// pay-as-you-go key rather than a subscription — selling one would be spending
+/// the user's balance, not lending idle quota — and `openai`/`github-copilot`
+/// OAuth is not a Codex subscription, which is the only thing the Codex lane
+/// knows how to serve.
+pub fn parse_opencode_auth(content: &str) -> anyhow::Result<CliCred> {
+    let v: Value = serde_json::from_str(content.trim())?;
+    let entry = v
+        .get("anthropic")
+        .ok_or_else(|| anyhow::anyhow!("no anthropic entry in opencode auth.json"))?;
+    if entry.get("type").and_then(|t| t.as_str()) != Some("oauth") {
+        anyhow::bail!("the anthropic entry is not an oauth login");
+    }
+    let access = entry
+        .get("access")
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("access is empty or missing"))?;
+    let refresh = entry
+        .get("refresh")
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.is_empty())
+        .map(String::from);
+    // opencode stores an absolute millisecond stamp (`Date.now() + expires_in`).
+    let expires_at = entry.get("expires").and_then(|e| e.as_i64()).map(norm_ts_secs);
+    Ok(CliCred {
+        provider: "claude".into(),
+        access_token: access.to_string(),
+        refresh_token: refresh,
+        expires_at,
+        // Same as Claude Code's own store: no identity in the file, resolved
+        // later against the profile endpoint.
+        account_hint: None,
+        plan: None,
+        upstream_account_id: None,
+    })
+}
+
 /// Parse gemini-cli `oauth_creds.json` (flat file format) or the keytar
 /// keychain format `{"token":{"accessToken",...}}`.
 pub fn parse_gemini_oauth_creds(content: &str) -> anyhow::Result<CliCred> {
@@ -485,6 +539,42 @@ mod tests {
         assert_eq!(c.access_token, "a");
         assert_eq!(c.expires_at, Some(1_750_000_000)); // already seconds
         assert!(c.refresh_token.is_none());
+    }
+
+    #[test]
+    fn opencode_auth_yields_the_claude_subscription_behind_it() {
+        // A real-shaped store: several providers, only one of which is a
+        // subscription asale can serve.
+        let raw = r#"{
+            "anthropic": {"type":"oauth","refresh":"sk-ant-ort01-y","access":"sk-ant-oat01-x","expires":1750000000000},
+            "openai": {"type":"api","key":"sk-proj-zzz"},
+            "github-copilot": {"type":"oauth","refresh":"r","access":"a","expires":1750000000000}
+        }"#;
+        let c = parse_opencode_auth(raw).unwrap();
+        assert_eq!(c.provider, "claude", "it is a Claude subscription, whoever stored it");
+        assert_eq!(c.access_token, "sk-ant-oat01-x");
+        assert_eq!(c.refresh_token.as_deref(), Some("sk-ant-ort01-y"));
+        assert_eq!(c.expires_at, Some(1_750_000_000), "ms → s");
+
+        // Same login, two stores: the merge that keeps one account from showing
+        // up twice is by token fingerprint, so these must agree.
+        let via_claude_code = parse_claude_credentials(
+            r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-x","refreshToken":"sk-ant-ort01-y"}}"#,
+        )
+        .unwrap();
+        assert_eq!(token_fingerprint(&c), token_fingerprint(&via_claude_code));
+    }
+
+    #[test]
+    fn opencode_auth_ignores_what_is_not_a_sellable_subscription() {
+        // An API key is pay-as-you-go: selling it would spend the user's
+        // balance rather than lend idle subscription quota.
+        assert!(parse_opencode_auth(r#"{"anthropic":{"type":"api","key":"sk-ant-api03-x"}}"#).is_err());
+        // Signed into opencode, but not with anything Anthropic.
+        assert!(parse_opencode_auth(r#"{"openai":{"type":"oauth","access":"a","refresh":"r"}}"#).is_err());
+        assert!(parse_opencode_auth(r#"{"anthropic":{"type":"oauth","access":""}}"#).is_err());
+        assert!(parse_opencode_auth("{}").is_err());
+        assert!(parse_opencode_auth("not json").is_err());
     }
 
     #[test]

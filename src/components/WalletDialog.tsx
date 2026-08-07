@@ -20,25 +20,32 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import {
-  invoke, inTauri, fmtUsdt, isSolanaAddress,
-  type DepositSession, type WalletHistory, type WithdrawLimits,
+  invoke, inTauri, realTauri, fmtUsdt, isSolanaAddress,
+  type CardLimits, type CardSession, type DepositSession, type WalletHistory, type WithdrawLimits,
 } from "../lib";
 import { qrPayload, walletsFor, type WalletBrand } from "../lib/wallets";
 import { PayQr } from "./PayQr";
 import { CopyChip, Err, FactGrid, Skeleton } from "../ui";
 import { errText } from "../errors";
 import {
-  IconX, IconArrowRight, IconRefresh, IconInfo, IconShield, IconWallet, IconCheck,
+  IconX, IconArrowRight, IconRefresh, IconInfo, IconShield, IconWallet, IconCheck, IconCard,
 } from "../icons";
 
 const TRON_RE = /^T[1-9A-HJ-NP-Za-km-z]{33}$/;
 
 export type WalletMode = "deposit" | "withdraw";
 
-/** One funding rail. `id` drives the copy keys; `chain` drives every call. */
+/** One funding rail. `id` drives the copy keys; `chain` drives every call.
+ *
+ *  `card` is the rail that is not a chain: there is no address to send to, no
+ *  network to warn about and no way out, so it carries `kind: "card"` and the
+ *  body branches on that rather than on the chain name. Everything below the
+ *  tab strip is written against the rail, which is what lets one deposit-only
+ *  rail sit beside two symmetric ones. */
 interface Method {
   id: string;
   chain: string;
+  kind: "chain" | "card";
   modes: WalletMode[];
   /** Network line, and the only thing that must be read before sending. */
   network: string;
@@ -51,6 +58,7 @@ const METHODS: Method[] = [
   {
     id: "sol_usdt",
     chain: "solana",
+    kind: "chain",
     modes: ["deposit", "withdraw"],
     network: "Solana · SPL",
     placeholder: "4Nd1…",
@@ -60,11 +68,24 @@ const METHODS: Method[] = [
   {
     id: "tron_usdt",
     chain: "tron",
+    kind: "chain",
     modes: ["deposit", "withdraw"],
     network: "TRON · TRC20",
     placeholder: "T…",
     isAddress: (s) => TRON_RE.test(s.trim()),
     icon: <IconWallet />,
+  },
+  {
+    id: "card",
+    chain: "card",
+    kind: "card",
+    // Deposit only. The processor takes cards; it does not pay them, so there
+    // is nothing to put behind a withdraw tab.
+    modes: ["deposit"],
+    network: "Visa · Mastercard",
+    placeholder: "",
+    isAddress: () => false,
+    icon: <IconCard />,
   },
 ];
 
@@ -114,10 +135,18 @@ function Sheet({
   // The server decides which rail to steer users toward, so it leads the tab
   // strip. Until the history lands, the shipped order stands in.
   const available = useMemo(() => {
-    const rails = METHODS.filter((m) => m.modes.includes(mode));
+    // The card rail only exists where a processor is configured; a deployment
+    // without one must not show a tab that 503s. Until the history lands we do
+    // not know, and a tab that appears a moment later is better than one that
+    // appears and then cannot be paid with.
+    const rails = METHODS.filter((m) => m.modes.includes(mode) && (m.kind !== "card" || !!limits?.card));
     const first = limits?.default_chain;
-    return first ? [...rails].sort((a, b) => Number(b.chain === first) - Number(a.chain === first)) : rails;
-  }, [mode, limits?.default_chain]);
+    // Chains sort by the server's preference; the card stays where it is —
+    // last, because it is the one that costs extra.
+    return first
+      ? [...rails].sort((a, b) => Number(b.chain === first) - Number(a.chain === first))
+      : rails;
+  }, [mode, limits?.default_chain, limits?.card]);
   const [tab, setTab] = useState("");
   const picked = available.find((m) => m.id === tab) ?? available[0] ?? null;
   const railLimits = limits?.chains?.find((c) => c.chain === picked?.chain) ?? null;
@@ -150,7 +179,9 @@ function Sheet({
             refetches the address rather than showing the other chain's. */}
         <div className="wdlg-body">
           {picked && (mode === "deposit"
-            ? <RailDeposit key={picked.id} method={picked} limits={railLimits} onDone={onDone} />
+            ? (picked.kind === "card"
+                ? <CardDeposit key={picked.id} limits={limits?.card ?? null} onDone={onDone} />
+                : <RailDeposit key={picked.id} method={picked} limits={railLimits} onDone={onDone} />)
             : <RailWithdraw key={picked.id} method={picked} limits={railLimits} balance={balance}
                 onDone={onDone} onClose={onClose} />)}
         </div>
@@ -486,6 +517,191 @@ function PayReceipt({
           : t("wallet.payReceivedDesc", { n: session.deposit?.confirmations ?? 0 })}
       </p>
       {credited && <button className="btn ghost sm" onClick={onRestart}>{t("wallet.payAgain")}</button>}
+    </div>
+  );
+}
+
+/* ── Card ────────────────────────────────────────────────────────────────── */
+
+/**
+ * Top up with a card, through the processor's own hosted checkout.
+ *
+ * The shape is deliberately different from a chain rail. There is no address,
+ * no QR and nothing to watch for on a network: the user picks a figure, presses
+ * one button, pays on the processor's page, and this sheet waits for the
+ * webhook to land the credit.
+ *
+ * The one thing this screen exists to make honest is the *price*. The wallet is
+ * credited the round figure on the chip, and the card is charged more than that
+ * — so the surcharge is on its own line, in money, before the button rather
+ * than after it. Sales tax is not in that figure and cannot be: the processor
+ * is the merchant of record and works it out from the country the user enters
+ * on its page, which happens after this one. Saying where it is decided is the
+ * only honest thing to do; quoting a total we cannot compute would be worse
+ * than the gap it was meant to close.
+ */
+function CardDeposit({
+  limits, onDone,
+}: {
+  limits: CardLimits | null;
+  onDone: () => void;
+}) {
+  const { t } = useTranslation();
+  const [preset, setPreset] = useState<number | null>(DEFAULT_AMOUNT);
+  const [custom, setCustom] = useState("");
+  const amountInput = preset != null ? String(preset) : custom;
+  const [session, setSession] = useState<CardSession | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const micros = useMemo(() => {
+    const n = parseFloat(amountInput);
+    return amountInput.trim() && Number.isFinite(n) && n > 0 ? Math.round(n * 1_000_000) : null;
+  }, [amountInput]);
+
+  /* The quote, computed the same way the server does. It is shown before the
+     call is made — that is the point — and the reply carries the server's own
+     figures, which then take over so what is confirmed is what was charged. */
+  const quoted = useMemo(() => {
+    if (micros == null || !limits) return null;
+    const fee = Math.round((micros * limits.fee_bps) / 10_000) + limits.fee_flat;
+    // Whole cents, rounded up, as the processor bills.
+    const charge = Math.ceil((micros + fee) / 10_000) * 10_000;
+    return { fee, charge };
+  }, [micros, limits]);
+
+  const fee = session?.fee ?? quoted?.fee ?? null;
+  const charge = session?.charge ?? quoted?.charge ?? null;
+
+  const tooSmall = micros != null && limits != null && micros < limits.deposit_min;
+  const tooLarge = micros != null && limits != null && micros > limits.deposit_max;
+  const payable = micros != null && !tooSmall && !tooLarge && !busy;
+
+  async function pay() {
+    if (!payable) return;
+    setBusy(true); setErr("");
+    try {
+      const s = await invoke<CardSession>("wallet_card_session", { amount: micros, openLocal: realTauri });
+      setSession(s);
+      // In the browser the daemon cannot reach a window; open it here. In the
+      // desktop build the daemon already opened the system browser, because a
+      // third party's card form has no business inside our webview.
+      if (!realTauri) window.open(s.checkout_url, "_blank", "noopener");
+    } catch (e) {
+      setErr(errText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /* Same poll as a chain deposit — the session is the same object, and the
+     credit still arrives from somewhere this page cannot see. */
+  const watching = session != null && (session.status === "pending" || session.status === "matched");
+  const onDoneRef = useRef(onDone);
+  useEffect(() => { onDoneRef.current = onDone; }, [onDone]);
+  const sessionRef = session?.ref;
+  useEffect(() => {
+    if (!watching || !sessionRef) return;
+    let stop = false;
+    const id = setInterval(async () => {
+      if (document.visibilityState === "hidden") return;
+      try {
+        const next = await invoke<DepositSession>("wallet_deposit_session_get", { sessionRef });
+        if (stop) return;
+        setSession((prev) => {
+          if (!prev) return prev;
+          if (next.status === "credited" && prev.status !== "credited") onDoneRef.current();
+          return { ...prev, ...next };
+        });
+      } catch {
+        // Same reasoning as the chain rail: the next poll is 4s away.
+      }
+    }, POLL_MS);
+    return () => { stop = true; clearInterval(id); };
+  }, [watching, sessionRef]);
+
+  if (session?.status === "credited") {
+    return (
+      // `fee` on the receipt is the chain rails' *carve-out* — money taken out
+      // of what was credited. A card surcharge is charged on top instead, so
+      // nothing was deducted from the figure that landed and the receipt has no
+      // deduction line to draw.
+      <PayReceipt session={session} fee={null} onRestart={() => { setSession(null); setErr(""); }} />
+    );
+  }
+
+  return (
+    <div className="card-pay">
+      <div className="depwarn">
+        <div className="depwarn-head">
+          <IconInfo />
+          <span className="depwarn-title">{t("wallet.cardTitle")}</span>
+        </div>
+        <p className="depwarn-body">{t("wallet.cardDesc")}</p>
+      </div>
+
+      {/* Same picker as the chain rails — one amount control in the product,
+          not two that drift apart. */}
+      <div className="field amt-field">
+        <label>{t("wallet.payAmountLabel")}</label>
+        <div className="amt-picker">
+          {AMOUNT_PRESETS.map((v) => (
+            <button key={v} type="button" className={`amt-chip${preset === v ? " active" : ""}`}
+              onClick={() => { setPreset(v); setCustom(""); }}>
+              {v} <span className="amt-chip-unit">USDT</span>
+            </button>
+          ))}
+          <div className="amt-custom">
+            <input className="input mono" value={custom} inputMode="decimal"
+              placeholder={t("wallet.payAmountCustom")}
+              onChange={(e) => { setCustom(e.target.value); setPreset(null); }} />
+            <span className="amt-unit">USDT</span>
+          </div>
+        </div>
+      </div>
+
+      {/* The gap between the figure on the chip and the figure on the card.
+          Named, itemised, and above the button — not a footnote under it. */}
+      <div className="card-quote">
+        <div className="cq-row">
+          <span>{t("wallet.cardCredited")}</span>
+          <span className="mono tabular">{micros != null ? fmtUsdt(micros) : "—"}</span>
+        </div>
+        <div className="cq-row">
+          <span>{t("wallet.cardFee")}</span>
+          <span className="mono tabular">{fee != null ? `+ ${fmtUsdt(fee)}` : "—"}</span>
+        </div>
+        <div className="cq-row total">
+          <span>{t("wallet.cardCharge")}</span>
+          <span className="mono tabular">{charge != null ? fmtUsdt(charge) : "—"}</span>
+        </div>
+        <p className="cq-note">{t("wallet.cardTaxNote")}</p>
+      </div>
+
+      {tooSmall && limits && (
+        <Err>{t("wallet.cardMin", { min: fmtUsdt(limits.deposit_min) })}</Err>
+      )}
+      {tooLarge && limits && (
+        <Err>{t("wallet.cardMax", { max: fmtUsdt(limits.deposit_max) })}</Err>
+      )}
+      <Err>{err}</Err>
+
+      <button className="btn card-pay-btn" onClick={pay} disabled={!payable || !inTauri}>
+        {busy ? t("wallet.cardOpening") : t("wallet.cardPay", { total: charge != null ? fmtUsdt(charge) : "" })}
+        <IconArrowRight />
+      </button>
+
+      {session && (
+        <div className="card-waiting">
+          <span className="dot" />
+          <span>{t("wallet.cardWaiting")}</span>
+          {/* The popup can be blocked, or closed by accident. The link is the
+              same checkout and stays usable until the session expires. */}
+          <a href={session.checkout_url} target="_blank" rel="noopener noreferrer">
+            {t("wallet.cardReopen")}
+          </a>
+        </div>
+      )}
     </div>
   );
 }
