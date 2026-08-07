@@ -80,6 +80,81 @@ export interface MarketModel {
   demand: number;
 }
 
+/**
+ * Third-party scores for one model, from Artificial Analysis
+ * (`asale-server/src/benchmarks.rs`).
+ *
+ * Every field is nullable and means it: AA does not run every evaluation
+ * against every model, and it only measures serving performance for models it
+ * currently probes. `null` is "not measured" and must be excluded from a
+ * ranking rather than sorted to the bottom of one — a model with no coding
+ * score is not the worst coder.
+ */
+export interface ModelBenchmark {
+  /** AA's own slug for the entry this model was matched to, and its name
+   *  there. Shown so a reader can check the pairing — AA benchmarks each
+   *  reasoning effort separately and the sync picks one. */
+  aa_slug: string;
+  aa_name: string;
+  /** Composite indices, 0-100. */
+  intelligence: number | null;
+  coding: number | null;
+  math: number | null;
+  /** Individual evaluations, 0-1 fractions. */
+  mmlu_pro: number | null;
+  gpqa: number | null;
+  hle: number | null;
+  livecodebench: number | null;
+  scicode: number | null;
+  aime: number | null;
+  /** Median throughput, output tokens per second. */
+  output_tps: number | null;
+  /** Median time to first token, seconds. */
+  ttft_seconds: number | null;
+  /** The vendor's list price as AA measured it — **USD per 1M tokens**, not
+   *  the platform's micro-USDT per 1k. The two units are deliberately not
+   *  reconciled server-side so it stays obvious which side of a
+   *  "cheaper than list" comparison came from where. */
+  aa_price_input: number | null;
+  aa_price_output: number | null;
+  aa_price_blended: number | null;
+}
+
+/** One row of `GET /api/v1/market/rankings`: a tradable model, its live market
+ *  price, and its scores if it has any. */
+export interface RankingModel {
+  model: string;
+  model_id: string;
+  provider: string;
+  display_name: string;
+  context_length: number;
+  /** Market price as a fraction of list price, in [0.1, 1.0]. */
+  ratio: number;
+  /** `1 - ratio`. */
+  discount: number;
+  /** Micro-USDT per 1k tokens. */
+  market_input: number;
+  market_output: number;
+  ref_input: number;
+  ref_output: number;
+  supply_capacity_tokens: number;
+  online_lanes: number;
+  calls_last_minute: number;
+  /** Absent for models Artificial Analysis does not score — image, audio,
+   *  search and deep-research variants, mostly. */
+  bench: ModelBenchmark | null;
+}
+
+/** Response of `GET /api/v1/market/rankings`. */
+export interface RankingsResp {
+  models: RankingModel[];
+  /** When the scores were last pulled, unix seconds; 0 if never. */
+  benchmarks_updated_ts: number;
+  /** Credit the benchmark source requires wherever its data is shown. It
+   *  travels with the data so a UI cannot quietly drop it. */
+  attribution: { name: string; url: string };
+}
+
 /** One point on a model's price chart. */
 export interface PricePoint {
   /** Bucket start, unix seconds. */

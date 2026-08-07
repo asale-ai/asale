@@ -34,11 +34,11 @@
   --fg-3: #6b7080;          /* tertiary / micro-labels */
 
   /* The single accent */
-  --accent: #6e73f7;
-  --accent-hover: #8286ff;
+  --accent: #7e7ce4;
+  --accent-hover: #9492f0;
   --accent-fg: #ffffff;
-  --accent-soft: rgba(110, 115, 247, 0.14);
-  --accent-line: rgba(110, 115, 247, 0.32);
+  --accent-soft: rgba(126, 124, 228, 0.14);
+  --accent-line: rgba(126, 124, 228, 0.32);
 
   /* Semantic — used as dots, text and thin fills only */
   --success: #3ecf8e;
@@ -72,11 +72,11 @@
   --fg-2: #626671;
   --fg-3: #9195a1;
 
-  --accent: #5054e8;
-  --accent-hover: #4347d8;
+  --accent: #3a38ad;
+  --accent-hover: #2e2c8c;
   --accent-fg: #ffffff;
-  --accent-soft: rgba(80, 84, 232, 0.09);
-  --accent-line: rgba(80, 84, 232, 0.26);
+  --accent-soft: rgba(58, 56, 173, 0.09);
+  --accent-line: rgba(58, 56, 173, 0.26);
 
   --success: #14a06a;
   --warning: #b8791a;
