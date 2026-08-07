@@ -5,8 +5,12 @@
 //!   - ensures a daemon is running (reuses one already listening, else starts
 //!     the daemon in-process on the same port),
 //!   - shows the webview (the frontend talks to the daemon over HTTP),
-//!   - provides desktop niceties: tray, autostart, updater, single-instance,
-//!     deep links, window-state.
+//!   - provides desktop niceties: tray, autostart, single-instance, deep
+//!     links, window-state.
+//!
+//! Updating is not in that list: the app and the `asale` command line ship as
+//! one release but land separately, and only the published installer replaces
+//! both — see `updater`, which runs it rather than doing the work itself.
 //!
 //! Two windows, both pointed at the same frontend bundle:
 //!   `main`   the app
@@ -15,6 +19,7 @@
 //!            dashboard rather than a second implementation that can disagree.
 
 mod tray;
+mod updater;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -107,8 +112,6 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             show_main_window,
             hide_tray_panel,
@@ -118,6 +121,9 @@ pub fn run() {
             quit_app,
             get_close_to_tray,
             set_close_to_tray,
+            installer_command,
+            latest_release,
+            run_installer,
         ])
         .setup(move |app| {
             // The daemon requires its token on every request, loopback
@@ -372,6 +378,28 @@ fn set_close_to_tray(app: AppHandle, value: bool) {
     if let Some(s) = app.try_state::<Arc<Shell>>() {
         s.close_to_tray.store(value, Ordering::Relaxed);
     }
+}
+
+/// The installer command "restart to update" runs, so the Settings page can
+/// show it before anything is run.
+#[tauri::command]
+fn installer_command() -> String {
+    updater::install_command()
+}
+
+/// What the current published release is, per asale.ai.
+#[tauri::command]
+async fn latest_release() -> Result<updater::Release, String> {
+    updater::latest_release().await
+}
+
+/// Upgrade in place with the published installer, then reopen the app.
+///
+/// Quits this process as a side effect — see `updater` for why none of the work
+/// can happen inside it.
+#[tauri::command]
+fn run_installer(app: AppHandle) -> Result<(), String> {
+    updater::run(&app)
 }
 
 /// A boxed error carrying just a message, for `setup`'s `Box<dyn Error>`.

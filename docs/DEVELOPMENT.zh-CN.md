@@ -164,11 +164,14 @@ Tauri 不能跨系统打包：`.dmg` 只能在 macOS 出，`.msi`/`.exe` 只能�
 
 ## 发布与自动更新
 
-更新包签名私钥是 `asale-updater.key`（gitignored；公钥已经编在 `tauri.conf.json`
-里）。私钥丢了或轮换，已装的客户端就再也验证不了新版本 —— 按生产密钥管理。
+更新就是重新跑一遍官方安装脚本。客户端向 `https://asale.ai/dl/manifest.json` 问当前发布版本
+（后台每十分钟一次，设置页也可手动触发），跟自己的版本比对，要更新时执行的正是官网给出的那条命令
+—— `curl -fsSL https://asale.ai/dl/install.sh | sh`，Windows 是对应的 PowerShell 版本。
 
-自动更新走 `https://dl.asale.ai/updater/{{target}}/{{current_version}}`，
-需返回标准 Tauri updater JSON，已是最新则 204。
+没有增量式自动更新，这是有意的：桌面应用和 `asale` / `asaled` 命令行属于同一个发布版本，
+却是分别落到机器上的，只有那个安装脚本能把两边一起换掉；自更新器只能修好窗口，会让终端里
+悄悄停在上一个版本。代价是要输一次管理员密码（命令行装在 root 所有的目录里），所以流程是
+应用关闭 → 提权安装 → 自动重新打开（见 `src-tauri/src/updater.rs`）。
 
 安装包随站点一起发布（站点仓库的 `public/download/` 下各存一份）。macOS 包用 Developer ID
 证书签名并通过 Apple 公证，Gatekeeper 直接放行 —— 这一步在 `tauri build` 内部完成，依赖

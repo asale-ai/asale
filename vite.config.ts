@@ -23,12 +23,7 @@ export default defineConfig({
       output: {
         manualChunks: {
           react: ["react", "react-dom", "react-i18next", "i18next"],
-          tauri: [
-            "@tauri-apps/api",
-            "@tauri-apps/plugin-autostart",
-            "@tauri-apps/plugin-process",
-            "@tauri-apps/plugin-updater",
-          ],
+          tauri: ["@tauri-apps/api", "@tauri-apps/plugin-autostart"],
         },
       },
     },

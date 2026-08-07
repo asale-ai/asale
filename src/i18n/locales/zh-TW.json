@@ -717,16 +717,11 @@
     "autostartLabel": "登入時啟動 Asale",
     "autostartError": "無法變更開機自動啟動：{{msg}}",
     "updateTitle": "軟體更新",
-    "updateDesc": "目前版本 {{version}}。更新從 Asale 發佈端點下載，並驗證組建簽章。",
+    "updateDesc": "目前版本 {{version}}。Asale 每十分鐘向 asale.ai 查一次有沒有新版本，更新時重新執行官方安裝指令稿。",
     "updateCheck": "檢查更新",
     "updateChecking": "檢查中…",
     "updateNone": "已是最新版本",
     "updateAvailable": "發現新版本 {{version}}",
-    "updateInstall": "下載並安裝",
-    "updateDownloading": "下載中… {{pct}}%",
-    "updateDownloadingIndeterminate": "下載中…",
-    "updateReady": "更新已安裝",
-    "updateRestart": "立即重新啟動",
     "updateError": "更新失敗：{{msg}}",
     "updateNotes": "更新說明",
     "daemonTitle": "Asale 服務",
@@ -774,7 +769,14 @@
     "trayDesc": "關掉視窗後 Asale 仍在出售。系統列圖示會顯示即時狀態，點一下會彈出概覽面板，裡面有今日數據和真正的結束按鈕。",
     "trayCloseLabel": "關閉視窗時縮到系統列",
     "trayCloseHides": "關閉視窗後 Asale 繼續執行並出售，要結束請用系統列面板。",
-    "trayCloseQuits": "關閉視窗即結束 Asale，出售也隨之停止。"
+    "trayCloseQuits": "關閉視窗即結束 Asale，出售也隨之停止。",
+    "reinstallDesc": "執行 asale.ai 的安裝指令稿，同時替換桌面應用程式與 asale 命令列 —— 一個版本的兩半是分別落到機器上的，只有它能把兩邊一起更新。",
+    "reinstallButton": "重新啟動更新",
+    "reinstallConfirm": "Asale 將關閉，接著要求管理者密碼並安裝更新，完成後自動重新開啟。期間正在賣出的帳號會暫停。",
+    "reinstallGo": "關閉並更新",
+    "reinstallCancel": "取消",
+    "reinstallRunning": "更新中…",
+    "reinstallError": "無法啟動安裝程式：{{msg}}"
   },
   "common": {
     "copy": "複製",
@@ -1009,13 +1011,8 @@
     "reasonSell": "升級前無法賣出。",
     "reasonBuy": "升級前無法買入。",
     "now": "立即升級",
-    "checking": "檢查中…",
-    "downloading": "下載中…",
-    "downloadingPct": "下載中 {{pct}}%",
-    "restart": "重新啟動以完成升級",
     "download": "下載",
-    "manual": "手動下載",
-    "noneAvailable": "新版本尚未發佈，請稍後再試"
+    "manual": "手動下載"
   },
   "selfcheck": {
     "noHome": {
@@ -1041,5 +1038,8 @@
       "fixed": "{{accounts}} 個帳號已重新掛上市場。"
     },
     "fixing": "處理中…"
+  },
+  "update": {
+    "navHint": "發現新版本 {{version}}，開啟設定即可更新"
   }
 }

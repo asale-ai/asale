@@ -8,8 +8,6 @@
     "core:window:allow-start-dragging",
     "shell:allow-open",
     "autostart:default",
-    "updater:default",
-    "process:default",
     "deep-link:default"
   ]
 }

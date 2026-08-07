@@ -6,23 +6,23 @@
 // the window entirely: a user whose Codex session just stopped working has no
 // reason to open Settings and look for an update.
 //
-// One button, doing the whole job — check, download, install, relaunch — since
-// the user has already been told what is wrong and asking them to then find the
-// update flow themselves is the step where people give up. Outside the desktop
-// shell (a browser pointed at a remote daemon) there is nothing to install from
-// here, so it degrades to the download link.
+// The fix is the same one Settings offers, and it is the only one there is:
+// re-run the published installer, which replaces the desktop app and the
+// `asale` command line together. It is offered here rather than linked to,
+// because sending a blocked user off to find the update flow themselves is the
+// step where people give up — but it still asks first, since it closes the app
+// and needs an administrator password. Outside the desktop shell (a browser
+// pointed at a remote daemon) there is nothing to install onto this machine, so
+// it degrades to the download link.
 
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { check, type Update } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
 // `realTauri`, not `inTauri` — the latter is a compatibility shim that is
-// always true. The updater plugin only exists in the desktop shell, and a
-// browser pointed at a remote daemon must fall back to the download link.
+// always true. Only the desktop shell can run an installer on this machine.
 import { invoke, realTauri } from "../lib";
+import { useInstaller } from "../lib/updates";
 import { openExternal } from "../shell";
 import { SITE_URL } from "../links";
-import { errText } from "../errors";
 
 /** What the daemon reports; `null` while the platform is happy with us. */
 export interface UpgradeNotice {
@@ -32,48 +32,9 @@ export interface UpgradeNotice {
   path: string;
 }
 
-type Phase = "idle" | "checking" | "downloading" | "ready" | "error";
-
 export function UpgradeBanner({ notice }: { notice: UpgradeNotice }) {
   const { t } = useTranslation();
-  const [phase, setPhase] = useState<Phase>("idle");
-  const [progress, setProgress] = useState(-1);
-  const [err, setErr] = useState("");
-
-  async function upgradeNow() {
-    setErr("");
-    setPhase("checking");
-    try {
-      const u: Update | null = await check();
-      if (!u) {
-        // The platform wants a version the update feed does not offer yet —
-        // a rollout still in progress, or a floor set above what was published.
-        // Saying so beats a silent no-op.
-        setErr(t("upgrade.noneAvailable"));
-        setPhase("error");
-        return;
-      }
-      setPhase("downloading");
-      setProgress(-1);
-      let total = 0;
-      let received = 0;
-      await u.downloadAndInstall((ev) => {
-        if (ev.event === "Started") {
-          total = ev.data.contentLength ?? 0;
-          setProgress(total > 0 ? 0 : -1);
-        } else if (ev.event === "Progress") {
-          received += ev.data.chunkLength;
-          if (total > 0) setProgress(Math.min(100, Math.round((received / total) * 100)));
-        } else if (ev.event === "Finished") {
-          setProgress(100);
-        }
-      });
-      setPhase("ready");
-    } catch (e) {
-      setErr(errText(e));
-      setPhase("error");
-    }
-  }
+  const installer = useInstaller();
 
   const reason = notice.path === "sell" ? t("upgrade.reasonSell") : t("upgrade.reasonBuy");
 
@@ -87,9 +48,15 @@ export function UpgradeBanner({ notice }: { notice: UpgradeNotice }) {
             : t("upgrade.bodyNoVersion", { current: notice.current })}{" "}
           {reason}
         </div>
-        {err && (
+        {/* What the button is about to do, shown only once it has been asked
+            for — the banner is already carrying a paragraph of bad news, and
+            the cost of the fix is not news until the user is considering it. */}
+        {installer.confirming && (
+          <div className="text-sm" style={{ marginTop: 4 }}>{t("settings.reinstallConfirm")}</div>
+        )}
+        {installer.error && (
           <div className="text-sm" style={{ marginTop: 4 }}>
-            {err} —{" "}
+            {t("settings.reinstallError", { msg: installer.error })} —{" "}
             <a href={SITE_URL} onClick={(e) => { e.preventDefault(); openExternal(SITE_URL); }}>
               {t("upgrade.manual")}
             </a>
@@ -101,24 +68,18 @@ export function UpgradeBanner({ notice }: { notice: UpgradeNotice }) {
           <a className="btn btn-sm" href={SITE_URL} target="_blank" rel="noreferrer">
             {t("upgrade.download")}
           </a>
-        ) : phase === "ready" ? (
-          <button type="button" className="btn btn-sm" onClick={() => relaunch()}>
-            {t("upgrade.restart")}
-          </button>
+        ) : installer.confirming ? (
+          <>
+            <button type="button" className="btn btn-sm" onClick={installer.run} disabled={installer.running}>
+              {installer.running ? t("settings.reinstallRunning") : t("settings.reinstallGo")}
+            </button>
+            <button type="button" className="btn btn-sm ghost" onClick={installer.cancel} disabled={installer.running}>
+              {t("settings.reinstallCancel")}
+            </button>
+          </>
         ) : (
-          <button
-            type="button"
-            className="btn btn-sm"
-            onClick={upgradeNow}
-            disabled={phase === "checking" || phase === "downloading"}
-          >
-            {phase === "checking"
-              ? t("upgrade.checking")
-              : phase === "downloading"
-                ? progress >= 0
-                  ? t("upgrade.downloadingPct", { pct: progress })
-                  : t("upgrade.downloading")
-                : t("upgrade.now")}
+          <button type="button" className="btn btn-sm" onClick={installer.ask}>
+            {t("upgrade.now")}
           </button>
         )}
       </div>

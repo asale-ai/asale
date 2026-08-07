@@ -16,8 +16,12 @@ tauri-build = { version = "2", features = [] }
 # All business logic (native + server communication) lives in the daemon; the
 # shell embeds and runs it in-process (or reuses an externally started one).
 asale-daemon = { path = "../daemon" }
+# Only for its shared HTTP clients: the release check must go through whatever
+# proxy the user configured, exactly like every other outbound call asale makes.
+asale-client-core = { path = "../core" }
 
 reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -26,10 +30,8 @@ tracing-subscriber.workspace = true
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-deep-link = "2"
-tauri-plugin-process = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
-tauri-plugin-updater = "2"
 tauri-plugin-window-state = "2"
 
 [features]

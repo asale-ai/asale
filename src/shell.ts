@@ -49,6 +49,20 @@ export const shell = {
 
   hidePanel: () => call<void>("hide_tray_panel"),
 
+  /** What asale.ai publishes as the current client release. Read in the shell
+   *  rather than by the page: the manifest sends no CORS header, so a `fetch`
+   *  from the webview's `tauri://` origin never sees the answer. */
+  latestRelease: () => call<{ version: string; page: string }>("latest_release"),
+
+  /** The installer command "restart to update" runs, for showing it first. */
+  installerCommand: () => call<string>("installer_command"),
+
+  /** Re-run the published installer to upgrade the app *and* the `asale`
+   *  command line, then reopen the app. Quits this process as a side effect —
+   *  the installer replaces the binary it is running from — so nothing after
+   *  this call is guaranteed to run. */
+  runInstaller: () => call<void>("run_installer"),
+
   /** Make the tray panel window exactly `height` CSS pixels tall and re-anchor
    *  it to the tray icon. The panel measures itself and calls this; the shell
    *  clamps, so a broken measurement cannot produce a full-screen popup. */

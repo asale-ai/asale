@@ -48,7 +48,6 @@ $ClientDir  = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $ClientDir
 
 $EnvFile    = Join-Path $ClientDir ".env.package"
-$UpdaterKey = Join-Path $ClientDir "asale-updater.key"
 
 function Step($msg) { Write-Host ""; Write-Host "==> $msg" -ForegroundColor Cyan }
 function Die($msg)  { Write-Host "!! $msg" -ForegroundColor Red; exit 1 }
@@ -88,18 +87,10 @@ foreach ($name in @("ASALE_SERVER_API", "ASALE_GATEWAY_API", "ASALE_GATEWAY_WS")
     }
 }
 
-# ---------------------------------------------------------------- 更新签名
-# tauri.conf.json 里 createUpdaterArtifacts=true：每个产物都要出 .sig，
-# 没有私钥就直接构建失败，所以要么给钥匙，要么显式 -NoSign。
-# -CliOnly 不经过 tauri bundler，也就没有 .sig 这回事。
+# 更新走安装脚本（asale.ai/dl/install.ps1），不是 Tauri 的增量 updater，所以没有
+# minisign 私钥这一环了 —— 曾经的 createUpdaterArtifacts 和 .sig 一并去掉。
+# -NoSign 现在只管下面的 Authenticode。-CliOnly 不经过 bundler，也就无从签起。
 if ($CliOnly) { $NoSign = [switch]$true }
-if (-not $NoSign) {
-    if (-not (Test-Path $UpdaterKey)) { Die "找不到 $UpdaterKey（updater 签名私钥）。本地试打可加 -NoSign" }
-    $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content $UpdaterKey -Raw
-    if (-not $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) { $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "" }
-} else {
-    Write-Host "   -NoSign：产物不带 .sig，自动更新用不了（仅供本地验证）" -ForegroundColor Yellow
-}
 
 # ---------------------------------------------------------------- 依赖
 Step "环境检查"
@@ -112,7 +103,7 @@ if ($Target) { rustup target add $Target | Out-Null }
 
 # ---------------------------------------------------------------- 代码签名
 # 没有 Authenticode 签名，SmartScreen 会对安装包弹“未知发布者 / Windows 已保护你的
-# 电脑”。这跟 updater 的 .sig 是两码事：那个是 minisign，只管自动更新校验。
+# 电脑”。
 #
 # 走 Azure Artifact Signing（旧名 Trusted Signing）：私钥在微软的 HSM 里，构建机
 # 只拿一个 App Registration 的 client secret，没有 .pfx 可泄漏，也不用往证书存储里
@@ -135,7 +126,6 @@ $SignMissing = @($SignVars | Where-Object { -not [Environment]::GetEnvironmentVa
 $SignArgs    = @()
 
 if ($NoSign) {
-    # -NoSign 一律理解成“什么都不签”：updater 的 .sig 和 Authenticode 一起关掉。
     # tauri 自己的 --no-sign 到底覆盖哪几种签名，官方措辞含糊（帮助文本写的是
     # "skip code signing"），不去依赖它的内部行为，这里显式不注入 signCommand。
     if ($SignSet.Count -gt 0) {
@@ -305,7 +295,7 @@ Docs: https://asale.ai/   ·   asale help web
 # ---------------------------------------------------------------- 产物
 Step "产物"
 if (Test-Path $out) {
-    Get-ChildItem -Path $out -Recurse -Include *.msi, *.exe, *.zip, *.sig |
+    Get-ChildItem -Path $out -Recurse -Include *.msi, *.exe, *.zip |
         ForEach-Object { "{0,10:N0} KB  {1}" -f ($_.Length / 1KB), $_.FullName }
     Write-Host ""
     Write-Host "产物目录：$out"

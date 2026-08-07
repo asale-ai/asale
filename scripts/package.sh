@@ -5,7 +5,7 @@
 #   ./scripts/package.sh --universal         # macOS 通用二进制 (arm64 + x86_64)
 #   ./scripts/package.sh --target x86_64-apple-darwin
 #   ./scripts/package.sh --bundles deb,appimage
-#   ./scripts/package.sh --no-sign           # 不签更新包（本地试打）
+#   ./scripts/package.sh --no-sign           # 跳过代码签名（本地试打）
 #   ./scripts/package.sh --debug             # debug 构建，快很多
 #   ./scripts/package.sh --cli-only          # 只出命令行/无桌面产物，不打桌面安装包
 #   ./scripts/package.sh --no-cli            # 只打桌面安装包，跳过命令行产物
@@ -29,7 +29,6 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."   # asale-client 根目录
 ENV_FILE=".env.package"
-UPDATER_KEY="asale-updater.key"
 
 TARGET=""
 BUNDLES=""
@@ -79,19 +78,12 @@ for v in ASALE_SERVER_API ASALE_GATEWAY_API ASALE_GATEWAY_WS; do
   esac
 done
 
-# ---------------------------------------------------------------- 更新签名
-# createUpdaterArtifacts=true（tauri.conf.json）意味着每个产物都要出一个 .sig，
-# 没有私钥就直接构建失败，所以这里要么给钥匙，要么显式 --no-sign。
+# 更新走安装脚本（asale.ai/dl/install.sh），不是 Tauri 的增量 updater，所以这里
+# 没有 minisign 私钥这一环了 —— 曾经的 createUpdaterArtifacts 和 .sig 一并去掉。
+# 剩下的 --no-sign 只是透传给 tauri build，意思是"这一趟别做代码签名"。
 if [[ $BUILD_APP == 0 ]]; then
-  # --cli-only 不经过 tauri bundler，也就没有 .sig 这回事。
+  # --cli-only 不经过 tauri bundler，签名这件事无从谈起。
   SIGN=0
-fi
-if [[ $SIGN == 1 ]]; then
-  [[ -f "$UPDATER_KEY" ]] || die "找不到 ${UPDATER_KEY}（updater 签名私钥）。本地试打可加 --no-sign"
-  export TAURI_SIGNING_PRIVATE_KEY="$(cat "$UPDATER_KEY")"
-  export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
-else
-  echo "   --no-sign：产物不带 .sig，自动更新用不了（仅供本地验证）"
 fi
 
 # ---------------------------------------------------------------- 依赖
@@ -143,8 +135,6 @@ echo "    ASALE_QUOTA_PUBKEY=${ASALE_QUOTA_PUBKEY:0:16}…"
 
 if [[ $BUILD_APP == 1 ]]; then
   args=(tauri build)
-  # 光是不 export 私钥还不够：tauri.conf.json 里有 pubkey，bundler 会认定"配了公钥却
-  # 没私钥"直接报错。要跳过就得明说。
   if [[ $SIGN == 0 ]]; then args+=(--no-sign); fi
   if [[ -n "$PROFILE" ]]; then args+=("$PROFILE"); fi
   if [[ -n "$TARGET"  ]]; then args+=(--target "$TARGET"); fi
@@ -313,7 +303,7 @@ fi
 step "产物"
 if [[ -d "$out" ]]; then
   find "$out" -maxdepth 2 -type f \
-    \( -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' -o -name '*.sig' \
+    \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \
        -o -name 'asale-cli-*.tar.gz' \) \
     -exec ls -lh {} \; | awk '{printf "    %-8s %s\n", $5, $NF}'
   echo

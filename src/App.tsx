@@ -10,6 +10,7 @@ import { openExternal } from "./shell";
 import { SITE_URL, REPO_URL } from "./links";
 import { StatusWidget } from "./components/StatusWidget";
 import { UpgradeBanner, useUpgradeNotice } from "./components/UpgradeBanner";
+import { hasPendingUpdate, startUpdateWatcher, useUpdateState } from "./lib/updates";
 import { Skeleton, PageSkeleton } from "./ui";
 import type { JSX } from "react";
 
@@ -97,6 +98,15 @@ export function App() {
   // same reason the profile poll is: the daemon is not answering before that.
   const upgrade = useUpgradeNotice(booted);
 
+  // Is there a newer release? Unlike the banner above, this is nobody's problem
+  // yet — it is a marker on the Settings item and nothing more. Started here
+  // rather than from the Settings page because the point is to reach a user who
+  // has no reason to open it; not gated on `booted` because the release feed is
+  // asale.ai, not the daemon, and the check runs on its own clock anyway.
+  useEffect(startUpdateWatcher, []);
+  const update = useUpdateState();
+  const updatePending = hasPendingUpdate(update);
+
   // Allow any page to request navigation (e.g. "manage limits" from Publish).
   useEffect(() => {
     const onNav = (e: Event) => {
@@ -107,15 +117,28 @@ export function App() {
     return () => window.removeEventListener("asale:nav", onNav);
   }, []);
 
-  const navBtn = (id: Tab) => (
-    <button key={id} className={`navitem ${tab === id ? "active" : ""}`} onClick={() => setTab(id)}>
-      {/* Fixed-width icon slot: nav glyphs are 17px but the logo mark and the
-          user avatar are 26px, so without it the three label columns in the
-          sidebar start at three different x. */}
-      <span className="nav-ico">{ICONS[id]}</span>
-      {t(`nav.${id}`)}
-    </button>
-  );
+  const navBtn = (id: Tab) => {
+    // Settings is the only item that ever carries a marker, and the only one
+    // that could: it is where the update is installed from. The dot says "there
+    // is something here"; the tooltip is what says what, because a dot on its
+    // own is a puzzle rather than a notice.
+    const flagged = id === "settings" && updatePending;
+    return (
+      <button
+        key={id}
+        className={`navitem ${tab === id ? "active" : ""}`}
+        onClick={() => setTab(id)}
+        title={flagged ? t("update.navHint", { version: update.latest }) : undefined}
+      >
+        {/* Fixed-width icon slot: nav glyphs are 17px but the logo mark and the
+            user avatar are 26px, so without it the three label columns in the
+            sidebar start at three different x. */}
+        <span className="nav-ico">{ICONS[id]}</span>
+        {t(`nav.${id}`)}
+        {flagged && <span className="nav-dot" aria-label={t("update.navHint", { version: update.latest })} />}
+      </button>
+    );
+  };
 
   const initial = (profile?.name || profile?.email || "?").trim().charAt(0).toUpperCase();
   // Until the profile call answers, the card is a placeholder: rendering the

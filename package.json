@@ -16,9 +16,7 @@
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-autostart": "^2.5.1",
-    "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-shell": "^2",
-    "@tauri-apps/plugin-updater": "^2.10.1",
     "i18next": "^26.3.6",
     "qrcode": "^1.5.4",
     "react": "^18.3.1",

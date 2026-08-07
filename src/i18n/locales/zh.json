@@ -717,16 +717,11 @@
     "autostartLabel": "登录时启动 Asale",
     "autostartError": "无法修改开机自启：{{msg}}",
     "updateTitle": "软件更新",
-    "updateDesc": "当前版本 {{version}}。更新从 Asale 发布端点下载，并校验构建签名。",
+    "updateDesc": "当前版本 {{version}}。Asale 每十分钟向 asale.ai 查一次有没有新版本，更新时重新运行官方安装脚本。",
     "updateCheck": "检查更新",
     "updateChecking": "检查中…",
     "updateNone": "已是最新版本",
     "updateAvailable": "发现新版本 {{version}}",
-    "updateInstall": "下载并安装",
-    "updateDownloading": "下载中… {{pct}}%",
-    "updateDownloadingIndeterminate": "下载中…",
-    "updateReady": "更新已安装",
-    "updateRestart": "立即重启",
     "updateError": "更新失败：{{msg}}",
     "updateNotes": "更新说明",
     "daemonTitle": "Asale 服务",
@@ -774,7 +769,14 @@
     "trayDesc": "关掉窗口后 Asale 仍在出售。托盘图标会显示实时状态，点一下会弹出概览面板，里面有今日数据和真正的退出按钮。",
     "trayCloseLabel": "关闭窗口时最小化到托盘",
     "trayCloseHides": "关闭窗口后 Asale 继续运行并出售，要退出请用托盘面板。",
-    "trayCloseQuits": "关闭窗口即退出 Asale，出售也随之停止。"
+    "trayCloseQuits": "关闭窗口即退出 Asale，出售也随之停止。",
+    "reinstallDesc": "运行 asale.ai 的安装脚本，同时替换桌面应用与 asale 命令行 —— 一个版本的两半是分别落到机器上的，只有它能把两边一起更新。",
+    "reinstallButton": "重启更新",
+    "reinstallConfirm": "Asale 将关闭，随后请求管理员密码并安装更新，完成后自动重新打开。期间正在卖出的账号会暂停。",
+    "reinstallGo": "关闭并更新",
+    "reinstallCancel": "取消",
+    "reinstallRunning": "正在更新…",
+    "reinstallError": "无法启动安装程序：{{msg}}"
   },
   "common": {
     "copy": "复制",
@@ -1009,13 +1011,8 @@
     "reasonSell": "升级前无法卖出。",
     "reasonBuy": "升级前无法买入。",
     "now": "立即升级",
-    "checking": "检查中…",
-    "downloading": "下载中…",
-    "downloadingPct": "下载中 {{pct}}%",
-    "restart": "重启完成升级",
     "download": "下载",
-    "manual": "手动下载",
-    "noneAvailable": "新版本尚未发布，请稍后再试"
+    "manual": "手动下载"
   },
   "selfcheck": {
     "noHome": {
@@ -1041,5 +1038,8 @@
       "fixed": "{{accounts}} 个账号已重新挂上市场。"
     },
     "fixing": "处理中…"
+  },
+  "update": {
+    "navHint": "发现新版本 {{version}}，打开设置即可更新"
   }
 }

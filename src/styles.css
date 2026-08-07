@@ -240,6 +240,16 @@ h4 { font-size: var(--fs-sub); font-weight: 600; letter-spacing: -0.006em; margi
   display: flex; align-items: center; justify-content: flex-start;
 }
 .navitem svg { width: 17px; height: 17px; flex-shrink: 0; }
+/* "There is something on this page." Pushed to the far end of the row rather
+   than tucked against the label, so it reads as a property of the item and not
+   as punctuation on the word — and so it stays put as the labels change length
+   between languages. */
+.nav-dot {
+  margin-left: auto; flex-shrink: 0;
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 22%, transparent);
+}
 .navitem:hover { color: var(--fg); background: var(--surface-2); }
 .navitem.active { background: var(--surface-2); color: var(--fg); }
 .navitem.active svg { color: var(--accent); }

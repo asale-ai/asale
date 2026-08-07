@@ -7,7 +7,7 @@
 # calls scripts/package.ps1), so the validation rules, default targets and output paths
 # all come from the same place as a local build — CI and local builds cannot drift apart.
 # The only extra thing CI does is write the secrets into the two files the scripts read
-# (./.env.package and ./asale-updater.key, both gitignored).
+# (./.env.package, gitignored).
 #
 # macOS is not split into arm/intel: package.sh defaults to universal-apple-darwin, one
 # bundle covers both, and the download page is written for a single universal .dmg.
@@ -26,10 +26,8 @@
 #     ASALE_QUOTA_PUBKEY              Gateway quota authorization public key. Without it the
 #                                     built client refuses to go on the market and sell.
 #                                     See .env.package.example for the value.
-#     TAURI_SIGNING_PRIVATE_KEY       Contents of asale-updater.key (updater signing key)
 #
 #   Secrets (optional)
-#     TAURI_SIGNING_PRIVATE_KEY_PASSWORD   Passphrase set when that private key was generated
 #     ASALE_OAUTH_CLIENT_ID_GEMINI         Without these two, Gemini login is disabled in the client
 #     ASALE_OAUTH_CLIENT_SECRET_GEMINI
 #     APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY
@@ -164,7 +162,7 @@ jobs:
       # Both scripts read their configuration from files (an installed app has no shell
       # environment, so these values must be baked into the binary at compile time), so the
       # secrets are written out to those files first. Windows runners have bash too.
-      - name: Write .env.package / updater private key
+      - name: Write .env.package
         shell: bash
         env:
           QUOTA_PUBKEY: ${{ secrets.ASALE_QUOTA_PUBKEY }}
@@ -172,10 +170,8 @@ jobs:
           GATEWAY_API: ${{ vars.ASALE_GATEWAY_API }}
           GATEWAY_WS: ${{ vars.ASALE_GATEWAY_WS }}
           PROXY_PORT: ${{ vars.ASALE_PROXY_PORT }}
-          KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           GEMINI_ID: ${{ secrets.ASALE_OAUTH_CLIENT_ID_GEMINI }}
           GEMINI_SECRET: ${{ secrets.ASALE_OAUTH_CLIENT_SECRET_GEMINI }}
-          UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           # Code signing / notarization certificates. Deliberately defined only in this step
           # and forwarded selectively below (see the note in run:) — they must not go into
           # job-level env.
@@ -218,7 +214,6 @@ jobs:
             echo "ASALE_GATEWAY_API=${GATEWAY_API:-https://gw.asale.ai}"
             echo "ASALE_GATEWAY_WS=${GATEWAY_WS:-wss://gw.asale.ai/v1/ws}"
             echo "ASALE_PROXY_PORT=${PROXY_PORT:-9787}"
-            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$KEY_PASSWORD"
             # package.sh does `set -a; . ./.env.package`, so variables written here get exported and
             # the daemon's option_env! can pick them up at compile time. Using if rather than
             # `[[ ]] && echo`: the latter returns 1 when the condition is false, and as the
@@ -231,16 +226,11 @@ jobs:
             fi
           } > .env.package
 
-          if [[ "$SIGN" == "true" ]]; then
-            if [[ -z "$UPDATER_KEY" ]]; then
-              echo "::error::secret TAURI_SIGNING_PRIVATE_KEY is empty but packaging requires signing." \
-                   "createUpdaterArtifacts=true in tauri.conf.json makes the build fail outright;" \
-                   "for a manual trial run, turn the sign input off."
-              exit 1
-            fi
-            printf '%s' "$UPDATER_KEY" > asale-updater.key
-          else
-            echo "::warning::sign=false: artifacts carry no .sig, auto-update won't work — local verification only"
+          # `sign` now means Apple notarization / Windows Authenticode only. There is no
+          # minisign updater key any more: an update re-runs the published installer rather
+          # than applying a signed delta, so nothing would ever verify a .sig.
+          if [[ "$SIGN" != "true" ]]; then
+            echo "::warning::sign=false: artifacts are not code-signed — local verification only"
           fi
 
           # Code signing certificates: forward only the **non-empty** ones to later steps.

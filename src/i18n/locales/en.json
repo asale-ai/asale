@@ -717,16 +717,11 @@
     "autostartLabel": "Start Asale at login",
     "autostartError": "Could not change launch-at-login: {{msg}}",
     "updateTitle": "Updates",
-    "updateDesc": "Current version {{version}}. Updates are downloaded from the Asale release endpoint and verified against the build signature.",
+    "updateDesc": "Version {{version}}. Asale checks asale.ai for a newer release every ten minutes, and updates by re-running the published installer.",
     "updateCheck": "Check for updates",
     "updateChecking": "Checking…",
     "updateNone": "You are up to date",
     "updateAvailable": "Version {{version}} available",
-    "updateInstall": "Download & install",
-    "updateDownloading": "Downloading… {{pct}}%",
-    "updateDownloadingIndeterminate": "Downloading…",
-    "updateReady": "Update installed",
-    "updateRestart": "Restart now",
     "updateError": "Update failed: {{msg}}",
     "updateNotes": "Release notes",
     "daemonTitle": "Asale service",
@@ -774,7 +769,14 @@
     "trayDesc": "Asale keeps selling while its window is closed. The tray icon shows the live state; clicking it opens a small panel with today's figures and a real quit.",
     "trayCloseLabel": "Closing the window hides Asale to the tray",
     "trayCloseHides": "Closing the window keeps Asale running and selling. Quit it from the tray panel.",
-    "trayCloseQuits": "Closing the window quits Asale, which also stops selling."
+    "trayCloseQuits": "Closing the window quits Asale, which also stops selling.",
+    "reinstallDesc": "Runs the installer from asale.ai, which replaces the desktop app and the `asale` command line together — the two halves of a release land on the machine separately, and this is the only thing that updates both.",
+    "reinstallButton": "Restart to update",
+    "reinstallConfirm": "Asale will close, ask for your administrator password, install the update, and open again. Anything it is selling stops for the duration.",
+    "reinstallGo": "Close and update",
+    "reinstallCancel": "Cancel",
+    "reinstallRunning": "Updating…",
+    "reinstallError": "Could not start the installer: {{msg}}"
   },
   "common": {
     "copy": "Copy",
@@ -1009,13 +1011,8 @@
     "reasonSell": "Selling is paused until you update.",
     "reasonBuy": "Buying is paused until you update.",
     "now": "Update now",
-    "checking": "Checking…",
-    "downloading": "Downloading…",
-    "downloadingPct": "Downloading {{pct}}%",
-    "restart": "Restart to finish",
     "download": "Download",
-    "manual": "download it manually",
-    "noneAvailable": "No update is published yet — try again shortly"
+    "manual": "download it manually"
   },
   "selfcheck": {
     "noHome": {
@@ -1041,5 +1038,8 @@
       "fixed": "{{accounts}} account(s) are back on the market."
     },
     "fixing": "Working…"
+  },
+  "update": {
+    "navHint": "A new version ({{version}}) is available — open Settings to install it"
   }
 }

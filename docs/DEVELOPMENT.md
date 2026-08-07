@@ -185,12 +185,17 @@ the site repo's `src/lib/downloads.ts` — renaming it means changing that table
 
 ## Releasing and auto-update
 
-The update-bundle signing private key is `asale-updater.key` (gitignored; the public key is
-already compiled into `tauri.conf.json`). If that key is lost or rotated, already-installed
-clients can never verify a new version again — treat it as a production secret.
+Updating re-runs the published installer. The client asks `https://asale.ai/dl/manifest.json`
+for the current release (every ten minutes in the background, and on demand from Settings),
+compares it with its own version, and applies it by running exactly what the website hands
+out — `curl -fsSL https://asale.ai/dl/install.sh | sh`, or the PowerShell equivalent.
 
-Auto-update points at `https://dl.asale.ai/updater/{{target}}/{{current_version}}`, which
-must return the standard Tauri updater JSON, or 204 when already up to date.
+There is no signed-delta updater, on purpose. The desktop app and the `asale` / `asaled`
+command line ship as one release but land on the machine separately, and only that installer
+replaces both; a self-updater could only ever fix the window and would silently leave the
+terminal a release behind. The cost is a password prompt — the command line lives in a
+root-owned directory — so the app closes, elevates, installs, and opens itself again
+(`src-tauri/src/updater.rs`).
 
 Installers are published together with the website (a copy of each lives under the site
 repo's `public/download/`). macOS bundles are signed with a Developer ID certificate and
@@ -200,13 +205,10 @@ Build without those and you get an ad-hoc-signed bundle that only runs on your o
 
 ### Code signing
 
-Two entirely separate things, easy to conflate:
-
-- the `.sig` next to every artifact is **minisign**, produced from `asale-updater.key`, and
-  only the auto-updater cares about it;
-- **Authenticode / Developer ID** is what the OS checks when a user double-clicks the
-  installer. Without it Windows shows "unknown publisher" and macOS reports the app as
-  damaged.
+**Authenticode / Developer ID** is what the OS checks when a user double-clicks the
+installer. Without it Windows shows "unknown publisher" and macOS reports the app as
+damaged. (Releases used to also carry a minisign `.sig` per artifact for the Tauri
+auto-updater; that updater is gone, and so are the `.sig` files and their key.)
 
 `--no-sign` / `-NoSign` means "sign nothing" — on Windows `package.ps1` also skips the
 Authenticode step, so a trial build never needs the Azure credentials.

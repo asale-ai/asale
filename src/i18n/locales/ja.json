@@ -717,16 +717,11 @@
     "autostartLabel": "ログイン時に Asale を起動",
     "autostartError": "自動起動の変更に失敗しました：{{msg}}",
     "updateTitle": "アップデート",
-    "updateDesc": "現在のバージョン {{version}}。アップデートは Asale 配信エンドポイントからダウンロードされ、ビルド署名を検証します。",
+    "updateDesc": "現在のバージョン {{version}}。Asale は 10 分ごとに asale.ai へ新しいリリースがないか問い合わせ、更新は公式インストーラーを実行し直して行います。",
     "updateCheck": "アップデートを確認",
     "updateChecking": "確認中…",
     "updateNone": "最新の状態です",
     "updateAvailable": "新しいバージョン {{version}} があります",
-    "updateInstall": "ダウンロードしてインストール",
-    "updateDownloading": "ダウンロード中… {{pct}}%",
-    "updateDownloadingIndeterminate": "ダウンロード中…",
-    "updateReady": "アップデートをインストールしました",
-    "updateRestart": "今すぐ再起動",
     "updateError": "アップデートに失敗しました：{{msg}}",
     "updateNotes": "リリースノート",
     "daemonTitle": "Asale サービス",
@@ -774,7 +769,14 @@
     "trayDesc": "ウィンドウを閉じても Asale は販売を続けます。トレイアイコンが現在の状態を示し、クリックすると本日の数値と本当の終了ボタンを備えたパネルが開きます。",
     "trayCloseLabel": "ウィンドウを閉じたらトレイに収める",
     "trayCloseHides": "ウィンドウを閉じても Asale は動き続け、販売も続きます。終了はトレイパネルから行ってください。",
-    "trayCloseQuits": "ウィンドウを閉じると Asale が終了し、販売も止まります。"
+    "trayCloseQuits": "ウィンドウを閉じると Asale が終了し、販売も止まります。",
+    "reinstallDesc": "asale.ai のインストーラーを実行し、デスクトップアプリと asale コマンドラインをまとめて置き換えます。リリースの二つの半分は別々にマシンへ届くため、両方を更新できるのはこれだけです。",
+    "reinstallButton": "再起動して更新",
+    "reinstallConfirm": "Asale を終了し、管理者パスワードを求めたうえで更新をインストールし、完了後に自動で再起動します。その間、販売中のアカウントは停止します。",
+    "reinstallGo": "終了して更新",
+    "reinstallCancel": "キャンセル",
+    "reinstallRunning": "更新中…",
+    "reinstallError": "インストーラーを起動できません: {{msg}}"
   },
   "common": {
     "copy": "コピー",
@@ -1009,13 +1011,8 @@
     "reasonSell": "アップデートするまで販売は停止されます。",
     "reasonBuy": "アップデートするまで購入は停止されます。",
     "now": "今すぐ更新",
-    "checking": "確認中…",
-    "downloading": "ダウンロード中…",
-    "downloadingPct": "ダウンロード中 {{pct}}%",
-    "restart": "再起動して完了",
     "download": "ダウンロード",
-    "manual": "手動でダウンロード",
-    "noneAvailable": "新しいバージョンはまだ公開されていません。しばらくしてからお試しください"
+    "manual": "手動でダウンロード"
   },
   "selfcheck": {
     "noHome": {
@@ -1041,5 +1038,8 @@
       "fixed": "{{accounts}} 件のアカウントを市場に戻しました。"
     },
     "fixing": "処理中…"
+  },
+  "update": {
+    "navHint": "新しいバージョン {{version}} があります。設定から更新できます"
   }
 }

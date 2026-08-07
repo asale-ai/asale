@@ -2,15 +2,12 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getVersion } from "@tauri-apps/api/app";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
-import { check, type Update } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
 import { apiBase, daemonToken, invoke, realTauri } from "../lib";
-import { shell } from "../shell";
+import { openExternal, shell } from "../shell";
+import { checkForUpdate, useInstaller, useUpdateState } from "../lib/updates";
 import { Card, CopyChip, Err, Ok, PageHead, FactGrid } from "../ui";
 import { IconPower, IconDownload, IconRefresh, IconCheck, IconServer, IconGlobe, IconInfo, IconExternal, IconAlert } from "../icons";
 import { errText } from "../errors";
-
-type UpdatePhase = "idle" | "checking" | "none" | "available" | "downloading" | "ready" | "error";
 
 interface DaemonInfo {
   name: string;
@@ -65,10 +62,13 @@ export function Settings() {
   const [proxyTest, setProxyTest] = useState<ProxyTest | null>(null);
   const [proxyErr, setProxyErr] = useState("");
 
-  const [phase, setPhase] = useState<UpdatePhase>("idle");
-  const [update, setUpdate] = useState<Update | null>(null);
-  const [progress, setProgress] = useState(-1);
-  const [updateErr, setUpdateErr] = useState("");
+  // Shared with the sidebar marker and with the ten-minute background check, so
+  // opening this page shows what the loop already found instead of asking again
+  // — and a download started here survives leaving the page.
+  const { phase, available, latest, page, error: updateErr } = useUpdateState();
+
+  // How an update is applied — the same two-step the upgrade banner uses.
+  const installer = useInstaller();
 
   useEffect(() => {
     // Daemon self-description — real data in every mode (shell or browser).
@@ -92,7 +92,7 @@ export function Settings() {
     }
 
     if (!realTauri) return;
-    // Shell-only info: the desktop app's own version (updater target).
+    // Shell-only info: the desktop app's own version.
     getVersion().then(setVersion).catch(() => {});
     isEnabled().then(setAutostart).catch((e) => setAutostartErr(errText(e)));
     shell.getCloseToTray().then((v) => setCloseToTray(v ?? true)).catch(() => setCloseToTray(true));
@@ -139,28 +139,6 @@ export function Settings() {
     setAutostartBusy(true); setAutostartErr("");
     try { if (autostart) await disable(); else await enable(); setAutostart(await isEnabled()); }
     catch (e) { setAutostartErr(errText(e)); } finally { setAutostartBusy(false); }
-  };
-
-  const checkForUpdate = async () => {
-    setPhase("checking"); setUpdateErr(""); setUpdate(null);
-    try {
-      const u = await check();
-      if (u) { setUpdate(u); setPhase("available"); } else setPhase("none");
-    } catch (e) { setUpdateErr(errText(e)); setPhase("error"); }
-  };
-
-  const downloadAndInstall = async () => {
-    if (!update) return;
-    setPhase("downloading"); setProgress(-1); setUpdateErr("");
-    try {
-      let total = 0, received = 0;
-      await update.downloadAndInstall((ev) => {
-        if (ev.event === "Started") { total = ev.data.contentLength ?? 0; setProgress(total > 0 ? 0 : -1); }
-        else if (ev.event === "Progress") { received += ev.data.chunkLength; if (total > 0) setProgress(Math.min(100, Math.round((received / total) * 100))); }
-        else if (ev.event === "Finished") setProgress(100);
-      });
-      setPhase("ready");
-    } catch (e) { setUpdateErr(errText(e)); setPhase("error"); }
   };
 
   return (
@@ -347,43 +325,80 @@ export function Settings() {
             {autostartErr && <Err>{t("settings.autostartError", { msg: autostartErr })}</Err>}
           </Card>
 
-          <Card icon={<IconDownload />} title={t("settings.updateTitle")} desc={t("settings.updateDesc", { version: version || "…" })}>
+          <Card
+            icon={<IconDownload />}
+            title={t("settings.updateTitle")}
+            desc={t("settings.updateDesc", { version: version || "…" })}
+            right={available ? <span className="dot warn pulse" /> : null}
+          >
+            {/* The same check the sidebar marker reads, and the same one the
+                background loop runs every ten minutes — pressing this only
+                brings the next one forward. */}
             <div className="btn-row">
-              <button className="btn ghost" onClick={checkForUpdate} disabled={phase === "checking" || phase === "downloading"}>
+              <button className="btn ghost" onClick={() => void checkForUpdate()} disabled={phase === "checking"}>
                 {phase === "checking" ? <IconRefresh className="spin" /> : <IconRefresh />}
                 {phase === "checking" ? t("settings.updateChecking") : t("settings.updateCheck")}
               </button>
               {phase === "none" && <span className="pill on plain"><IconCheck />{t("settings.updateNone")}</span>}
-              {phase === "available" && update && (
+              {available && (
                 <>
-                  <span className="pill warn">{t("settings.updateAvailable", { version: update.version })}</span>
-                  <button className="btn" onClick={downloadAndInstall}><IconDownload />{t("settings.updateInstall")}</button>
-                </>
-              )}
-              {phase === "ready" && (
-                <>
-                  <span className="pill on plain"><IconCheck />{t("settings.updateReady")}</span>
-                  <button className="btn" onClick={() => relaunch()}>{t("settings.updateRestart")}</button>
+                  <span className="pill warn">{t("settings.updateAvailable", { version: latest })}</span>
+                  {page && (
+                    <button type="button" className="btn ghost" onClick={() => openExternal(page)}>
+                      <IconExternal />
+                      {t("settings.updateNotes")}
+                    </button>
+                  )}
                 </>
               )}
             </div>
-
-            {phase === "downloading" && (
-              <div className="card-foot">
-                <div className="micro-label">
-                  {progress >= 0 ? t("settings.updateDownloading", { pct: progress }) : t("settings.updateDownloadingIndeterminate")}
-                </div>
-                <div className="bar"><span style={{ width: progress >= 0 ? `${progress}%` : "40%" }} className={progress < 0 ? "skel" : ""} /></div>
-              </div>
-            )}
-
             {phase === "error" && <Err>{t("settings.updateError", { msg: updateErr })}</Err>}
-            {update?.body && (phase === "available" || phase === "downloading" || phase === "ready") && (
-              <div className="card-foot">
-                <div className="micro-label">{t("settings.updateNotes")}</div>
-                <pre className="codeblock notes">{update.body}</pre>
-              </div>
-            )}
+
+            {/* Applying it — one way, on purpose. The desktop app and the
+                `asale` / `asaled` command line are two halves of one release
+                that land on the machine separately, and this installer is the
+                only thing that replaces both; an update that quietly fixed the
+                window and left the terminal on last month's build is the
+                failure this is meant to prevent.
+
+                Everything it costs is said before it is pressed. It needs an
+                administrator password (the command line lives in a root-owned
+                directory), it closes the app, and it opens the app again when
+                it is done — none of which should be a surprise mid-way. The
+                command itself is shown too: nobody should have to take "an
+                installer" on trust. */}
+            <div className="card-foot">
+              <div className="hint">{t("settings.reinstallDesc")}</div>
+              {installer.command && <pre className="codeblock notes">{installer.command}</pre>}
+
+              {!installer.confirming ? (
+                <div className="btn-row">
+                  {/* Primary only when there is something to install; the rest
+                      of the time this is a repair tool, not the thing to press. */}
+                  <button className={available ? "btn" : "btn ghost"} onClick={installer.ask}>
+                    <IconRefresh />
+                    {t("settings.reinstallButton")}
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <div className="callout warn">
+                    <IconAlert />
+                    <span>{t("settings.reinstallConfirm")}</span>
+                  </div>
+                  <div className="btn-row">
+                    <button className="btn" onClick={installer.run} disabled={installer.running}>
+                      {installer.running ? <IconRefresh className="spin" /> : <IconDownload />}
+                      {installer.running ? t("settings.reinstallRunning") : t("settings.reinstallGo")}
+                    </button>
+                    <button className="btn ghost" onClick={installer.cancel} disabled={installer.running}>
+                      {t("settings.reinstallCancel")}
+                    </button>
+                  </div>
+                </>
+              )}
+              {installer.error && <Err>{t("settings.reinstallError", { msg: installer.error })}</Err>}
+            </div>
           </Card>
         </>
       ) : (
