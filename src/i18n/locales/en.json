@@ -313,6 +313,8 @@
     "available": "Available",
     "frozen": "Frozen (preauth)",
     "payable": "Payable (earnings)",
+    "referralTitle": "Invite & earn",
+    "referralDesc": "Get your invite link on the website: friends who sign up start with free credit, and a share of the fee on what they trade settles into this wallet.",
     "signInFirst": "sign in under Account first.",
     "gettingAddress": "Requesting…",
     "withdrawAddress": "Withdrawal address",
@@ -422,6 +424,71 @@
     "wdRejected": "Rejected",
     "unknownStatus": "Unknown",
     "method_sol_usdt": "Solana"
+  },
+  "share": {
+    "open": "Share earnings",
+    "dialogTitle": "Share your earnings card",
+    "close": "Close",
+    "cardAlt": "Earnings card",
+    "modeSell": "What I earned",
+    "modeReferral": "Referrals",
+    "period_day": "Today",
+    "period_week": "7 days",
+    "period_month": "30 days",
+    "period_all": "All time",
+    "shape_wide": "Landscape",
+    "shape_tall": "Portrait",
+    "shapeHint_wide": "X, Telegram, Facebook and LinkedIn unfurl a link into a 1.91:1 preview — this is exactly that shape.",
+    "shapeHint_tall": "Xiaohongshu, Moments and Instagram post the image itself, where a landscape card arrives as a letterboxed sliver.",
+    "copyText": "Copy caption",
+    "copyLink": "Copy link",
+    "saveImage": "Save image",
+    "systemShare": "Share…",
+    "copiedText": "Caption copied",
+    "copiedLink": "Link copied",
+    "copyFailed": "The clipboard refused — select and copy by hand.",
+    "savedTo": "Saved to {{path}}",
+    "saveFailed": "Could not save the image.",
+    "manualDone": "Image saved and caption copied. Paste both into {{app}}.",
+    "manualCopied": "Caption copied. The image is still rendering — try Save image again in a moment.",
+    "qrTitle": "Open in WeChat",
+    "qrHint": "WeChat has no desktop composer. Scan to open the link on your phone, then forward it or post it to Moments.",
+    "qrAlt": "QR code for the invite link",
+    "p": {
+      "x": "X",
+      "facebook": "Facebook",
+      "linkedin": "LinkedIn",
+      "reddit": "Reddit",
+      "telegram": "Telegram",
+      "whatsapp": "WhatsApp",
+      "threads": "Threads",
+      "line": "LINE",
+      "hackernews": "Hacker News",
+      "wechat": "WeChat",
+      "weibo": "Weibo",
+      "qq": "QQ",
+      "qzone": "Qzone",
+      "xiaohongshu": "Xiaohongshu",
+      "douban": "Douban"
+    },
+    "card": {
+      "site": "asale.ai",
+      "codeHint": "Invite code",
+      "tagline": "Idle AI subscription quota, earning its keep",
+      "kickerSell": "Earned from shared quota",
+      "kickerReferral": "Referral earnings",
+      "periodAll": "All time",
+      "statTokens": "Tokens served",
+      "statCalls": "Requests",
+      "statInvited": "Invited",
+      "statActivated": "Verified",
+      "statPending": "Pending"
+    },
+    "text": {
+      "title": "Idle AI subscription quota, earning its keep",
+      "body": "I'm on Asale — subscription quota I don't use goes out for USDT, and when mine runs out I use someone else's. Sign up with my link and start with {{bonus}} USDT.",
+      "bodySell": "I've earned {{amount}} USDT on Asale in the last {{period}}, sharing subscription quota I wasn't using. Sign up with my link to try it."
+    }
   },
   "records": {
     "title": "Records",
@@ -921,6 +988,10 @@
       "expired": "The {{provider}} code expired before it was approved.",
       "declined": "The {{provider}} sign-in was declined.",
       "unsupportedProvider": "This provider does not use a device-code login (Kimi and Grok do)."
+    },
+    "share": {
+      "badImage": "That is not a share card image.",
+      "saveFailed": "Could not write the image to disk."
     }
   },
   "tray": {

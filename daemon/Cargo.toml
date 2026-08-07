@@ -42,3 +42,8 @@ rust-embed = { version = "8", features = ["interpolate-folder-path"] }
 # Format-preserving TOML edits for Codex's ~/.codex/config.toml.
 toml_edit = "0.22"
 tower-http = { version = "0.5", features = ["cors"] }
+
+[dev-dependencies]
+# Drives the router directly in tests, so the UI gate is exercised as real HTTP
+# without binding a port.
+tower = { version = "0.5", features = ["util"] }

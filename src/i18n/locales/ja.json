@@ -313,6 +313,8 @@
     "available": "利用可能",
     "frozen": "凍結（事前承認）",
     "payable": "支払予定（収益）",
+    "referralTitle": "紹介リワード",
+    "referralDesc": "招待リンクはウェブサイトで取得できます。登録した友だちには体験クレジットが付き、その取引手数料の一部がこのウォレットに入ります。",
     "signInFirst": "先に「アカウント」でログインしてください。",
     "gettingAddress": "取得中…",
     "withdrawAddress": "出金アドレス",
@@ -422,6 +424,71 @@
     "wdRejected": "却下",
     "unknownStatus": "不明",
     "method_sol_usdt": "Solana"
+  },
+  "share": {
+    "open": "収益を共有",
+    "dialogTitle": "収益カードを共有",
+    "close": "閉じる",
+    "cardAlt": "収益カード",
+    "modeSell": "自分の収益",
+    "modeReferral": "招待報酬",
+    "period_day": "今日",
+    "period_week": "7 日間",
+    "period_month": "30 日間",
+    "period_all": "累計",
+    "shape_wide": "横長",
+    "shape_tall": "縦長",
+    "shapeHint_wide": "X、Telegram、Facebook、LinkedIn はリンクを 1.91:1 のプレビューに展開します。この形がそれです。",
+    "shapeHint_tall": "小紅書や Instagram は画像そのものを投稿するため、横長だとタイムラインで細い帯になります。",
+    "copyText": "本文をコピー",
+    "copyLink": "リンクをコピー",
+    "saveImage": "画像を保存",
+    "systemShare": "共有…",
+    "copiedText": "本文をコピーしました",
+    "copiedLink": "リンクをコピーしました",
+    "copyFailed": "クリップボードが拒否されました。手動で選択してコピーしてください。",
+    "savedTo": "{{path}} に保存しました",
+    "saveFailed": "画像を保存できませんでした。",
+    "manualDone": "画像を保存し、本文をコピーしました。{{app}} に貼り付けてください。",
+    "manualCopied": "本文をコピーしました。画像は生成中です——少し待って「画像を保存」をもう一度。",
+    "qrTitle": "WeChat で開く",
+    "qrHint": "WeChat にはデスクトップの共有画面がありません。QR を読み取ってスマホで開き、そこから転送してください。",
+    "qrAlt": "招待リンクの QR コード",
+    "p": {
+      "x": "X",
+      "facebook": "Facebook",
+      "linkedin": "LinkedIn",
+      "reddit": "Reddit",
+      "telegram": "Telegram",
+      "whatsapp": "WhatsApp",
+      "threads": "Threads",
+      "line": "LINE",
+      "hackernews": "Hacker News",
+      "wechat": "WeChat",
+      "weibo": "Weibo",
+      "qq": "QQ",
+      "qzone": "Qzone",
+      "xiaohongshu": "小紅書",
+      "douban": "豆瓣"
+    },
+    "card": {
+      "site": "asale.ai",
+      "codeHint": "招待コード",
+      "tagline": "使い切れない AI サブスク枠が、収益になる",
+      "kickerSell": "枠の共有による収益",
+      "kickerReferral": "招待報酬の累計",
+      "periodAll": "累計",
+      "statTokens": "提供トークン",
+      "statCalls": "リクエスト数",
+      "statInvited": "招待済み",
+      "statActivated": "認証済み",
+      "statPending": "未決済"
+    },
+    "text": {
+      "title": "使い切れない AI サブスク枠が、収益になる",
+      "body": "Asale を使っています——余ったサブスク枠を USDT で共有し、自分の枠が尽きたら他の人のを使えます。私のリンクから登録すると {{bonus}} USDT 分から始められます。",
+      "bodySell": "使っていないサブスク枠を Asale で共有して、{{period}}で {{amount}} USDT になりました。私のリンクから試せます。"
+    }
   },
   "records": {
     "title": "履歴",
@@ -921,6 +988,10 @@
       "expired": "{{provider}} のコードは承認される前に期限切れになりました。",
       "declined": "{{provider}} のサインインが拒否されました。",
       "unsupportedProvider": "このプロバイダーはデバイスコードによるサインインに対応していません（Kimi と Grok のみ）。"
+    },
+    "share": {
+      "badImage": "共有カードの画像ではありません。",
+      "saveFailed": "画像をディスクに書き込めませんでした。"
     }
   },
   "tray": {

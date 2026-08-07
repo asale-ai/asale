@@ -268,8 +268,9 @@ pub fn show_main(app: &AppHandle) {
 
 /// The URL that opens this daemon's UI in a browser, token included.
 ///
-/// The token is not a convenience: every RPC needs it, so a browser sent to the
-/// bare address would load the app and then fail every call it makes.
+/// The token is not a convenience: the daemon serves the app only to a browser
+/// that has presented it, so a browser sent to the bare address gets the unlock
+/// page and nothing else.
 fn web_url(app: &AppHandle) -> Result<String, String> {
     let shell = app.try_state::<Arc<Shell>>().ok_or("shell state missing")?;
     // A fragment is not sent in the HTTP request, access log, or Referer.

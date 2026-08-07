@@ -1530,6 +1530,30 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .wallet-hero .wh-actions { display: flex; gap: var(--s2); flex-wrap: wrap; margin-top: var(--s5); }
 .wallet-hero .wh-actions + .wh-trust { margin-top: var(--s3); }
 
+/* ── Link row ───────────────────────────────────────────────────────────────
+   A whole row that opens a page on the website. It reads as a card rather than
+   a button on purpose: the two funding verbs above it are the actions this
+   screen is for, and a filled button here would outrank them. */
+.linkrow {
+  display: flex; align-items: center; gap: var(--s3); width: 100%; text-align: left;
+  padding: var(--s4) var(--s5); margin-bottom: var(--s3);
+  border: 1px solid var(--line); border-radius: var(--r3);
+  background: var(--surface); color: inherit; cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+.linkrow:hover { background: var(--surface-2); border-color: var(--line-2); }
+.linkrow .lr-ico {
+  width: 28px; height: 28px; border-radius: var(--r1); flex-shrink: 0;
+  display: grid; place-items: center; color: var(--fg-2); background: var(--surface-2);
+}
+.linkrow:hover .lr-ico { background: var(--surface); }
+.linkrow .lr-ico svg { width: 15px; height: 15px; }
+.linkrow .lr-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.linkrow .lr-t { font-size: var(--fs-sub); font-weight: 600; color: var(--fg); }
+.linkrow .lr-d { font-size: var(--fs-meta); color: var(--fg-2); line-height: 1.5; }
+.linkrow .lr-go { flex-shrink: 0; display: grid; place-items: center; color: var(--fg-3); }
+.linkrow .lr-go svg { width: 14px; height: 14px; }
+
 .wallet-cta { text-align: center; padding: var(--s2) 0 var(--s1); }
 .wallet-cta .hint { margin-top: var(--s2); font-size: var(--fs-meta); color: var(--fg-3); }
 
@@ -1793,6 +1817,71 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .chip-x:hover:not(:disabled) { opacity: 1; }
 .chip-x:disabled { cursor: not-allowed; }
 .chip-x svg { width: 10px; height: 10px; }
+
+/* ── Share sheet ────────────────────────────────────────────────────────────
+   A tile per platform. The mark itself stays `currentColor` — several of these
+   brands are pure black or a red that fails on the dark theme — and the brand
+   colour arrives as `--tint`, a wash on the tile that only appears on hover.
+   That keeps fifteen logos from turning the panel into a colour chart while
+   still letting each one be recognisable on approach.
+   Mirrors `.sharesheet` in asale-web/src/app/globals.css. */
+.sharesheet { display: flex; flex-direction: column; gap: var(--s4); }
+.ss-grid {
+  display: grid; gap: 6px;
+  grid-template-columns: repeat(auto-fill, minmax(78px, 1fr));
+}
+.ss-tile {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 10px 4px; border: 1px solid transparent; border-radius: var(--r2);
+  background: var(--surface-2); color: var(--fg-2); cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+              border-color var(--t-fast) var(--ease);
+}
+.ss-tile:hover {
+  background: color-mix(in srgb, var(--tint) 12%, var(--surface-2));
+  border-color: color-mix(in srgb, var(--tint) 34%, transparent);
+  color: var(--fg);
+}
+.ss-tile:focus-visible { outline: none; box-shadow: var(--ring); }
+.ss-mark { font-size: 21px; line-height: 1; display: block; }
+/* Two lines, clamped, with the box reserved whether or not the second one is
+   used — so "Hacker News" is not cut to "Hacker Ne…" and the tiles beside it
+   keep the same height anyway. */
+.ss-name {
+  font-size: var(--fs-micro); font-weight: 500; line-height: 1.2; text-align: center;
+  max-width: 100%; min-height: 2.4em; overflow: hidden;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.ss-qr {
+  display: flex; align-items: center; gap: var(--s4); padding: var(--s4);
+  background: var(--surface-2); border-radius: var(--r2);
+}
+/* The code needs a light plate in both themes — a dark-on-dark QR is within
+   spec and half the phone cameras in the world still refuse it. */
+.ss-qr svg { background: #fff; border-radius: var(--r1); padding: 4px; flex-shrink: 0; }
+.ss-qr-title { font-weight: 600; font-size: var(--fs-body); }
+.ss-qr-hint { color: var(--fg-2); font-size: var(--fs-meta); line-height: 1.6; margin: 4px 0 0; }
+.ss-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.ss-notice {
+  display: flex; align-items: center; gap: 6px; margin: 0;
+  font-size: var(--fs-meta); color: var(--fg-2); word-break: break-all;
+}
+.ss-notice.ok { color: var(--accent); }
+.ss-notice svg { width: 13px; height: 13px; flex-shrink: 0; }
+
+/* ── Earnings card preview ──────────────────────────────────────────────────
+   The canvas is drawn at the shared file's real pixel size and scaled down
+   here, so the preview cannot drift from what gets shared. `tall` is capped by
+   height instead of width, or a 1080×1350 card would push the share sheet
+   below it off the dialog. */
+.ec-tabs { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; }
+.ec-preview { display: flex; justify-content: center; }
+.ec-preview canvas {
+  display: block; width: 100%; height: auto; border-radius: var(--r2);
+  border: 1px solid var(--line);
+}
+.ec-preview.tall canvas { width: auto; max-height: 300px; max-width: 100%; }
+.ec-hint { color: var(--fg-2); font-size: var(--fs-meta); line-height: 1.6; margin: var(--s3) 0 var(--s4); }
 
 /* ── Modal ──────────────────────────────────────────────────────────────── */
 .modal-backdrop {

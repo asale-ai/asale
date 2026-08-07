@@ -46,6 +46,12 @@ const TOKEN_KEY = "asale.daemon.token";
 // always needs it — open the URL `asaled` prints at startup. (The Tauri shell
 // reads `~/.asale/daemon.token` itself and seeds this same key before any page
 // script runs, so the desktop app never shows a token in a URL.)
+//
+// When the daemon is also the one serving this page, reaching it at all already
+// meant clearing its gate, and the session cookie from that handshake authorizes
+// the RPCs on its own. This copy is what the other origins need: the shell's
+// webview and the Vite dev server are cross-site to the daemon, so no cookie of
+// its is ever attached to what they send.
 if (typeof window !== "undefined") {
   const params = new URLSearchParams(window.location.search);
   const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ""));

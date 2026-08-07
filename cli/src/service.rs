@@ -93,10 +93,16 @@ fn signal(pid: u32, force: bool) -> bool {
 
 /// The URL that opens the app in a browser.
 ///
-/// The token is not optional and not a convenience: the daemon requires it on
-/// every RPC, loopback included, so a browser with no token loads the UI and
-/// then fails every call. The desktop shell reads the token file itself, which
-/// is why it never shows one in an address bar.
+/// The token is not optional and not a convenience: the daemon serves the app
+/// only to a browser that has presented it, and requires it again on every RPC,
+/// loopback included. A URL with the token deleted reaches the daemon's unlock
+/// page and goes no further. The desktop shell reads the token file itself,
+/// which is why it never shows one in an address bar.
+///
+/// It goes in the fragment, not the query — the spelling the daemon prints at
+/// startup and the Settings page shares. A fragment is never sent to a server,
+/// so the token stays out of access logs and `Referer` headers on its way in;
+/// the daemon's unlock page reads it in the browser and posts it back.
 pub fn web_url(bind: &str, host_override: Option<&str>) -> String {
     let addr = http::dial_addr(bind);
     let host = match host_override {
@@ -105,7 +111,7 @@ pub fn web_url(bind: &str, host_override: Option<&str>) -> String {
     };
     let host = if host.contains(':') && !host.starts_with('[') { format!("[{host}]") } else { host };
     match paths::read_token() {
-        Some(t) => format!("http://{host}:{}/?token={t}", addr.port()),
+        Some(t) => format!("http://{host}:{}/#token={t}", addr.port()),
         // No token file yet means the daemon has never run. The URL is still
         // worth printing — it is where the app will be — but it will not
         // authorize anything until the service has started once.

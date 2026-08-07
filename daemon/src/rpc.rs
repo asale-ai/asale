@@ -4,25 +4,35 @@
 //!                       Body = the command's args object (camelCase keys, the
 //!                       same shape the old Tauri `invoke` used). 200 → result
 //!                       JSON; 4xx/5xx → `{"error": "..."}`.
+//!   POST /ui-session  — trade the daemon token for the browser's session
+//!                       cookie. What the unlock page below posts.
 //!   GET  /healthz     — liveness (also used by the shell to detect a running
 //!                       daemon and by the frontend to detect the daemon).
 //!   GET  /*           — the embedded web UI (../dist), so one `asaled` binary
-//!                       serves the whole app for B/S access.
+//!                       serves the whole app for B/S access. Gated.
 //!
 //! Auth model:
-//!   - **Every** /rpc request must carry `X-Asale-Token: <token>` matching
+//!   - **Every** /rpc request must present the token matching
 //!     `~/.asale/daemon.token` (0600, generated on first run) — loopback
-//!     included. See `authorized` for what that does and does not protect.
-//!   - The Tauri shell reads the file and seeds the webview's localStorage in
-//!     an initialization script; browsers use the `#token=` URL the daemon
-//!     prints at startup (the frontend captures it into localStorage on first
-//!     load and scrubs it from the address bar).
-//!   - `/healthz` and the static UI stay open: the first is a liveness probe
-//!     with no data in it, the second has to load before it can present a
-//!     token.
+//!     included — either as `X-Asale-Token: <token>` or as the session cookie
+//!     below. See `authorized` for what that does and does not protect.
+//!   - **The UI itself is gated too.** A browser gets the app only once it has
+//!     proved it holds the token; until then every path answers with the
+//!     unlock page and nothing of the application is served. This is what the
+//!     `?token=`/`#token=` URL is for — not a convenience that a stripped URL
+//!     can skip. The proof is kept in an HttpOnly `asale_session` cookie
+//!     (SameSite=Strict, expiring), so the credential itself never sits in the
+//!     address bar, the history, or a script-readable place.
+//!   - The Tauri shell is the one client that bypasses this: it serves the
+//!     frontend from its own origin and seeds the webview's localStorage with
+//!     the token in an initialization script, so it only ever talks to /rpc.
+//!   - `/healthz` stays open: it is a liveness probe with no data in it, and
+//!     the CLI uses it to tell "port is dead" from "port is guarded".
 //!   - CSRF: /rpc only accepts `Content-Type: application/json` (axum's `Json`
 //!     rejects others), so cross-origin browser calls always trigger a CORS
-//!     preflight, and the CORS layer only admits known origins.
+//!     preflight, and the CORS layer only admits known origins. The session
+//!     cookie is `SameSite=Strict`, so it is never attached to a request another
+//!     site originated.
 
 use crate::commands;
 use crate::state::AppState;
@@ -60,6 +70,7 @@ pub fn router(ctx: Ctx) -> Router {
 
     Router::new()
         .route("/rpc/:cmd", post(rpc))
+        .route("/ui-session", post(ui_session))
         .route("/healthz", get(healthz))
         .fallback(get(ui))
         // RPC arguments are small intent objects. State the boundary explicitly
@@ -98,10 +109,219 @@ async fn healthz() -> impl IntoResponse {
     Json(json!({ "ok": true, "name": "asaled", "version": env!("CARGO_PKG_VERSION") }))
 }
 
+/// Name of the cookie holding a browser's proof that it was given the token.
+const SESSION_COOKIE: &str = "asale_session";
+
+/// How long a browser stays unlocked before it has to present the token again.
+///
+/// `daemon.token` never rotates, so without an expiry the very first tokenized
+/// URL would unlock that browser permanently — which is the shape of the hole
+/// this gate exists to close. A day is long enough that a working session is
+/// never interrupted and short enough that a borrowed or forgotten browser stops
+/// being an open door.
+const SESSION_MAX_AGE_SECS: u32 = 24 * 60 * 60;
+
+/// The UI gate: a browser is served the application only after it has proved it
+/// holds the daemon token.
+///
+/// The static bundle used to be open on the grounds that "it has to load before
+/// it can present a token". That is true of the *first* request and nothing
+/// else, and it left `http://host:9700/` — the URL you get by deleting the
+/// token from the one that was handed to you — serving the whole app to anyone
+/// who could reach the port. The RPC layer still refused them, so no data
+/// leaked, but the app is not the thing to hand a stranger either: it names the
+/// user's accounts and features, and it is a map of the API behind it.
+///
+/// So the first request is answered by `unlock_page` — a few hundred bytes that
+/// are not the app — and the application is served only from the second request
+/// on, once the token has been traded for a session cookie.
+async fn ui(State(ctx): State<Ctx>, uri: Uri, headers: axum::http::HeaderMap) -> Response {
+    // `?token=` on the URL: the form `asale url --host`, old bookmarks and any
+    // link that predates the fragment spelling still carry. Trade it for the
+    // cookie and bounce to a URL that no longer has it, so the credential does
+    // not stay in the address bar or the session history.
+    if let Some(t) = query_token(&uri) {
+        return if secret_matches(&ctx.token, &t) {
+            unlocked_redirect(uri.path(), &t)
+        } else {
+            unlock_page(true)
+        };
+    }
+    if !cookie_matches(&ctx.token, &headers) {
+        return unlock_page(false);
+    }
+    serve_asset(uri.path())
+}
+
+/// `POST /ui-session {"token": "..."}` — what the unlock page calls to turn a
+/// token into this browser's session cookie.
+///
+/// A POST rather than another tokenized GET so the token is in a body: request
+/// paths reach access logs, `Referer` headers and shell history, and bodies do
+/// not.
+async fn ui_session(State(ctx): State<Ctx>, Json(a): Json<Value>) -> Response {
+    let presented = a["token"].as_str().unwrap_or("").trim();
+    if !secret_matches(&ctx.token, presented) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(cmd_err!("errors.daemon.unauthorized", "that is not this daemon's token").to_json()),
+        )
+            .into_response();
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::SET_COOKIE, session_cookie(presented))
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"ok":true}"#))
+        .unwrap()
+}
+
+/// The `Set-Cookie` value that unlocks this browser.
+///
+/// `HttpOnly` keeps the token out of reach of any script on the page, so an
+/// injected one cannot read it back out and replay it elsewhere. `SameSite=Strict`
+/// means no request another site originated ever carries it, which is what lets
+/// /rpc accept the cookie without opening a CSRF hole. No `Secure`: the daemon
+/// speaks plain HTTP on loopback, and a `Secure` cookie there is simply dropped.
+fn session_cookie(token: &str) -> String {
+    format!(
+        "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_MAX_AGE_SECS}"
+    )
+}
+
+/// The `token` query parameter, if the URL carries one.
+///
+/// The token is URL-safe base64 (`[A-Za-z0-9_-]`), so there is nothing here to
+/// percent-decode; a value that arrived escaped simply will not match, which is
+/// the correct answer for a token that is not this daemon's.
+fn query_token(uri: &Uri) -> Option<String> {
+    uri.query()?.split('&').find_map(|kv| {
+        let (k, v) = kv.split_once('=')?;
+        (k == "token").then(|| v.to_string())
+    })
+}
+
+/// Hand over the cookie and bounce to the same path without the query.
+///
+/// The token is put back on as a fragment, which is never sent to a server: it
+/// is how the frontend fills the `localStorage` copy it uses for the
+/// `X-Asale-Token` header and for the shareable link on the Settings page, and
+/// the frontend scrubs it from the address bar as soon as it has read it.
+fn unlocked_redirect(path: &str, token: &str) -> Response {
+    Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header(header::LOCATION, format!("{path}#token={token}"))
+        .header(header::SET_COOKIE, session_cookie(token))
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::REFERRER_POLICY, "no-referrer")
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// What a browser without a session gets, in place of the application.
+///
+/// It is self-contained on purpose — it must not pull anything out of the
+/// gated bundle. Its whole job is to find a token and post it: from the
+/// `#token=` fragment when the user followed the URL `asaled` printed (the
+/// fragment never reached the gate above, so this is the only code that can see
+/// it), and otherwise from the person reading the page.
+fn unlock_page(bad_token: bool) -> Response {
+    let nonce = nonce();
+    let msg = if bad_token {
+        "That token does not match this daemon."
+    } else {
+        "This client is locked."
+    };
+    let html = format!(
+        r##"<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Asale — locked</title>
+<style nonce="{nonce}">
+ :root {{ color-scheme: light dark }}
+ body {{ margin:0; min-height:100vh; display:grid; place-items:center;
+        font:15px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+        background:#0b0d10; color:#e6e8eb }}
+ main {{ width:min(420px,90vw); padding:28px 30px; border-radius:14px;
+        background:#14181d; border:1px solid #232a31 }}
+ h1 {{ margin:0 0 6px; font-size:17px; font-weight:600 }}
+ p {{ margin:0 0 18px; color:#98a2ad; font-size:13px }}
+ form {{ display:flex; gap:8px }}
+ input {{ flex:1; min-width:0; padding:9px 11px; border-radius:8px; font:inherit;
+         background:#0b0d10; color:inherit; border:1px solid #2b333b }}
+ button {{ padding:9px 16px; border:0; border-radius:8px; font:inherit;
+          font-weight:600; background:#4c8dff; color:#fff; cursor:pointer }}
+ .err {{ margin:14px 0 0; color:#ff8a8a; font-size:13px; min-height:1.6em }}
+ code {{ color:#c8d0d8 }}
+</style></head><body><main>
+<h1>{msg}</h1>
+<p>Open the URL <code>asale open</code> prints, or paste the token from
+   <code>~/.asale/daemon.token</code>.</p>
+<form id="f"><input id="t" type="password" autocomplete="off" spellcheck="false"
+  placeholder="daemon token" aria-label="daemon token"><button>Unlock</button></form>
+<p class="err" id="e" role="alert"></p>
+</main><script nonce="{nonce}">
+(function () {{
+  var err = document.getElementById('e');
+  function unlock(token, silent) {{
+    return fetch('/ui-session', {{
+      method: 'POST', credentials: 'same-origin',
+      headers: {{ 'content-type': 'application/json' }},
+      body: JSON.stringify({{ token: token }})
+    }}).then(function (r) {{
+      // Reload keeps the fragment, so the app still picks the token up for the
+      // header it sends cross-origin.
+      if (r.ok) {{ location.reload(); return true; }}
+      if (!silent) err.textContent = 'That token does not match this daemon.';
+      return false;
+    }}).catch(function () {{
+      if (!silent) err.textContent = 'Could not reach the local service.';
+      return false;
+    }});
+  }}
+  var hash = new URLSearchParams(location.hash.replace(/^#/, '')).get('token');
+  if (hash) unlock(hash, true);
+  document.getElementById('f').addEventListener('submit', function (ev) {{
+    ev.preventDefault();
+    err.textContent = '';
+    var v = document.getElementById('t').value.trim();
+    if (v) unlock(v, false);
+  }});
+}})();
+</script></body></html>"##
+    );
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::REFERRER_POLICY, "no-referrer")
+        .header("x-frame-options", "DENY")
+        .header(
+            header::CONTENT_SECURITY_POLICY,
+            format!(
+                "default-src 'none'; style-src 'nonce-{nonce}'; script-src 'nonce-{nonce}'; \
+                 connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+            ),
+        )
+        .body(Body::from(html))
+        .unwrap()
+}
+
+/// A fresh CSP nonce, so the unlock page can carry its own inline style and
+/// script without `'unsafe-inline'` — which would otherwise apply to every
+/// injected script too.
+fn nonce() -> String {
+    use rand::RngCore;
+    let mut raw = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut raw);
+    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, raw)
+}
+
 /// Serve the embedded UI; unknown paths fall back to index.html (the app is a
 /// single page). An empty dist (API-only build) returns a plain hint instead.
-async fn ui(uri: Uri) -> Response {
-    let path = uri.path().trim_start_matches('/');
+fn serve_asset(path: &str) -> Response {
+    let path = path.trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
     let asset = Ui::get(path).or_else(|| Ui::get("index.html"));
     match asset {
@@ -144,19 +364,38 @@ async fn ui(uri: Uri) -> Response {
 /// does close is the gap between "reachable on the port" and "allowed to hold
 /// the user's credentials", which are very different sets.
 fn authorized(ctx: &Ctx, _peer: &SocketAddr, headers: &axum::http::HeaderMap) -> bool {
-    token_matches(&ctx.token, headers)
+    token_matches(&ctx.token, headers) || cookie_matches(&ctx.token, headers)
 }
 
-/// The whole authorization decision, as a pure function over the expected token
-/// and the request headers. An empty expected token authorizes nothing.
+/// The header spelling: what every non-browser caller uses, and what the
+/// frontend sends when its origin is not the daemon's (the Tauri shell, and a
+/// browser pointed at the Vite dev server).
 fn token_matches(expected: &str, headers: &axum::http::HeaderMap) -> bool {
-    if expected.is_empty() {
-        return false;
-    }
     headers
         .get("x-asale-token")
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|t| constant_time_eq(t.as_bytes(), expected.as_bytes()))
+        .is_some_and(|t| secret_matches(expected, t))
+}
+
+/// The cookie spelling: what a browser served by this daemon sends, having
+/// traded the token for it at the gate. Safe to honour on /rpc because the
+/// cookie is `SameSite=Strict` — no request another site started carries it.
+fn cookie_matches(expected: &str, headers: &axum::http::HeaderMap) -> bool {
+    cookie(headers, SESSION_COOKIE).is_some_and(|t| secret_matches(expected, t))
+}
+
+/// One cookie out of the `Cookie` header, by name.
+fn cookie<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(header::COOKIE)?.to_str().ok()?.split(';').find_map(|kv| {
+        let (k, v) = kv.split_once('=')?;
+        (k.trim() == name).then_some(v.trim())
+    })
+}
+
+/// The whole authorization decision, as a pure function over the expected token
+/// and the presented one. An empty expected token authorizes nothing.
+fn secret_matches(expected: &str, presented: &str) -> bool {
+    !expected.is_empty() && constant_time_eq(presented.as_bytes(), expected.as_bytes())
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -255,6 +494,8 @@ rpc_args! {
     // `models` absent → leave the selection unchanged; `[]` → clear it.
     BuyToolArgs    { tool: String, enabled: bool, #[serde(default)] models: Option<Vec<String>> }
     PathArgs       { path: String }
+    // The share card: a filename and the PNG itself, base64.
+    SaveImageArgs  { name: String, data: String }
     // Every field past `enabled` absent → leave that term of the sale as it is.
     SellArgs       {
         provider: String,
@@ -326,6 +567,7 @@ async fn rpc(
         "ensure_api_key" => commands::ensure_api_key(st).await?,
         "load_api_key" => commands::load_api_key(st).await.map(Value::Bool)?,
         "me_profile" => commands::me_profile(st).await?,
+        "me_referral" => commands::me_referral(st).await?,
         "logout" => commands::logout(st).await.map(Value::Bool)?,
         "proxy_status" => commands::proxy_status(st).await?,
         "client_status" => commands::client_status(st).await?,
@@ -516,6 +758,10 @@ async fn rpc(
             let p: PathArgs = args(&a)?;
             commands::open_config_path(p.path).await?
         },
+        "save_image" => {
+            let p: SaveImageArgs = args(&a)?;
+            commands::save_image(p.name, p.data).await?
+        },
 
         // ── wallet ──────────────────────────────────────────────────────
         "wallet_deposit_address" => {
@@ -613,6 +859,67 @@ mod tests {
         // "everyone is allowed".
         assert!(!token_matches("", &headers(None)));
         assert!(!token_matches("", &headers(Some(""))));
+        assert!(!cookie_matches("", &cookies("asale_session=")));
+    }
+
+    fn cookies(raw: &str) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(header::COOKIE, raw.parse().unwrap());
+        h
+    }
+
+    /// A browser proves itself with the cookie it was given at the gate, and
+    /// the parse must not be fooled by a neighbouring cookie whose name merely
+    /// contains ours, or by one that only looks like a prefix of the token.
+    #[test]
+    fn the_session_cookie_is_a_credential_in_its_own_right() {
+        assert!(cookie_matches("secret", &cookies("asale_session=secret")));
+        assert!(cookie_matches("secret", &cookies("theme=dark; asale_session=secret; tz=utc")));
+        assert!(!cookie_matches("secret", &cookies("asale_session=wrong")));
+        assert!(!cookie_matches("secret", &cookies("asale_session=sec")));
+        assert!(!cookie_matches("secret", &cookies("xasale_session=secret")));
+        assert!(!cookie_matches("secret", &cookies("theme=dark")));
+    }
+
+    /// The gate's own regression: deleting `?token=…` from the URL you were
+    /// handed used to still serve the whole application. Whatever else changes
+    /// here, a request carrying neither spelling of the token must not be one
+    /// the UI answers with the app.
+    #[test]
+    fn a_url_with_the_token_stripped_off_does_not_reach_the_app() {
+        let ctx_token = "secret";
+        // No query, no cookie — the two ways in, both absent.
+        assert!(query_token(&"/".parse::<Uri>().unwrap()).is_none());
+        assert!(!cookie_matches(ctx_token, &axum::http::HeaderMap::new()));
+    }
+
+    #[test]
+    fn the_tokenized_url_is_recognized_in_the_forms_that_are_handed_out() {
+        let q = |u: &str| query_token(&u.parse::<Uri>().unwrap());
+        assert_eq!(q("/?token=abc").as_deref(), Some("abc"));
+        assert_eq!(q("/settings?token=abc").as_deref(), Some("abc"));
+        // Not the first parameter, and not the only one.
+        assert_eq!(q("/?lang=zh&token=abc").as_deref(), Some("abc"));
+        assert_eq!(q("/?token=abc&lang=zh").as_deref(), Some("abc"));
+        // A fragment never reaches a server, so this is genuinely tokenless
+        // here — the unlock page is what reads that spelling.
+        assert_eq!(q("/#token=abc"), None);
+        assert_eq!(q("/?tokenish=abc"), None);
+        assert_eq!(q("/"), None);
+    }
+
+    /// The cookie is the token's stand-in, so its attributes are the security
+    /// properties: unreadable to scripts, never sent by another site, and not
+    /// permanent.
+    #[test]
+    fn the_session_cookie_carries_the_attributes_that_make_it_safe() {
+        let c = session_cookie("secret");
+        assert!(c.starts_with("asale_session=secret;"), "{c}");
+        assert!(c.contains("HttpOnly"), "{c}");
+        assert!(c.contains("SameSite=Strict"), "{c}");
+        assert!(c.contains(&format!("Max-Age={SESSION_MAX_AGE_SECS}")), "{c}");
+        // `Secure` would make the browser drop it: the daemon speaks http.
+        assert!(!c.contains("Secure"), "{c}");
     }
 
     #[test]

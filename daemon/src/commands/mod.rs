@@ -24,6 +24,7 @@
 //!   [`buy`]           — pointing a local AI CLI at the proxy, and back
 //!   [`records`]       — task records and reconciliation
 //!   [`usage`]         — sold/bought/used rollups and rate-limit windows
+//!   [`share`]         — writing the share card PNG to the user's disk
 //!
 //! The re-exports below keep the flat `commands::login` paths `rpc.rs` uses, so
 //! the split is invisible to callers.
@@ -38,6 +39,7 @@ pub mod records;
 pub mod sell;
 pub mod server_client;
 pub mod settings;
+pub mod share;
 pub mod usage;
 pub mod wallet;
 
@@ -48,6 +50,7 @@ pub use oauth_flow::*;
 pub use records::*;
 pub use sell::*;
 pub use settings::*;
+pub use share::*;
 pub use usage::*;
 pub use wallet::*;
 

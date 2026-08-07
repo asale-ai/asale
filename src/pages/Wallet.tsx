@@ -11,10 +11,13 @@ import {
 } from "../lib";
 import { Card, Skeleton, PageHead, IconAction, Empty } from "../ui";
 import { WalletDialog, type WalletMode } from "../components/WalletDialog";
+import { EarningsShareDialog } from "../components/EarningsShareDialog";
 import { errText } from "../errors";
+import { sitePage } from "../links";
+import { openExternal } from "../shell";
 import {
   IconWallet, IconRefresh, IconDownload, IconArrowRight,
-  IconShield, IconCheck, IconRecords,
+  IconShield, IconCheck, IconRecords, IconShare, IconExternal,
 } from "../icons";
 
 type HistTab = "all" | "deposit" | "withdraw";
@@ -42,7 +45,7 @@ const WITHDRAW_STATUS: Record<number, [string, string]> = {
 };
 
 export function WalletPage() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [w, setW] = useState<Wallet | null>(null);
   const [hist, setHist] = useState<WalletHistory | null>(null);
   const [loading, setLoading] = useState(inTauri);
@@ -51,6 +54,7 @@ export function WalletPage() {
 
   /* Which funding sheet is open; null = none. */
   const [pane, setPane] = useState<WalletMode | null>(null);
+  const [sharing, setSharing] = useState(false);
   const [histTab, setHistTab] = useState<HistTab>("all");
 
   const refresh = useCallback((manual = false) => {
@@ -128,6 +132,11 @@ export function WalletPage() {
             <button className="btn ghost" onClick={() => setPane("withdraw")} disabled={!inTauri}>
               <IconArrowRight />{t("wallet.tabWithdraw")}
             </button>
+            {/* Beside the two money verbs, because this is where the number
+                being shared is already on screen. */}
+            <button className="btn ghost" onClick={() => setSharing(true)} disabled={!inTauri}>
+              <IconShare />{t("share.open")}
+            </button>
           </div>
           <div className="wh-trust">
             <span className="trust-chip"><IconShield />{t("wallet.trustCustody")}</span>
@@ -141,6 +150,7 @@ export function WalletPage() {
             onClose={() => setPane(null)}
             onDone={() => refresh()}
           />
+          {sharing && <EarningsShareDialog onClose={() => setSharing(false)} />}
         </div>
         <div className="wh-side">
           <div className="wh-cell">
@@ -153,6 +163,25 @@ export function WalletPage() {
           </div>
         </div>
       </div>
+
+      {/* ── Invite & earn ──
+          A way out to the website, not a page of its own here: the link, the
+          code, the invitee list and the settlement rules all live there, and a
+          second copy in the desktop shell would be one more thing to keep
+          truthful. It sits under the balance because commission lands in that
+          balance. */}
+      <button
+        type="button"
+        className="linkrow"
+        onClick={() => openExternal(sitePage("referral", i18n.language))}
+      >
+        <span className="lr-ico"><IconShare /></span>
+        <span className="lr-body">
+          <span className="lr-t">{t("wallet.referralTitle")}</span>
+          <span className="lr-d">{t("wallet.referralDesc")}</span>
+        </span>
+        <span className="lr-go"><IconExternal /></span>
+      </button>
 
       {/* ── Deposit / withdrawal history ── */}
       <Card>

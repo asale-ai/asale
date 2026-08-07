@@ -630,7 +630,7 @@ fn print_access(bind: &str) {
         // on the provider's NAT and cannot be read from here.
         match service::lan_ip() {
             Some(ip) => row("from lan", &service::web_url(bind, Some(&ip.to_string()))),
-            None => row("remote", &format!("http://<this-host>:{port}/?token=<token from the URL above>")),
+            None => row("remote", &format!("http://<this-host>:{port}/#token=<token from the URL above>")),
         }
         row("elsewhere", "asale url --host <this machine's public address>");
         println!(
@@ -719,8 +719,12 @@ fn help_topic(topic: &str) -> Option<&'static str> {
     asale url                     print the URL, token included
     asale autostart enable        come back automatically after a reboot
 
-  The token in that URL is the entire authorization. Anyone who has it can read
-  your credentials and spend your balance, so:
+  The token in that URL is the entire authorization: without it a browser gets
+  the service's unlock page and none of the app. A browser that presents it is
+  remembered for a day, after which it asks again — so keep the URL, or the
+  token, somewhere you can get back to.
+
+  Anyone who has that token can read your credentials and spend your balance, so:
 
     - keep the port closed to the internet (firewall, or bind to a VPN address
       with `--bind 10.0.0.5:9700`),

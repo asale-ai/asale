@@ -80,7 +80,7 @@ export function Settings() {
     // The URL that opens this daemon in a browser. In the shell the token comes
     // from the file the shell already read; in a browser we are *on* that URL,
     // so it is rebuilt from the origin plus the token this page authenticates
-    // with — a link without the token loads the app and then 401s every call.
+    // with — a link without the token gets the daemon's unlock page, not the app.
     if (realTauri) {
       shell.webUiUrl()
         .then((u) => setWebUrl(u ?? ""))

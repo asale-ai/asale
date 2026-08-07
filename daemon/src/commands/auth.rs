@@ -87,6 +87,15 @@ pub async fn me_profile(state: &AppState) -> R<Value> {
     authed(state, reqwest::Method::GET, "/api/v1/me/profile", None).await
 }
 
+/// This account's invite code, link and referral numbers.
+///
+/// A straight passthrough, and the only reason the client needs it: the share
+/// card carries the invite link as a QR, and the code is minted server-side on
+/// first read — so there is nothing local to derive it from.
+pub async fn me_referral(state: &AppState) -> R<Value> {
+    authed(state, reqwest::Method::GET, "/api/v1/me/referral", None).await
+}
+
 /// Update profile fields; only provided fields are sent.
 pub async fn update_profile(
     state: &AppState,

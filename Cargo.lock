@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "asale"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "asale-daemon",
  "reqwest 0.12.28",
@@ -95,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "asale-cli"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "asale-client-core"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "asale-protocol",
@@ -126,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "asale-daemon"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "asale-client-core",
@@ -146,6 +146,7 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "toml_edit 0.22.27",
+ "tower",
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
@@ -154,7 +155,7 @@ dependencies = [
 
 [[package]]
 name = "asale-protocol"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "serde",
  "serde_json",

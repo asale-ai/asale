@@ -313,6 +313,8 @@
     "available": "可用",
     "frozen": "冻结（预授权）",
     "payable": "待结算（收益）",
+    "referralTitle": "邀请返佣",
+    "referralDesc": "在网站上获取你的邀请链接：好友注册即得体验金，其交易手续费的分成会结算进这个钱包。",
     "signInFirst": "请先在「账户」中登录。",
     "gettingAddress": "请求中…",
     "withdrawAddress": "提现地址",
@@ -422,6 +424,71 @@
     "wdRejected": "已拒绝",
     "unknownStatus": "未知",
     "method_sol_usdt": "Solana"
+  },
+  "share": {
+    "open": "分享收益",
+    "dialogTitle": "分享收益卡片",
+    "close": "关闭",
+    "cardAlt": "收益卡片",
+    "modeSell": "我的收益",
+    "modeReferral": "邀请返佣",
+    "period_day": "今日",
+    "period_week": "近 7 天",
+    "period_month": "近 30 天",
+    "period_all": "累计",
+    "shape_wide": "横版",
+    "shape_tall": "竖版",
+    "shapeHint_wide": "X、Telegram、Facebook、LinkedIn 会把链接展开成 1.91:1 的预览图，横版正好填满。",
+    "shapeHint_tall": "小红书、朋友圈、Instagram 是直接发图，横版在信息流里会被压成一条。",
+    "copyText": "复制文案",
+    "copyLink": "复制链接",
+    "saveImage": "保存图片",
+    "systemShare": "系统分享",
+    "copiedText": "文案已复制",
+    "copiedLink": "链接已复制",
+    "copyFailed": "剪贴板被拒绝，请手动选中复制。",
+    "savedTo": "已保存到 {{path}}",
+    "saveFailed": "图片保存失败。",
+    "manualDone": "图片已保存、文案已复制，去{{app}}粘贴就行。",
+    "manualCopied": "文案已复制。图片还在生成，稍后再点一次“保存图片”。",
+    "qrTitle": "用微信扫码打开",
+    "qrHint": "微信没有桌面端分享入口。扫码在手机上打开链接，再转发给好友或发到朋友圈。",
+    "qrAlt": "邀请链接二维码",
+    "p": {
+      "x": "X",
+      "facebook": "Facebook",
+      "linkedin": "领英",
+      "reddit": "Reddit",
+      "telegram": "Telegram",
+      "whatsapp": "WhatsApp",
+      "threads": "Threads",
+      "line": "LINE",
+      "hackernews": "Hacker News",
+      "wechat": "微信",
+      "weibo": "微博",
+      "qq": "QQ",
+      "qzone": "QQ 空间",
+      "xiaohongshu": "小红书",
+      "douban": "豆瓣"
+    },
+    "card": {
+      "site": "asale.ai",
+      "codeHint": "邀请码",
+      "tagline": "闲置的 AI 订阅额度，也能产生收益",
+      "kickerSell": "共享额度收益",
+      "kickerReferral": "邀请返佣累计",
+      "periodAll": "累计",
+      "statTokens": "已共享 Token",
+      "statCalls": "成交次数",
+      "statInvited": "已邀请",
+      "statActivated": "已验证",
+      "statPending": "待结算"
+    },
+    "text": {
+      "title": "闲置的 AI 订阅额度，也能产生收益",
+      "body": "我在用 Asale——用不完的订阅额度共享出去换成 USDT，自己额度用完时也能用别人的。用我的链接注册可领 {{bonus}} USDT 体验金。",
+      "bodySell": "我在 Asale 上把用不完的订阅额度共享出去，{{period}}已经赚了 {{amount}} USDT。用我的链接注册也可以试试。"
+    }
   },
   "records": {
     "title": "记录",
@@ -921,6 +988,10 @@
       "expired": "{{provider}} 验证码在批准前已过期。",
       "declined": "{{provider}} 登录被拒绝。",
       "unsupportedProvider": "该服务不使用设备码登录（仅 Kimi 与 Grok 支持）。"
+    },
+    "share": {
+      "badImage": "这不是一张有效的收益卡片图片。",
+      "saveFailed": "图片写入磁盘失败。"
     }
   },
   "tray": {

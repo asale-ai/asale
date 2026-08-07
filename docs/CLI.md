@@ -34,12 +34,15 @@ asale autostart enable     # come back automatically after a reboot
 Open that URL in any browser and you have the full client: sign in, connect
 subscriptions, turn the sell switches on, watch the wallet.
 
-> **The token in that URL is the entire authorization.** Anyone holding it can
-> read your credentials and spend your balance. Keep the port off the public
-> internet — a firewall, a VPN address (`--bind 10.0.0.5:9700`), or a reverse
-> proxy with TLS in front of it. On plain HTTP the token travels in the clear.
-> To invalidate every URL you have handed out, delete `~/.asale/daemon.token`
-> and restart the service.
+> **The token in that URL is the entire authorization.** Delete it from the URL
+> and the service answers with its unlock page and nothing else — no app, no
+> data. A browser that presents it is remembered for a day and then asked again.
+>
+> Anyone holding that token can read your credentials and spend your balance.
+> Keep the port off the public internet — a firewall, a VPN address
+> (`--bind 10.0.0.5:9700`), or a reverse proxy with TLS in front of it. On plain
+> HTTP the token travels in the clear. To invalidate every URL you have handed
+> out, delete `~/.asale/daemon.token` and restart the service.
 
 Being reachable and being *reached* are different: the host firewall and, on a
 cloud VM, the provider's security group still have to allow the port. A cloud

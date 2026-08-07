@@ -4,7 +4,7 @@ import { invoke, inTauri, isDaemonDown, waitForDaemon, type Profile } from "./li
 import {
   IconDashboard, IconPublish, IconConsume, IconWallet,
   IconRecords, IconUsage, IconGauge, IconAccount, IconSettings,
-  IconGlobe, IconGithub,
+  IconGlobe, IconGithub, IconShare,
 } from "./icons";
 import { openExternal } from "./shell";
 import { SITE_URL, REPO_URL } from "./links";
@@ -22,6 +22,11 @@ const Usage = lazy(() => import("./pages/Usage").then((m) => ({ default: m.Usage
 const Limits = lazy(() => import("./pages/Limits").then((m) => ({ default: m.Limits })));
 const Account = lazy(() => import("./pages/Account").then((m) => ({ default: m.Account })));
 const Settings = lazy(() => import("./pages/Settings").then((m) => ({ default: m.Settings })));
+// Lazy for the same reason the pages are: the sheet carries fifteen brand
+// marks and a QR encoder, and most sessions never open it.
+const EarningsShareDialog = lazy(() =>
+  import("./components/EarningsShareDialog").then((m) => ({ default: m.EarningsShareDialog })),
+);
 
 type Tab = "dashboard" | "publish" | "consume" | "usage" | "limits" | "wallet" | "records" | "account" | "settings";
 
@@ -60,6 +65,7 @@ export function App() {
   // Pages mount only once the daemon has answered — otherwise every one of
   // them renders its "daemon down" / "signed out" branch for a second first.
   const [booted, setBooted] = useState(false);
+  const [sharing, setSharing] = useState(false);
 
   useEffect(() => {
     if (!inTauri) { setBooted(true); return; }
@@ -192,10 +198,27 @@ export function App() {
               >
                 <IconGithub />
               </button>
+              {/* In the top bar rather than on the overview, because sharing is
+                  not one page's business: the numbers on the card come from the
+                  wallet and the ledger, and the reader may be on either. */}
+              <button
+                type="button"
+                className="iconlink"
+                onClick={() => setSharing(true)}
+                title={t("share.open")}
+                aria-label={t("share.open")}
+              >
+                <IconShare />
+              </button>
             </div>
             <StatusWidget />
           </div>
         </div>
+        {sharing && (
+          <Suspense fallback={null}>
+            <EarningsShareDialog onClose={() => setSharing(false)} />
+          </Suspense>
+        )}
         <div className="main-inner fade-in" key={booted ? tab : "boot"}>
           {/* Above the page, and on every page: what it blocks is driven from
               several of them, and from the user's terminal besides. */}
