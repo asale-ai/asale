@@ -17,7 +17,10 @@
 //!                       through its `authed` helper
 //!   [`auth`]          — register / sign in / sign out / profile
 //!   [`oauth_flow`]    — the two browser OAuth flows
-//!   [`wallet`]        — balance, deposits, withdrawals, consumer API keys
+//!   [`wallet`]        — balance, deposits, withdrawals, the cached consumer key
+//!   [`apikeys`]       — the consumer API key list: create/rename/expire/
+//!                       enable/disable/default, and adopting one for the
+//!                       tools this machine buys through
 //!   [`settings`]      — daemon identity, upstream proxy, consume mode
 //!   [`sell`]          — publishing switch, devices, publisher policy
 //!   [`accounts`]      — subscription discovery/import + per-account sell rules
@@ -32,6 +35,7 @@
 use serde_json::{json, Value};
 
 pub mod accounts;
+pub mod apikeys;
 pub mod auth;
 pub mod buy;
 pub mod oauth_flow;
@@ -44,6 +48,7 @@ pub mod usage;
 pub mod wallet;
 
 pub use accounts::*;
+pub use apikeys::*;
 pub use auth::*;
 pub use buy::*;
 pub use oauth_flow::*;

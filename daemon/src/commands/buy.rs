@@ -479,6 +479,16 @@ pub(crate) async fn ensure_consumer_key(state: &AppState) -> R<String> {
         *state.asale_key.write().await = Some(k.clone());
         return Ok(k);
     }
+    // Nothing cached. Take the account's default key before inventing a new one:
+    // that is what makes it the *default*, and it is why a second machine does
+    // not silently add a fifth key to the owner's list. Best-effort — a server
+    // that cannot answer falls through to minting, which is where this used to
+    // go unconditionally.
+    match super::apikeys::adopt_default(state).await {
+        Ok(Some(k)) => return Ok(k),
+        Ok(None) => {}
+        Err(e) => tracing::debug!("could not adopt the account's default api key: {e}"),
+    }
     mint_consumer_key(state).await
 }
 

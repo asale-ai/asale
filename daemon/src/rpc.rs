@@ -421,6 +421,15 @@ fn args<T: serde::de::DeserializeOwned>(v: &Value) -> Result<T, commands::CmdErr
     })
 }
 
+/// Tell "field absent" from "field present and null" — see `KeyUpdateArgs`.
+fn double_option<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    serde::Deserialize::deserialize(d).map(Some)
+}
+
 macro_rules! rpc_args {
     ($($name:ident { $($field:tt)* })*) => {
         $(
@@ -441,7 +450,6 @@ rpc_args! {
     // requires it, and it is the only moment the platform can learn one.
     RegisterArgs   { email: String, password: String, #[serde(default)] region: String }
     EmailArgs      { email: String }
-    LabelArgs      { #[serde(default)] label: Option<String> }
     ProviderArgs   { provider: String }
     OauthLoginArgs { provider: String, #[serde(default, alias = "open_local")] open_local: Option<bool> }
     OauthResultArgs{ #[serde(alias = "flow_id")] flow_id: String }
@@ -468,6 +476,29 @@ rpc_args! {
     GetSettingArgs { key: String }
     SetSettingArgs { key: String, value: String }
     AccountArgs    { provider: String, #[serde(alias = "account_id")] account_id: String }
+    // The consumer API key list (`commands::apikeys`). `applyToTools` is the
+    // answer to the prompt the UI shows before it moves the default: rewrite
+    // the configs of the CLIs that are buying right now, or leave them holding
+    // the key they have.
+    KeyCreateArgs  {
+        #[serde(default)] label: Option<String>,
+        #[serde(default, alias = "expires_in_days")] expires_in_days: Option<i64>,
+        #[serde(default, alias = "set_default")] set_default: Option<bool>,
+        #[serde(default, alias = "apply_to_tools")] apply_to_tools: Option<bool>,
+    }
+    // `expiresInDays` is three-valued, which `Option<Option<_>>` plus
+    // `deserialize_with` is the only way to express: absent leaves the expiry
+    // alone, an explicit `null` clears it, a number re-dates it from now.
+    KeyUpdateArgs  {
+        id: i64,
+        #[serde(default)] label: Option<String>,
+        #[serde(default)] enabled: Option<bool>,
+        #[serde(default, alias = "expires_in_days", deserialize_with = "double_option")]
+        expires_in_days: Option<Option<i64>>,
+        #[serde(default, alias = "set_default")] set_default: Option<bool>,
+        #[serde(default, alias = "apply_to_tools")] apply_to_tools: Option<bool>,
+    }
+    KeyIdArgs      { id: i64 }
     ApiKeyArgs     {
         provider: String,
         #[serde(alias = "api_key")] api_key: String,
@@ -637,9 +668,45 @@ async fn rpc(
             let p: ProviderArgs = args(&a)?;
             commands::unlink_oauth(st, p.provider).await?
         },
+        // ── consumer API keys ───────────────────────────────────────────
+        "list_api_keys" => commands::list_api_keys(st).await?,
         "create_api_key" => {
-            let p: LabelArgs = args(&a)?;
-            commands::create_api_key(st, p.label.unwrap_or_else(|| "asale".into())).await?
+            let p: KeyCreateArgs = args(&a)?;
+            commands::create_api_key_ex(
+                st,
+                p.label.unwrap_or_else(|| "asale".into()),
+                p.expires_in_days,
+                p.set_default.unwrap_or(false),
+                p.apply_to_tools.unwrap_or(false),
+            )
+            .await?
+        },
+        "update_api_key" => {
+            let p: KeyUpdateArgs = args(&a)?;
+            commands::update_api_key(
+                st,
+                p.id,
+                p.label,
+                p.enabled,
+                p.expires_in_days,
+                p.set_default,
+                p.apply_to_tools.unwrap_or(false),
+            )
+            .await?
+        },
+        "delete_api_key" => {
+            let p: KeyIdArgs = args(&a)?;
+            commands::delete_api_key(st, p.id).await?
+        },
+        "reveal_api_key" => {
+            let p: KeyIdArgs = args(&a)?;
+            commands::reveal_api_key(st, p.id).await?
+        },
+        // Point this machine's buying tools at one key without changing which
+        // key the account calls its default.
+        "apply_api_key" => {
+            let p: KeyIdArgs = args(&a)?;
+            commands::apply_api_key(st, p.id).await?
         },
 
         // ── browser OAuth ───────────────────────────────────────────────
@@ -966,6 +1033,36 @@ mod tests {
             args(&json!({"provider": "claude", "account_id": "a", "enabled": true, "daily_limit": 9})).unwrap();
         assert_eq!(camel.daily_limit, Some(9));
         assert_eq!(snake.daily_limit, Some(9));
+
+        let camel: KeyCreateArgs =
+            args(&json!({"label": "ci", "expiresInDays": 30, "applyToTools": true})).unwrap();
+        let snake: KeyCreateArgs =
+            args(&json!({"label": "ci", "expires_in_days": 30, "apply_to_tools": true})).unwrap();
+        assert_eq!((camel.expires_in_days, camel.apply_to_tools), (Some(30), Some(true)));
+        assert_eq!((snake.expires_in_days, snake.apply_to_tools), (Some(30), Some(true)));
+    }
+
+    /// An API key's expiry is three-valued on the wire, and the whole point of
+    /// `double_option` is that the middle value survives the parse: the page
+    /// sends one field at a time, so "leave the expiry alone" and "clear it"
+    /// have to arrive as different things.
+    #[test]
+    fn an_absent_key_expiry_is_not_a_null_one() {
+        let leave: KeyUpdateArgs = args(&json!({"id": 1, "label": "x"})).unwrap();
+        assert_eq!(leave.expires_in_days, None, "absent = leave it alone");
+
+        let clear: KeyUpdateArgs = args(&json!({"id": 1, "expiresInDays": null})).unwrap();
+        assert_eq!(clear.expires_in_days, Some(None), "null = never expires");
+
+        let set: KeyUpdateArgs = args(&json!({"id": 1, "expires_in_days": 90})).unwrap();
+        assert_eq!(set.expires_in_days, Some(Some(90)));
+
+        // The frontend spells this one `setDefault`; the daemon's own probes
+        // and curl-by-hand use the snake form.
+        let camel: KeyUpdateArgs = args(&json!({"id": 7, "setDefault": true})).unwrap();
+        let snake: KeyUpdateArgs = args(&json!({"id": 7, "set_default": true})).unwrap();
+        assert_eq!((camel.id, camel.set_default), (7, Some(true)));
+        assert_eq!((snake.id, snake.set_default), (7, Some(true)));
     }
 
     #[test]

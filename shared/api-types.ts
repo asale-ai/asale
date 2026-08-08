@@ -309,6 +309,65 @@ export interface AppSetting {
   updated_by: number | null;
 }
 
+// ── API keys ────────────────────────────────────────────────────────
+
+/**
+ * One row of `GET /api/v1/apikeys` (`asale-server/src/api/apikeys.rs`).
+ *
+ * The key itself is never in here. `key_preview` is the masked form the list
+ * shows; the plaintext comes back only from `POST /apikeys` (once, at creation)
+ * and from `POST /apikeys/:id/reveal`.
+ */
+export interface ApiKeyRow {
+  id: number;
+  /** The owner-chosen name. May be empty. */
+  label: string;
+  /** e.g. `sk-asale-E1T3••••nwo4`. */
+  key_preview: string;
+  /** Raw column: 1 active, 2 disabled. Prefer `enabled`. */
+  status: number;
+  /** The owner-facing on/off switch. */
+  enabled: boolean;
+  /** The key the desktop app hands to the tools it buys through. */
+  is_default: boolean;
+  /** RFC 3339, or null for "never expires". */
+  expires_at: string | null;
+  /** Computed server-side against the server clock, not the browser's. */
+  expired: boolean;
+  /** `enabled && !expired` — what actually authenticates. */
+  usable: boolean;
+  created_at: string;
+  /** False for keys minted before the sealed copy existed: those cannot be
+   *  shown again, only replaced. */
+  revealable: boolean;
+}
+
+/** `GET /api/v1/apikeys`. */
+export interface ApiKeyList {
+  keys: ApiKeyRow[];
+  /** How many keys one account may hold, so the UI can say so before the 409. */
+  max_keys: number;
+}
+
+/** `POST /api/v1/apikeys` — the one moment the plaintext is returned. */
+export interface ApiKeyCreated {
+  id: number;
+  key: string;
+  label: string;
+  key_preview: string;
+  is_default: boolean;
+  expires_at: string | null;
+}
+
+/** `PATCH /api/v1/apikeys/:id`. */
+export interface ApiKeyUpdated {
+  key: ApiKeyRow;
+  /** The default moved onto this key. Whatever tools are buying through this
+   *  account are now holding the wrong credential — the desktop client offers
+   *  to rewrite them, the web console can only say so. */
+  default_moved: boolean;
+}
+
 // ── errors ──────────────────────────────────────────────────────────
 
 /**

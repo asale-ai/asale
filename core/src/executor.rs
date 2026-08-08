@@ -202,6 +202,20 @@ pub fn quota_headers(provider: &str, headers: &reqwest::header::HeaderMap) -> BT
 /// gateway said on this connection. It is not optional: a device with no way to
 /// check a grant does not serve at all, so this function is only reachable once
 /// a verifier exists.
+/// Serve one relayed call.
+///
+/// `cancel` fires when the gateway sends `task.cancel` — its consumer went away
+/// — or when it is dropped, which happens when this session ends. Either way
+/// there is nobody left to receive the answer, so the upstream call is dropped
+/// where it stands: every token past that point would be this device's own
+/// subscription quota spent on output nobody reads, and the gateway bills only
+/// what reached it before the buyer left, so it would not even be paid for.
+///
+/// Cooperative rather than an `abort()` from the caller, because the pool lease
+/// has to be reported back to release its concurrency slot (see
+/// [`TokenProvider::report`]) and the local metering row is what the seller's own
+/// quota accounting is built from. A killed task leaks the first and loses the
+/// second.
 pub async fn execute(
     http: &reqwest::Client,
     tokens: &dyn TokenProvider,
@@ -209,6 +223,7 @@ pub async fn execute(
     out: &mpsc::UnboundedSender<Envelope>,
     records: Option<&dyn RecordSink>,
     quota: &QuotaVerifier,
+    mut cancel: tokio::sync::oneshot::Receiver<()>,
 ) {
     let task_id = req.task_id.clone();
 
@@ -374,7 +389,17 @@ pub async fn execute(
     let shape = body_shape(&body);
     builder = builder.body(body);
 
-    let resp = match builder.send().await {
+    let send = tokio::select! {
+        r = builder.send() => r,
+        // Cancelled before the upstream even answered: drop the request future
+        // and close the connection, which is what stops the generation.
+        _ = &mut cancel => {
+            tracing::info!(task = %task_id, "consumer left before the upstream answered; abandoning the call");
+            finish_canceled(tokens, records, &provider, &lease.account_id, &model, &task_id, &Usage::default()).await;
+            return;
+        }
+    };
+    let resp = match send {
         Ok(r) => r,
         Err(e) => {
             tokens.report(&provider, &lease.account_id, &model, TaskOutcome::ServerError);
@@ -448,7 +473,18 @@ pub async fn execute(
         .is_some_and(|ct| ct.trim_start().starts_with("text/event-stream"));
 
     if !req.stream && !upstream_is_sse {
-        let body = match resp.bytes().await {
+        // The whole generation happens inside this one await for a buffered
+        // upstream, so it is the one that matters most to be able to walk away
+        // from.
+        let read = tokio::select! {
+            b = resp.bytes() => b,
+            _ = &mut cancel => {
+                tracing::info!(task = %task_id, "consumer left while the upstream was answering; abandoning the call");
+                finish_canceled(tokens, records, &provider, &lease.account_id, &model, &task_id, &Usage::default()).await;
+                return;
+            }
+        };
+        let body = match read {
             Ok(b) => b,
             Err(e) => {
                 tokens.report(&provider, &lease.account_id, &model, TaskOutcome::ServerError);
@@ -500,7 +536,22 @@ pub async fn execute(
     let mut scan = UsageScanner::new();
     let mut budget_hit = false;
 
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let next = tokio::select! {
+            c = stream.next() => c,
+            // Stop mid-answer. What was already scanned is reported to the pool
+            // below, so the quota this call really did spend still decays.
+            _ = &mut cancel => {
+                let usage = scan.flush();
+                tracing::info!(
+                    task = %task_id, out_tokens = usage.output_tokens,
+                    "consumer left mid-stream; abandoning the rest of the answer"
+                );
+                finish_canceled(tokens, records, &provider, &lease.account_id, &model, &task_id, &usage).await;
+                return;
+            }
+        };
+        let Some(chunk) = next else { break };
         let bytes = match chunk {
             Ok(b) => b,
             Err(e) => {
@@ -558,6 +609,35 @@ pub async fn execute(
     if let Some(r) = records {
         let status_label = if budget_hit { "budget" } else { "ok" };
         r.record(&task_id, &provider, &lease.account_id, &model, &usage, status_label).await;
+    }
+}
+
+/// Close the books on a call the gateway told us to abandon.
+///
+/// No frame goes back: the gateway closed the task's channel the moment it gave
+/// up on the consumer, so a `stream_end` would be routed to nothing. What does
+/// have to happen is local — release the pool lease (its concurrency slot is held
+/// until an outcome is reported) with the quota this call really did spend, and
+/// keep the metering row, because the seller's own usage and sell-limit
+/// accounting is built from those rows and this call consumed just as much of
+/// the subscription as one that finished.
+async fn finish_canceled(
+    tokens: &dyn TokenProvider,
+    records: Option<&dyn RecordSink>,
+    provider: &str,
+    account_id: &str,
+    model: &str,
+    task_id: &str,
+    usage: &Usage,
+) {
+    tokens.report(
+        provider,
+        account_id,
+        model,
+        TaskOutcome::Success { tokens_used: (usage.input_tokens + usage.output_tokens).max(0) as u64 },
+    );
+    if let Some(r) = records {
+        r.record(task_id, provider, account_id, model, usage, "canceled").await;
     }
 }
 
@@ -1040,6 +1120,18 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":13,"outpu
         ed25519_dalek::SigningKey::from_bytes(&[3u8; 32])
     }
 
+    /// A cancel channel that never fires.
+    ///
+    /// The sender is leaked deliberately: dropping it would resolve the receiver
+    /// immediately, and `execute` reads that as "the consumer is gone" — so a
+    /// dropped sender here would cancel every call these tests make before it
+    /// served anything.
+    fn never_canceled() -> tokio::sync::oneshot::Receiver<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        std::mem::forget(tx);
+        rx
+    }
+
     fn test_verifier() -> crate::security::QuotaVerifier {
         crate::security::QuotaVerifier::from_pubkey_b64(&B64.encode(
             test_gateway_key().verifying_key().to_bytes(),
@@ -1086,6 +1178,75 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":13,"outpu
         v
     }
 
+    /// An SSE upstream that sends one delta and then keeps the socket open
+    /// forever — a model still generating. Resolves its second return value once
+    /// that delta is on the wire, so a test can act at a known point instead of
+    /// guessing at a sleep.
+    async fn spawn_stalled_sse() -> (String, tokio::sync::oneshot::Receiver<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (wrote_tx, wrote_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                let frame = "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"half an answer\"}}\n\n";
+                let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(format!("{:x}\r\n{frame}\r\n", frame.len()).as_bytes()).await;
+                let _ = sock.flush().await;
+                let _ = wrote_tx.send(());
+                // Hold the connection open: the stream is still "in progress",
+                // which is the state a cancellation has to be able to interrupt.
+                std::future::pending::<()>().await;
+            }
+        });
+        (format!("http://127.0.0.1:{port}/"), wrote_rx)
+    }
+
+    /// A call the gateway cancels mid-answer stops generating, keeps its metering
+    /// row (the subscription quota really was spent), and sends no `stream_end` —
+    /// the gateway closed that task's channel when it gave up on the consumer, and
+    /// an end frame would claim a completion that never happened.
+    #[tokio::test]
+    async fn a_canceled_call_stops_mid_stream_and_is_recorded_as_canceled() {
+        let (url, wrote) = spawn_stalled_sse().await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let rows = Arc::new(Mutex::new(Vec::new()));
+        let sink = CapturingSink { rows: rows.clone() };
+
+        tokio::spawn(async move {
+            let _ = wrote.await;
+            // The delta is on the wire; give the relay a moment to forward it
+            // before pulling the rug, so the cancellation lands mid-stream rather
+            // than before the first chunk.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = cancel_tx.send(());
+        });
+
+        // Returns at all only because the cancellation is honoured: the upstream
+        // never ends this stream.
+        execute(
+            &crate::http::plain(),
+            &StaticToken(Some("k".into())),
+            req(&url, "claude-sonnet", 0),
+            &tx,
+            Some(&sink),
+            &test_verifier(),
+            cancel_rx,
+        )
+        .await;
+
+        let kinds: Vec<String> = drain(&mut rx).into_iter().map(|e| e.msg_type).collect();
+        assert!(kinds.contains(&protocol::T_STREAM_START.to_string()), "frames: {kinds:?}");
+        assert!(!kinds.iter().any(|k| k == protocol::T_STREAM_END), "no end frame: {kinds:?}");
+        assert!(!kinds.iter().any(|k| k == protocol::T_ERROR), "a cancellation is not an error: {kinds:?}");
+        let rows = rows.lock().await;
+        assert_eq!(rows.len(), 1, "the call is still metered locally");
+        assert_eq!(rows[0].1, "canceled");
+    }
+
     /// A one-shot raw HTTP server that returns a fixed response body.
     async fn spawn_http(response: &'static str) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1106,7 +1267,7 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":13,"outpu
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut r = req("http://127.0.0.1:1/", "claude-x", 0);
         r.quota_sig = "".into();
-        execute(&crate::http::plain(), &StaticToken(Some("k".into())), r, &tx, None, &test_verifier()).await;
+        execute(&crate::http::plain(), &StaticToken(Some("k".into())), r, &tx, None, &test_verifier(), never_canceled()).await;
         let frames = drain(&mut rx);
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].payload["code"], "QUOTA_SIG_INVALID");
@@ -1134,7 +1295,7 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":13,"outpu
         );
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        execute(&crate::http::plain(), &StaticToken(Some("k".into())), r, &tx, None, &verifier).await;
+        execute(&crate::http::plain(), &StaticToken(Some("k".into())), r, &tx, None, &verifier, never_canceled()).await;
         let frames = drain(&mut rx);
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].payload["code"], "QUOTA_SIG_INVALID");
@@ -1162,7 +1323,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
         );
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        execute(&crate::http::plain(), &StaticToken(Some("k".into())), r, &tx, None, &verifier).await;
+        execute(&crate::http::plain(), &StaticToken(Some("k".into())), r, &tx, None, &verifier, never_canceled()).await;
         let frames = drain(&mut rx);
         assert_eq!(frames.first().unwrap().msg_type, protocol::T_STREAM_START);
         assert!(frames.iter().any(|f| f.msg_type == protocol::T_STREAM_END));
@@ -1173,7 +1334,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
         let (tx, mut rx) = mpsc::unbounded_channel();
         let rows = Arc::new(Mutex::new(Vec::new()));
         let sink = CapturingSink { rows: rows.clone() };
-        execute(&crate::http::plain(), &StaticToken(None), req("http://127.0.0.1:1/", "claude-x", 0), &tx, Some(&sink), &test_verifier()).await;
+        execute(&crate::http::plain(), &StaticToken(None), req("http://127.0.0.1:1/", "claude-x", 0), &tx, Some(&sink), &test_verifier(), never_canceled()).await;
         let frames = drain(&mut rx);
         assert_eq!(frames[0].payload["code"], "TOKEN_EXPIRED");
         let rows = rows.lock().await;
@@ -1192,7 +1353,7 @@ data: [DONE]\n\n";
         let (tx, mut rx) = mpsc::unbounded_channel();
         let rows = Arc::new(Mutex::new(Vec::new()));
         let sink = CapturingSink { rows: rows.clone() };
-        execute(&crate::http::plain(), &StaticToken(Some("k".into())), req(&url, "claude-sonnet", 0), &tx, Some(&sink), &test_verifier()).await;
+        execute(&crate::http::plain(), &StaticToken(Some("k".into())), req(&url, "claude-sonnet", 0), &tx, Some(&sink), &test_verifier(), never_canceled()).await;
         let frames = drain(&mut rx);
         assert_eq!(frames.first().unwrap().msg_type, protocol::T_STREAM_START);
         let end = frames.iter().find(|f| f.msg_type == protocol::T_STREAM_END).expect("stream_end");
@@ -1207,7 +1368,7 @@ data: [DONE]\n\n";
 data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":500}}\n\n";
         let url = spawn_http(sse).await;
         let (tx, mut rx) = mpsc::unbounded_channel();
-        execute(&crate::http::plain(), &StaticToken(Some("k".into())), req(&url, "claude", 100), &tx, None, &test_verifier()).await;
+        execute(&crate::http::plain(), &StaticToken(Some("k".into())), req(&url, "claude", 100), &tx, None, &test_verifier(), never_canceled()).await;
         let frames = drain(&mut rx);
         assert!(frames.iter().any(|f| f.payload["code"] == "BUDGET_EXCEEDED"));
     }
@@ -1239,7 +1400,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":500}}\n\n";
         let (tx, _rx) = mpsc::unbounded_channel();
         let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let tok = ReportingToken { outcomes: outcomes.clone() };
-        execute(&crate::http::plain(), &tok, req(&url, "claude", 0), &tx, None, &test_verifier()).await;
+        execute(&crate::http::plain(), &tok, req(&url, "claude", 0), &tx, None, &test_verifier(), never_canceled()).await;
         let got = outcomes.lock().unwrap().clone();
         assert_eq!(got.len(), 1);
         match got[0] {
@@ -1257,7 +1418,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
         let (tx, _rx) = mpsc::unbounded_channel();
         let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let tok = ReportingToken { outcomes: outcomes.clone() };
-        execute(&crate::http::plain(), &tok, req(&url, "claude", 0), &tx, None, &test_verifier()).await;
+        execute(&crate::http::plain(), &tok, req(&url, "claude", 0), &tx, None, &test_verifier(), never_canceled()).await;
         let got = outcomes.lock().unwrap().clone();
         assert_eq!(got, vec![TaskOutcome::Success { tokens_used: 18 }]);
     }
@@ -1326,7 +1487,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
 
         let (tx, _rx) = mpsc::unbounded_channel();
         let url = format!("http://127.0.0.1:{port}/");
-        execute(&crate::http::plain(), &StaticToken(Some("k".into())), req(&url, "claude-opus-5", 0), &tx, None, &test_verifier())
+        execute(&crate::http::plain(), &StaticToken(Some("k".into())), req(&url, "claude-opus-5", 0), &tx, None, &test_verifier(), never_canceled())
             .await;
         let _ = server.await;
 
@@ -1409,7 +1570,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
         let (tx, _rx) = mpsc::unbounded_channel();
         let url = format!("http://127.0.0.1:{port}/");
         let tokens = CodexTokenNoStoredId(chatgpt_jwt("acc-from-jwt"));
-        execute(&crate::http::plain(), &tokens, codex_req(&url), &tx, None, &test_verifier()).await;
+        execute(&crate::http::plain(), &tokens, codex_req(&url), &tx, None, &test_verifier(), never_canceled()).await;
         let _ = server.await;
 
         let raw = seen.lock().unwrap().to_lowercase();
@@ -1453,7 +1614,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
 
         let (tx, _rx) = mpsc::unbounded_channel();
         let url = format!("http://127.0.0.1:{port}/");
-        execute(&crate::http::plain(), &Both(chatgpt_jwt("acc-from-jwt")), codex_req(&url), &tx, None, &test_verifier())
+        execute(&crate::http::plain(), &Both(chatgpt_jwt("acc-from-jwt")), codex_req(&url), &tx, None, &test_verifier(), never_canceled())
             .await;
         let _ = server.await;
 
@@ -1484,7 +1645,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
 
         let (tx, _rx) = mpsc::unbounded_channel();
         let url = format!("http://127.0.0.1:{port}/");
-        execute(&crate::http::plain(), &CodexToken(Some("acc-1")), codex_req(&url), &tx, None, &test_verifier()).await;
+        execute(&crate::http::plain(), &CodexToken(Some("acc-1")), codex_req(&url), &tx, None, &test_verifier(), never_canceled()).await;
         let _ = server.await;
 
         let raw = seen.lock().unwrap().to_lowercase();
@@ -1537,7 +1698,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
     async fn codex_without_an_account_id_fails_before_the_call() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         // Port 1 would fail loudly if the request were ever sent.
-        execute(&crate::http::plain(), &CodexToken(None), codex_req("http://127.0.0.1:1/"), &tx, None, &test_verifier())
+        execute(&crate::http::plain(), &CodexToken(None), codex_req("http://127.0.0.1:1/"), &tx, None, &test_verifier(), never_canceled())
             .await;
         let frames = drain(&mut rx);
         assert_eq!(frames[0].payload["code"], "TOKEN_EXPIRED");
@@ -1549,7 +1710,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
     async fn upstream_4xx_reports_error() {
         let url = spawn_http("HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
         let (tx, mut rx) = mpsc::unbounded_channel();
-        execute(&crate::http::plain(), &StaticToken(Some("k".into())), req(&url, "claude", 0), &tx, None, &test_verifier()).await;
+        execute(&crate::http::plain(), &StaticToken(Some("k".into())), req(&url, "claude", 0), &tx, None, &test_verifier(), never_canceled()).await;
         let frames = drain(&mut rx);
         let e = frames.iter().find(|f| f.msg_type == protocol::T_ERROR).unwrap();
         assert_eq!(e.payload["code"], "UPSTREAM_4XX");

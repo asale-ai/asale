@@ -566,6 +566,12 @@ async fn run_session(
 
     // Serving a lease means calling the provider upstream: proxy-aware client.
     let http = crate::http::upstream();
+    // Cancel handles for the calls this session is currently serving, so a
+    // `task.cancel` can reach the one task it names. Dropped with the session,
+    // which cancels whatever is still running — correct, because a task whose
+    // socket is gone has no way to deliver its answer, and continuing to generate
+    // one only spends the user's own subscription quota.
+    let in_flight: InFlight = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let mut was_online = false;
     // The key this build pins, resolved before the socket was opened. The
     // gateway's own `quota_pubkey` is compared against it below but never
@@ -622,12 +628,12 @@ async fn run_session(
                                 }
                                 protocol::T_HTTP_REQUEST => {
                                     if let Ok(reqp) = serde_json::from_value::<HttpRequestPayload>(env.payload) {
-                                        spawn_execute(&http, deps, reqp, &out_tx, quota.clone());
+                                        spawn_execute(&http, deps, reqp, &out_tx, quota.clone(), &in_flight);
                                     }
                                 }
                                 protocol::T_CONTROL => {
                                     if let Ok(ctrl) = serde_json::from_value::<ControlPayload>(env.payload.clone()) {
-                                        match handle_control(&ctrl, state_tx, deps.lanes.as_deref()) {
+                                        match handle_control(&ctrl, state_tx, deps.lanes.as_deref(), &in_flight) {
                                             ControlResult::Kick => { outcome = SessionOutcome::Kicked; break; }
                                             ControlResult::Reconnect => { outcome = SessionOutcome::Migrate; break; }
                                             ControlResult::Continue => {}
@@ -662,7 +668,12 @@ async fn run_session(
         }
     }
 
-    // Teardown.
+    // Teardown. Dropping the cancel handles stops whatever is still being
+    // generated: this socket was the only route back to the consumer, and the
+    // gateway has already handed those tasks to another candidate (its
+    // `fail_device_tasks`), so every further token would come out of the user's
+    // subscription for an answer that can no longer be delivered or paid for.
+    in_flight.lock().unwrap().clear();
     heartbeat.abort();
     supply_refresh.abort();
     drop(out_tx); // closes the write loop → sends Close frame.
@@ -670,19 +681,32 @@ async fn run_session(
     outcome
 }
 
+/// Cancel handles for the calls a session is serving, keyed by task id.
+///
+/// Shared with the spawned tasks so each removes its own entry when it finishes —
+/// a session serving thousands of calls would otherwise accumulate one dead
+/// handle per call for as long as it stays connected.
+type InFlight = Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<()>>>>;
+
 fn spawn_execute(
     http: &reqwest::Client,
     deps: &PublisherDeps,
     req: HttpRequestPayload,
     out: &mpsc::UnboundedSender<Envelope>,
     quota: Arc<QuotaVerifier>,
+    in_flight: &InFlight,
 ) {
     let http = http.clone();
     let tokens = deps.tokens.clone();
     let records = deps.records.clone();
     let out = out.clone();
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    let task_id = req.task_id.clone();
+    in_flight.lock().unwrap().insert(task_id.clone(), cancel_tx);
+    let tracker = in_flight.clone();
     tokio::spawn(async move {
-        executor::execute(&http, tokens.as_ref(), req, &out, records.as_deref(), &quota).await;
+        executor::execute(&http, tokens.as_ref(), req, &out, records.as_deref(), &quota, cancel_rx).await;
+        tracker.lock().unwrap().remove(&task_id);
     });
 }
 
@@ -698,8 +722,27 @@ fn handle_control(
     ctrl: &ControlPayload,
     state_tx: &watch::Sender<ConnState>,
     lanes: Option<&dyn LaneControl>,
+    in_flight: &InFlight,
 ) -> ControlResult {
     match ctrl.action.as_str() {
+        // The buyer stopped reading. Dropping the handle cancels that task's
+        // upstream call (see `executor::execute`), which is the whole point:
+        // whatever it generates from here is this device's own subscription quota
+        // spent on an answer nobody will read, and the gateway bills only what
+        // reached it before the buyer left, so it would not be paid for either.
+        //
+        // A task id we do not know is ordinary, not an error: it finished a moment
+        // before the frame arrived.
+        "task.cancel" => {
+            match in_flight.lock().unwrap().remove(&ctrl.task_id) {
+                Some(cancel) => {
+                    drop(cancel);
+                    tracing::info!(task = %ctrl.task_id, "gateway canceled a task: {}", ctrl.reason);
+                }
+                None => tracing::debug!(task = %ctrl.task_id, "cancel for a task that already ended"),
+            }
+            ControlResult::Continue
+        }
         "lane.pause" => {
             tracing::warn!(model = %ctrl.model, "gateway paused a lane: {}", ctrl.reason);
             if let Some(l) = lanes {
@@ -953,6 +996,47 @@ mod tests {
         assert!(seq >= 2);
         assert!(SUPPLY_REFRESH > Duration::from_secs(3), "otherwise the tick, not the nudge, could have sent it");
         handle.stop();
+    }
+
+    /// `task.cancel` has to reach the one call it names, and reach nothing else:
+    /// a session serves many calls at once and cancelling the wrong one throws
+    /// away an answer somebody is reading.
+    #[tokio::test]
+    async fn control_task_cancel_reaches_only_the_task_it_names() {
+        let in_flight: InFlight = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let (doomed_tx, mut doomed) = tokio::sync::oneshot::channel::<()>();
+        let (other_tx, mut other) = tokio::sync::oneshot::channel::<()>();
+        in_flight.lock().unwrap().insert("t-doomed".to_string(), doomed_tx);
+        in_flight.lock().unwrap().insert("t-other".to_string(), other_tx);
+
+        let (state_tx, _state_rx) = watch::channel(ConnState::Online);
+        let ctrl = ControlPayload {
+            action: "task.cancel".into(),
+            reason: "consumer_gone".into(),
+            task_id: "t-doomed".into(),
+            throttle_ms: 0,
+            model: String::new(),
+            resume_requires_user: false,
+            score: 0,
+            min_score: 0,
+        };
+        assert!(matches!(
+            handle_control(&ctrl, &state_tx, None, &in_flight),
+            ControlResult::Continue
+        ));
+
+        // The named task's handle is dropped, which is what the executor reads as
+        // a cancellation; the other one is untouched and still pending.
+        assert!(doomed.try_recv().is_err(), "the cancelled task's sender is gone");
+        assert!(matches!(other.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
+        assert_eq!(in_flight.lock().unwrap().len(), 1, "only the cancelled entry is removed");
+
+        // A cancel for a call that already finished is ordinary, not an error.
+        let stale = ControlPayload { task_id: "t-gone".into(), ..ctrl };
+        assert!(matches!(
+            handle_control(&stale, &state_tx, None, &in_flight),
+            ControlResult::Continue
+        ));
     }
 
     #[tokio::test]

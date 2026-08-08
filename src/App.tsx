@@ -4,7 +4,7 @@ import { invoke, inTauri, isDaemonDown, waitForDaemon, type Profile } from "./li
 import {
   IconDashboard, IconPublish, IconConsume, IconWallet,
   IconRecords, IconUsage, IconGauge, IconAccount, IconSettings,
-  IconGlobe, IconGithub, IconShare,
+  IconGlobe, IconGithub, IconShare, IconKey,
 } from "./icons";
 import { openExternal } from "./shell";
 import { SITE_URL, REPO_URL } from "./links";
@@ -17,6 +17,7 @@ import type { JSX } from "react";
 const Dashboard = lazy(() => import("./pages/Dashboard").then((m) => ({ default: m.Dashboard })));
 const Publish = lazy(() => import("./pages/Publish").then((m) => ({ default: m.Publish })));
 const Consume = lazy(() => import("./pages/Consume").then((m) => ({ default: m.Consume })));
+const ApiKeys = lazy(() => import("./pages/ApiKeys").then((m) => ({ default: m.ApiKeys })));
 const WalletPage = lazy(() => import("./pages/Wallet").then((m) => ({ default: m.WalletPage })));
 const Records = lazy(() => import("./pages/Records").then((m) => ({ default: m.Records })));
 const Usage = lazy(() => import("./pages/Usage").then((m) => ({ default: m.Usage })));
@@ -29,12 +30,13 @@ const EarningsShareDialog = lazy(() =>
   import("./components/EarningsShareDialog").then((m) => ({ default: m.EarningsShareDialog })),
 );
 
-type Tab = "dashboard" | "publish" | "consume" | "usage" | "limits" | "wallet" | "records" | "account" | "settings";
+type Tab = "dashboard" | "publish" | "consume" | "apikeys" | "usage" | "limits" | "wallet" | "records" | "account" | "settings";
 
 const ICONS: Record<Tab, JSX.Element> = {
   dashboard: <IconDashboard />,
   publish: <IconPublish />,
   consume: <IconConsume />,
+  apikeys: <IconKey />,
   usage: <IconUsage />,
   limits: <IconGauge />,
   wallet: <IconWallet />,
@@ -48,7 +50,10 @@ const ICONS: Record<Tab, JSX.Element> = {
 // bottom of the sidebar (see App below).
 const NAV: Array<{ label?: string; items: Tab[] } | "spacer"> = [
   { items: ["dashboard"] },
-  { label: "groupTrade", items: ["publish", "consume"] },
+  // API keys sit with the two switches, not under the wallet: buying through
+  // your own code is the third way to buy, alongside selling a subscription and
+  // pointing a local CLI at the market.
+  { label: "groupTrade", items: ["publish", "consume", "apikeys"] },
   { label: "groupUsage", items: ["usage", "limits"] },
   { label: "groupFinance", items: ["wallet", "records"] },
   "spacer",
@@ -253,6 +258,7 @@ export function App() {
               {tab === "dashboard" && <Dashboard onNavigate={setTab} region={profile?.region ?? ""} />}
               {tab === "publish" && <Publish />}
               {tab === "consume" && <Consume />}
+              {tab === "apikeys" && <ApiKeys />}
               {tab === "usage" && <Usage />}
               {tab === "limits" && <Limits />}
               {tab === "wallet" && <WalletPage />}

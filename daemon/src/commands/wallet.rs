@@ -103,6 +103,14 @@ pub async fn ensure_api_key(state: &AppState) -> R<Value> {
     if keychain::get("access_token").map_err(err)?.is_none() {
         return Ok(json!({ "key": Value::Null }));
     }
+    // Adopt the account's default before minting anything — see
+    // `apikeys::adopt_default`. Best-effort: a server that cannot answer falls
+    // through to minting, which is what this always did.
+    match super::apikeys::adopt_default(state).await {
+        Ok(Some(k)) => return Ok(json!({ "key": k })),
+        Ok(None) => {}
+        Err(e) => tracing::debug!("could not adopt the account's default api key: {e}"),
+    }
     create_api_key(state, "asale".into()).await
 }
 

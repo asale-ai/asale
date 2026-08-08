@@ -3,14 +3,15 @@
 // linked accounts, API key) and preferences (language/theme).
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { countryOptions } from "@shared/countries";
+import { countryOptions, detectCountryByIp, flagEmoji, type CountryOption } from "@shared/countries";
+import { CountrySelect } from "../../components/CountrySelect";
 import { invoke, inTauri, runOAuthFlow, type Profile } from "../../lib";
 import { LANGUAGES, setLanguage, type Language } from "../../i18n";
 import { THEMES, useTheme, type Theme } from "../../theme";
 import { Card, CopyChip, Ok, Err, PageHead } from "../../ui";
 import {
   IconAccount, IconShield, IconSettings, IconKey, IconLink, IconInfo,
-  IconSun, IconMoon, IconGlobe, IconRefresh, IconPencil, IconCheck,
+  IconSun, IconMoon, IconGlobe, IconPencil, IconCheck,
 } from "../../icons";
 import { GitHubIcon, GoogleIcon } from "./icons";
 import { errText } from "../../errors";
@@ -88,6 +89,16 @@ function ProfileTab({ profile, onProfile }: { profile: Profile; onProfile: (p: P
   const { t, i18n } = useTranslation();
   const countries = useMemo(() => countryOptions(i18n.language), [i18n.language]);
   const countryName = useMemo(() => new Map(countries.map((c) => [c.code, c.name])), [countries]);
+  // Only for the account that never declared one — an existing region is the
+  // user's own answer and is never second-guessed by a lookup. Skipping the
+  // request entirely in that case also means the common visit makes none.
+  const [suggested, setSuggested] = useState("");
+  useEffect(() => {
+    if (profile.region) return;
+    let live = true;
+    detectCountryByIp().then((code) => { if (live) setSuggested(code); });
+    return () => { live = false; };
+  }, [profile.region]);
   const memberSince = profile.created_at
     ? new Date(profile.created_at).toLocaleDateString(i18n.language)
     : "—";
@@ -121,8 +132,9 @@ function ProfileTab({ profile, onProfile }: { profile: Profile; onProfile: (p: P
             placeholder={t("account.regionPlaceholder")}
             /* A picker, not a text box: the server takes ISO codes only, and the
                world map counts one country per exact code. */
-            options={countries.map((c) => ({ value: c.code, label: c.name }))}
-            render={(code) => countryName.get(code) ?? code}
+            countries={countries}
+            suggested={suggested}
+            render={(code) => `${flagEmoji(code)} ${countryName.get(code) ?? code}`}
             onSave={(v) => save({ region: v })}
           />
         </div>
@@ -152,16 +164,18 @@ function ProfileTab({ profile, onProfile }: { profile: Profile; onProfile: (p: P
 
 /** A read-only row that turns into an input on demand. */
 function InlineField({
-  label, hint, value, placeholder, mono, options, render, onSave,
+  label, hint, value, placeholder, mono, countries, suggested, render, onSave,
 }: {
   label: string;
   hint: string;
   value: string;
   placeholder?: string;
   mono?: boolean;
-  /** Turns the editor into a picker (the country, which the server accepts
-   *  only as an ISO code — a text box invited typos it then rejected). */
-  options?: { value: string; label: string }[];
+  /** Turns the editor into the country picker, whose value the server accepts
+   *  only as an ISO code — a text box invited typos it then rejected. */
+  countries?: CountryOption[];
+  /** What the picker opens on when nothing is stored yet (the IP guess). */
+  suggested?: string;
   /** How to show the stored value when not editing (a code as its country name). */
   render?: (value: string) => string;
   onSave: (value: string) => Promise<void>;
@@ -220,7 +234,10 @@ function InlineField({
           <p className="if-hint">{hint}</p>
         </div>
         {!editing && (
-          <button className="btn sm ghost" onClick={() => setEditing(true)}>
+          // Seeding the draft here rather than in state: the suggestion often
+          // arrives after this row first rendered, and opening the editor is
+          // the moment it is worth anything. Nothing is stored until Save.
+          <button className="btn sm ghost" onClick={() => { setDraft(value || suggested || ""); setEditing(true); }}>
             <IconPencil />{t("account.profile.edit")}
           </button>
         )}
@@ -228,11 +245,14 @@ function InlineField({
 
       {editing && (
         <form className="if-edit fade-in" onSubmit={submit}>
-          {options ? (
-            <select className="input" value={draft} autoFocus onChange={(e) => setDraft(e.target.value)}>
-              <option value="">{placeholder ?? t("account.profile.notSet")}</option>
-              {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
+          {countries ? (
+            <CountrySelect
+              value={draft}
+              countries={countries}
+              placeholder={placeholder ?? t("account.profile.notSet")}
+              autoFocus
+              onChange={setDraft}
+            />
           ) : (
             <input
               className={`input${mono ? " mono" : ""}`}
@@ -270,10 +290,6 @@ function SecurityTab({ profile, onProfile }: { profile: Profile; onProfile: (p: 
 
   const [apiKey, setApiKey] = useState("");
   const [keyErr, setKeyErr] = useState("");
-  const [keyMsg, setKeyMsg] = useState("");
-  const [keyBusy, setKeyBusy] = useState(false);
-  // Regenerating revokes the key the buying tools are holding, so it asks first.
-  const [keyConfirm, setKeyConfirm] = useState(false);
 
   // The asale key is provisioned automatically — fetch (minting if needed) on
   // open so the user never has to press a "generate" button.
@@ -306,20 +322,6 @@ function SecurityTab({ profile, onProfile }: { profile: Profile; onProfile: (p: 
     setOauthMsg(""); setOauthErr("");
     try { await invoke("unlink_oauth", { provider }); await refresh(); }
     catch (e) { setOauthErr(errText(e)); }
-  }
-
-  // Mint a brand-new key, invalidating the previous one. The daemon rewrites
-  // the new key into every tool that is buying, and names them back here — they
-  // still need a restart to pick it up.
-  async function regenKey() {
-    setKeyErr(""); setKeyMsg(""); setKeyBusy(true); setKeyConfirm(false);
-    try {
-      const r = await invoke<{ key: string; refreshed_tools?: string[] }>("create_api_key", { label: "asale" });
-      setApiKey(r.key);
-      const tools = r.refreshed_tools ?? [];
-      setKeyMsg(tools.length ? t("account.apiKey.refreshed", { tools: tools.join("、") }) : t("account.apiKey.regenerated"));
-    }
-    catch (e) { setKeyErr(errText(e)); } finally { setKeyBusy(false); }
   }
 
   return (
@@ -374,30 +376,23 @@ function SecurityTab({ profile, onProfile }: { profile: Profile; onProfile: (p: 
         <Err>{oauthErr}</Err>
       </Card>
 
+      {/* The key this machine is holding, and a door to the page that manages
+          the rest of them. Regenerating used to live here and could only ever
+          *replace* the one key — no list, no names, no expiry — which is now
+          one action among six on the API keys page. Two places minting keys is
+          how an account ends up with six of them and no idea which is which. */}
       <Card icon={<IconKey />} title={t("account.apiKey.title")} desc={t("account.apiKey.desc")}>
         {apiKey
           ? <CopyChip value={apiKey} wrap />
           : <p className="micro-label">{t("account.apiKey.provisioning")}</p>}
-        {keyConfirm
-          ? (
-            <div className="card-foot">
-              <p className="micro-label">{t("account.apiKey.confirmWarning")}</p>
-              <div className="btn-row">
-                <button className="btn sm subtle" onClick={regenKey} disabled={keyBusy}>
-                  <IconRefresh className={keyBusy ? "spin" : undefined} />{t("account.apiKey.confirmRegenerate")}
-                </button>
-                <button className="btn sm ghost" onClick={() => setKeyConfirm(false)}>{t("account.profile.cancel")}</button>
-              </div>
-            </div>
-          )
-          : (
-            <div className="btn-row card-foot">
-              <button className="btn sm subtle" onClick={() => { setKeyMsg(""); setKeyErr(""); setKeyConfirm(true); }} disabled={!inTauri || keyBusy}>
-                <IconRefresh className={keyBusy ? "spin" : undefined} />{t("account.apiKey.regenerate")}
-              </button>
-            </div>
-          )}
-        <Ok>{keyMsg}</Ok>
+        <div className="btn-row card-foot">
+          <button
+            className="btn sm subtle"
+            onClick={() => window.dispatchEvent(new CustomEvent("asale:nav", { detail: "apikeys" }))}
+          >
+            <IconKey />{t("account.apiKey.manage")}
+          </button>
+        </div>
         <Err>{keyErr}</Err>
       </Card>
     </div>

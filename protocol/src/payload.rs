@@ -163,11 +163,18 @@ impl SupplyItem {
 /// A `control` frame instructs the publisher to change behaviour (§9.2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlPayload {
-    /// One of `kick` | `throttle` | `upgrade` | `lane.pause` | `seller.status`.
+    /// One of `kick` | `throttle` | `upgrade` | `lane.pause` | `seller.status` |
+    /// `task.cancel`.
     pub action: String,
     /// Optional human-readable reason.
     #[serde(default)]
     pub reason: String,
+    /// For `task.cancel`: the relayed call to stop working on, because its
+    /// consumer went away. Everything generated past this point is the seller's
+    /// own subscription quota spent on an answer nobody will read — and unpaid,
+    /// since the gateway bills only what reached it before the buyer left.
+    #[serde(default)]
+    pub task_id: String,
     /// For `throttle`: how long to slow down, in milliseconds.
     #[serde(default)]
     pub throttle_ms: i64,

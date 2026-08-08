@@ -30,12 +30,20 @@ export function Records() {
   }, []);
   useEffect(() => load(role, page), [role, page, load]);
 
-  const statusBadge = (s: number) => {
+  // `finish_reason` outranks `status`, because status only says whether the call
+  // settled: a call the buyer stopped halfway settles like any other (the tokens
+  // it had already produced are billed) and calling that "done" — or, when
+  // nothing was produced, "failed" — is not what happened.
+  const statusBadge = (s: number, reason?: string) => {
+    const byReason: Record<string, [string, string]> = {
+      canceled: ["warn", "statusCanceled"],
+      interrupted: ["warn", "statusInterrupted"],
+    };
     const map: Record<number, [string, string]> = {
       1: ["warn", "statusRunning"], 2: ["on", "statusDone"], 3: ["err", "statusFailed"],
       4: ["warn", "statusDisputed"], 0: ["off", "statusPending"],
     };
-    const [cls, key] = map[s] ?? map[0];
+    const [cls, key] = (reason ? byReason[reason] : undefined) ?? map[s] ?? map[0];
     return <span className={`pill ${cls}`}>{t(`records.${key}`)}</span>;
   };
 
@@ -138,7 +146,7 @@ export function Records() {
                     <td className="mono tabular" title={t("records.discountHint")}>
                       {r.mkt_ratio == null ? <span className="faint">—</span> : `${Math.round(r.mkt_ratio * 100)}%`}
                     </td>
-                    <td>{statusBadge(r.status)}</td>
+                    <td>{statusBadge(r.status, r.finish_reason)}</td>
                   </tr>
                 ))}
                 {useLocal && localRows.map((r) => (

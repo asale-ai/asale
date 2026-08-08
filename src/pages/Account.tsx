@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { countryOptions, guessCountry } from "@shared/countries";
+import { countryOptions, detectCountryByIp, guessCountry } from "@shared/countries";
+import { CountrySelect } from "../components/CountrySelect";
 import { invoke, inTauri, runOAuthFlow, takeSignInReason, type Profile } from "../lib";
 import { ProfileCenter } from "./account/ProfileCenter";
 import { GitHubIcon, GoogleIcon } from "./account/icons";
@@ -13,10 +14,15 @@ export function Account() {
   const [mode, setMode] = useState<"login" | "register">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  // Asked for once, at sign-up: the platform infers nothing about location (no
-  // geolocation, no IP lookup), so this is where the country comes from. The
-  // starting value is the desktop locale's region, not the network's.
+  // Asked for once, at sign-up: this is the only place the platform learns the
+  // country. Pre-filled twice over — from the desktop locale immediately, then
+  // from an IP lookup a moment later if that answers with something better.
+  // Both are guesses at a field the user can change; see `shared/countries`.
   const [region, setRegion] = useState(() => guessCountry());
+  /** Set the moment the user touches the picker, which ends the guessing. A ref
+   *  because the only reader is a promise callback that would otherwise close
+   *  over whatever this was at mount — always `false`. */
+  const regionTouched = useRef(false);
   const countries = useMemo(() => countryOptions(i18n.language), [i18n.language]);
   // `undefined` until the profile call answers: rendering the sign-in form in
   // the meantime tells a signed-in user they are signed out.
@@ -37,6 +43,18 @@ export function Account() {
   useEffect(() => {
     if (!inTauri) { setProfile(null); return; }
     invoke<Profile>("me_profile").then(setProfile).catch(() => setProfile(null));
+  }, []);
+
+  // The IP guess, which lands a beat after first paint. It only overwrites a
+  // value the user has not touched — the locale guess is already in the field
+  // by then, and silently swapping a country somebody just picked would be a
+  // bug they would have to catch by re-reading the form.
+  useEffect(() => {
+    let live = true;
+    detectCountryByIp().then((code) => {
+      if (live && code && !regionTouched.current) setRegion(code);
+    });
+    return () => { live = false; };
   }, []);
 
   async function loadProfile() {
@@ -182,12 +200,12 @@ export function Account() {
           {mode === "register" && (
             <div className="field">
               <label>{t("account.region")}</label>
-              <select className="input" value={region} onChange={(e) => setRegion(e.target.value)}>
-                <option value="">{t("account.regionPlaceholder")}</option>
-                {countries.map((c) => (
-                  <option key={c.code} value={c.code}>{c.name}</option>
-                ))}
-              </select>
+              <CountrySelect
+                value={region}
+                countries={countries}
+                placeholder={t("account.regionPlaceholder")}
+                onChange={(code) => { regionTouched.current = true; setRegion(code); }}
+              />
               <span className="hint">{t("account.regionHint")}</span>
             </div>
           )}
