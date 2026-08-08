@@ -50,14 +50,15 @@ const ICONS: Record<Tab, JSX.Element> = {
 // bottom of the sidebar (see App below).
 const NAV: Array<{ label?: string; items: Tab[] } | "spacer"> = [
   { items: ["dashboard"] },
-  // API keys sit with the two switches, not under the wallet: buying through
-  // your own code is the third way to buy, alongside selling a subscription and
-  // pointing a local CLI at the market.
-  { label: "groupTrade", items: ["publish", "consume", "apikeys"] },
+  { label: "groupTrade", items: ["publish", "consume"] },
   { label: "groupUsage", items: ["usage", "limits"] },
   { label: "groupFinance", items: ["wallet", "records"] },
   "spacer",
-  { items: ["settings"] },
+  // API keys sit at the bottom with settings rather than among the two
+  // switches. Calling the gateway from your own code is a way in that you set
+  // up once and then leave alone — it belongs with the things you configure,
+  // not with the two switches you flip every day.
+  { items: ["apikeys", "settings"] },
 ];
 
 

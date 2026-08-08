@@ -322,8 +322,16 @@ export interface ApiKeyRow {
   id: number;
   /** The owner-chosen name. May be empty. */
   label: string;
-  /** e.g. `sk-asale-E1T3••••nwo4`. */
+  /** e.g. `sk-asale-E1T3••••nwo4` — the tail is what tells two keys apart.
+   *
+   *  Keys minted before the server stored previews have no recoverable
+   *  plaintext, so those read `sk-asale-••••••••`: all shape, no tail. They are
+   *  exactly the rows with `revealable: false`, which is the signal to explain
+   *  the bullets rather than let them look like a rendering bug. */
   key_preview: string;
+  /** This row is the key *this machine's* proxy and CLIs are holding. Always
+   *  false on the web console, which has no local key to compare against. */
+  held?: boolean;
   /** Raw column: 1 active, 2 disabled. Prefer `enabled`. */
   status: number;
   /** The owner-facing on/off switch. */
@@ -347,6 +355,10 @@ export interface ApiKeyList {
   keys: ApiKeyRow[];
   /** How many keys one account may hold, so the UI can say so before the 409. */
   max_keys: number;
+  /** This account is not actually held to `max_keys` (administrators). Stated
+   *  rather than folded into the number, so a console never shows an exempt
+   *  account "12 / 10" beside a button it has disabled for no reason. */
+  unlimited: boolean;
 }
 
 /** `POST /api/v1/apikeys` — the one moment the plaintext is returned. */

@@ -623,12 +623,18 @@ export interface ApiKeyRow extends ServerApiKeyRow {
 export interface ApiKeyListResp {
   keys: ApiKeyRow[];
   max_keys: number;
+  /** The account is not actually held to `max_keys` (administrators). */
+  unlimited: boolean;
   /** CLIs whose buy switch is on — the ones a default change would re-key.
    *  Labels are the daemon's (`tool_config::label`): product names, not
    *  translatable strings. */
   buying_tools: { id: string; label: string }[];
   /** Whether this machine is holding any key at all. */
   has_local_key: boolean;
+  /** Origin of the local proxy (`http://127.0.0.1:<port>`) — the second address
+   *  code on *this* machine can call, and the only one that can be served out
+   *  of a locally imported subscription. */
+  proxy_base: string;
 }
 /** What `apply_api_key` / an applying create-or-update reports back. */
 export interface AppliedKey {

@@ -33,6 +33,23 @@ fn preview(key: &str) -> String {
     format!("sk-asale-{}••••{}", &body[..4], &body[body.len() - 4..])
 }
 
+/// `security::api_key_fingerprint` on the server: the first 6 bytes of
+/// sha256(key), hex.
+///
+/// Sent to the list endpoint so the server can point at the row this machine is
+/// holding. Previews used to do that job, and could not: every key minted before
+/// the preview column existed stores an empty one, so the *whole* installed base
+/// matched nothing and the "in use" marker was permanently off. A fingerprint is
+/// derived from the hash the server has had all along, so it works for old rows
+/// and new ones alike — and, unlike the key, is safe to send.
+fn fingerprint(key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(key.as_bytes())[..6]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// Which locally installed CLIs are buying right now.
 ///
 /// This is the list the UI needs *before* it moves the default key: the whole
@@ -52,18 +69,38 @@ pub(crate) async fn buying_tools(state: &AppState) -> R<Vec<Value>> {
 
 /// GET /api/v1/apikeys, plus the two facts only this machine knows: which row
 /// the local proxy is holding, and which tools would need re-keying.
+///
+/// The held row also gets its `key_preview` rewritten from the key in hand. For
+/// a key minted before the server started storing previews that is the only
+/// place a masked form can come from at all — the server has a one-way hash and
+/// nothing else — and it is what lets the page answer "which key am I on" with
+/// four characters instead of a row of bullets.
 pub async fn list_api_keys(state: &AppState) -> R<Value> {
-    let mut v = authed(state, reqwest::Method::GET, "/api/v1/apikeys", None).await?;
-    let held = super::wallet::cached_key(state).await?.map(|k| preview(&k));
+    let held_key = super::wallet::cached_key(state).await?;
+    let path = match held_key.as_deref() {
+        Some(k) => format!("/api/v1/apikeys?held={}", fingerprint(k)),
+        None => "/api/v1/apikeys".to_string(),
+    };
+    let mut v = authed(state, reqwest::Method::GET, &path, None).await?;
+    let held_preview = held_key.as_deref().map(preview);
     if let Some(keys) = v["keys"].as_array_mut() {
         for k in keys.iter_mut() {
-            let mine = held.as_deref().is_some_and(|p| k["key_preview"].as_str() == Some(p));
+            let mine = k["held"].as_bool().unwrap_or(false);
             k["in_use"] = json!(mine);
+            if let (true, Some(p)) = (mine, held_preview.as_deref()) {
+                k["key_preview"] = json!(p);
+            }
         }
     }
     if let Some(obj) = v.as_object_mut() {
         obj.insert("buying_tools".into(), json!(buying_tools(state).await?));
-        obj.insert("has_local_key".into(), json!(held.is_some()));
+        obj.insert("has_local_key".into(), json!(held_key.is_some()));
+        // The other address a caller on this machine can use. The page offers
+        // it beside the platform gateway because from here it is the shorter
+        // path — the proxy injects the credential itself, so code on this
+        // machine needs no key at all — and because it is the only address that
+        // can serve a request out of a locally imported subscription.
+        obj.insert("proxy_base".into(), json!(tool_config::proxy_base()));
     }
     Ok(v)
 }
@@ -153,10 +190,9 @@ pub async fn update_api_key(
 /// that no longer exists, and the self-heal path would only rediscover that on
 /// the next 401 — after a tool has already failed in front of the user.
 pub async fn delete_api_key(state: &AppState, id: i64) -> R<Value> {
-    let held_preview = super::wallet::cached_key(state).await?.map(|k| preview(&k));
-    let deleted_preview = key_preview_of(state, id).await;
+    let deleting_ours = held_key_id(state).await == Some(id);
     let v = authed(state, reqwest::Method::DELETE, &format!("/api/v1/apikeys/{id}"), None).await?;
-    if held_preview.is_some() && held_preview == deleted_preview {
+    if deleting_ours {
         super::wallet::forget_key(state).await?;
     }
     Ok(v)
@@ -218,16 +254,21 @@ async fn adopt(state: &AppState, key: &str) -> R<Vec<String>> {
     super::buy::refresh_buy_tool_keys(state, key).await
 }
 
-/// The masked form of one of the caller's keys, or `None` if it cannot be read.
-/// Best-effort: it only decides whether to drop a local cache.
-async fn key_preview_of(state: &AppState, id: i64) -> Option<String> {
-    let v = authed(state, reqwest::Method::GET, "/api/v1/apikeys", None).await.ok()?;
+/// Which row is the key this machine has cached, by id — or `None` if it holds
+/// none, or the lookup failed.
+///
+/// Best-effort: it only decides whether to drop a local cache, and a `None` from
+/// a failed request costs one stale cache entry that the proxy's 401 self-heal
+/// clears anyway.
+async fn held_key_id(state: &AppState) -> Option<i64> {
+    let key = super::wallet::cached_key(state).await.ok()??;
+    let path = format!("/api/v1/apikeys?held={}", fingerprint(&key));
+    let v = authed(state, reqwest::Method::GET, &path, None).await.ok()?;
     v["keys"]
         .as_array()?
         .iter()
-        .find(|k| k["id"].as_i64() == Some(id))?["key_preview"]
-        .as_str()
-        .map(String::from)
+        .find(|k| k["held"].as_bool().unwrap_or(false))?["id"]
+        .as_i64()
 }
 
 #[cfg(test)]
@@ -242,5 +283,16 @@ mod tests {
         assert_eq!(preview("sk-asale-abcd"), "sk-asale-••••");
         // A value that is not one of ours is still masked, never echoed.
         assert!(!preview("some-other-key-entirely").contains("entirely"));
+    }
+
+    #[test]
+    fn a_fingerprint_matches_the_servers_shape() {
+        // sha256("sk-asale-E1T3aaaaaaaanwo4") — first six bytes, hex. Pinned so
+        // a change here has to be a deliberate one made on both sides.
+        assert_eq!(fingerprint("sk-asale-E1T3aaaaaaaanwo4"), "aa9155ce3b76");
+        assert_ne!(
+            fingerprint("sk-asale-E1T3aaaaaaaanwo5"),
+            fingerprint("sk-asale-E1T3aaaaaaaanwo4")
+        );
     }
 }

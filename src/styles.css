@@ -1400,6 +1400,81 @@ table.tbl th.num, table.tbl td.num { text-align: right; }
 table.tbl .nowrap { white-space: nowrap; }
 table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight: 400; margin-top: 1px; }
 
+/* ── Row menu ───────────────────────────────────────────────────────────────
+   A table row whose cells are objects you act on, rather than records you
+   read, needs somewhere to put the acting. One button per action turned the
+   API-key rows into a strip of six identical ghost buttons where rename,
+   disable and delete all looked equally routine — and the destructive one was
+   the easiest to hit by accident. This is that strip, folded into one glyph:
+   the row's primary affordance stays inline, everything else lives here, and
+   the one destructive item is tinted and asks again before it fires.
+
+   Same shape as the web console's `.rowmenu`; the two are one product. */
+.rowmenu { position: relative; display: inline-flex; }
+.rowmenu > .menu {
+  position: absolute; right: 0; top: calc(100% + var(--s1)); z-index: 30; width: 196px;
+  /* Stated, not inherited: the actions cell is right-aligned and the confirm
+     inside carries prose. */
+  text-align: left;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r2);
+  box-shadow: var(--shadow-pop); padding: var(--s1);
+  animation: pop-in var(--t-fast) var(--ease);
+}
+.menu-item {
+  display: flex; align-items: center; gap: var(--s2); width: 100%; text-align: left;
+  padding: 7px var(--s2); border: none; border-radius: 6px; background: none;
+  font-size: var(--fs-sub); color: var(--fg-2); cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.menu-item:hover:not(:disabled) { background: var(--surface-2); color: var(--fg); }
+.menu-item:disabled { opacity: 0.45; cursor: not-allowed; }
+.menu-item svg { width: 14px; height: 14px; flex-shrink: 0; color: var(--fg-3); }
+.menu-item.danger, .menu-item.danger svg { color: var(--danger); }
+.menu-item.danger:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger); }
+.menu-sep { height: 1px; background: var(--line); margin: var(--s1) 0; }
+.menu-confirm { padding: var(--s2) var(--s2) 6px; }
+.menu-confirm .mc-t { font-size: var(--fs-sub); font-weight: 600; color: var(--fg); }
+.menu-confirm .mc-d { margin-top: 3px; font-size: var(--fs-micro); color: var(--fg-2); line-height: 1.5; }
+.menu-confirm .mc-a { display: flex; gap: 6px; margin-top: var(--s3); }
+
+/* ── Quota meter ────────────────────────────────────────────────────────────
+   How much of an allowance is spent, as a footnote beside the list it governs
+   — a figure and a hairline of fill, not a dashboard tile. */
+.meter { display: flex; flex-direction: column; gap: 6px; min-width: 132px; }
+.meter-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: var(--s3);
+  font-size: var(--fs-micro); color: var(--fg-3);
+}
+.meter-head b { font-weight: 500; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.meter .bar { height: 3px; }
+/* The only state worth a colour here is "you cannot make another one". */
+.meter.near .bar > span { background: var(--warning); }
+
+/* A credential and the eye that unmasks it: the control belongs beside the
+   value, because "which key is this one" is the question the cell exists to
+   answer. */
+.keycell { display: inline-flex; align-items: center; gap: var(--s1); min-width: 0; max-width: 100%; }
+
+/* Secondary controls that would otherwise shout from every row at once. */
+@media (hover: hover) {
+  .onhover { opacity: 0; transition: opacity var(--t-fast) var(--ease); }
+  tr:hover .onhover, tr:focus-within .onhover, .onhover:focus-visible { opacity: 1; }
+}
+
+/* ── Code panel ─────────────────────────────────────────────────────────────
+   A sample and the switches that shape it are one object, so they share one
+   sheet: which language on the left, copy on the right, code below. Split
+   apart — a segmented control floating above a bare `.codeblock` — the buttons
+   read as page furniture rather than as this snippet's own controls. */
+.codepanel { border-radius: var(--r2); background: var(--bg-2); overflow: hidden; }
+.codepanel-head {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s3);
+  padding: 5px 5px 5px var(--s2); border-bottom: 1px solid var(--line);
+}
+.codepanel-head .segmented { background: transparent; padding: 0; }
+.codepanel-head .segmented button.active { background: var(--surface); }
+.codepanel > .codeblock { border-radius: 0; background: transparent; padding-right: var(--s3); }
+
 .pager {
   display: flex; align-items: center; justify-content: center; gap: var(--s3);
   margin-top: var(--s4); padding-top: var(--s3); border-top: 1px solid var(--line);

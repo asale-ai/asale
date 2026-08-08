@@ -87,6 +87,15 @@ export const IconPlus = (p: P) => (<Svg {...p}><path d="M12 5v14M5 12h14" /></Sv
 export const IconPencil = (p: P) => (<Svg {...p}><path d="M4 20h4l10-10a2.5 2.5 0 0 0-3.5-3.5L4.5 16.5 4 20Z" /><path d="m13.5 7 3.5 3.5" /></Svg>);
 export const IconTrash = (p: P) => (<Svg {...p}><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14" /></Svg>);
 export const IconExternal = (p: P) => (<Svg {...p}><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /></Svg>);
+/* Read a credential back, and hide it again. */
+export const IconEye = (p: P) => (<Svg {...p}><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="3" /></Svg>);
+export const IconEyeOff = (p: P) => (<Svg {...p}><path d="M4 4.5 20 20M9.9 5.9A9.6 9.6 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a17 17 0 0 1-3 3.9M6.5 8.1A17 17 0 0 0 2.5 12S6 18.5 12 18.5c.85 0 1.64-.13 2.37-.35" /><path d="M9.9 9.95a3 3 0 0 0 4.2 4.2" /></Svg>);
+/* A row's overflow. Vertical, so it reads as "this row" rather than as a
+   toolbar of its own. */
+export const IconDots = (p: P) => (<Svg {...p}><circle cx="12" cy="5" r="1.2" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none" /><circle cx="12" cy="19" r="1.2" fill="currentColor" stroke="none" /></Svg>);
+export const IconClock = (p: P) => (<Svg {...p}><circle cx="12" cy="12" r="9" /><path d="M12 7v5.2l3.2 2" /></Svg>);
+export const IconLock = (p: P) => (<Svg {...p}><rect x="4" y="10" width="16" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></Svg>);
+export const IconStar = (p: P) => (<Svg {...p}><path d="m12 3.5 2.6 5.35 5.9.83-4.25 4.15 1 5.87L12 16.9l-5.25 2.8 1-5.87L3.5 9.68l5.9-.83L12 3.5Z" /></Svg>);
 export const IconKey = (p: P) => (<Svg {...p}><circle cx="7.5" cy="15.5" r="4.5" /><path d="m10.5 12.5 8-8M17 4l3 3M15 6l2 2" /></Svg>);
 export const IconZap = (p: P) => (<Svg {...p}><path d="M13 2 4 14h7l-1 8 9-12h-7l1-8Z" /></Svg>);
 export const IconShield = (p: P) => (<Svg {...p}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z" /></Svg>);
