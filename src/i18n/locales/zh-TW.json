@@ -314,7 +314,7 @@
     "frozen": "凍結（預授權）",
     "payable": "待結算（收益）",
     "referralTitle": "邀請返佣",
-    "referralDesc": "在網站上取得你的邀請連結：好友註冊即得體驗金，其交易手續費的分成會結算進這個錢包。",
+    "referralDesc": "在網站上取得你的邀請連結：好友註冊即得體驗金，其買 Token 消費額的分成會結算進這個錢包。",
     "signInFirst": "請先在「帳戶」中登入。",
     "gettingAddress": "請求中…",
     "withdrawAddress": "提現位址",

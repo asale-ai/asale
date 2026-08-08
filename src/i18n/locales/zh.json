@@ -314,7 +314,7 @@
     "frozen": "冻结（预授权）",
     "payable": "待结算（收益）",
     "referralTitle": "邀请返佣",
-    "referralDesc": "在网站上获取你的邀请链接：好友注册即得体验金，其交易手续费的分成会结算进这个钱包。",
+    "referralDesc": "在网站上获取你的邀请链接：好友注册即得体验金，其买 Token 消费额的分成会结算进这个钱包。",
     "signInFirst": "请先在「账户」中登录。",
     "gettingAddress": "请求中…",
     "withdrawAddress": "提现地址",

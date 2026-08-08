@@ -23,7 +23,16 @@ pub async fn register(state: &AppState, email: String, password: String, region:
     let http = asale_client_core::http::plain();
     let resp = http
         .post(format!("{}/api/v1/auth/register", state.cfg.server_api_base))
-        .json(&json!({"email": email, "password": password, "region": region}))
+        // `device_fp` carries this installation's device id, which is what the
+        // server's one-reward-per-device rule keys on. Sent even though the
+        // desktop app has no invite-code field yet: the moment it grows one,
+        // forgetting this would make the desktop the way around the rule.
+        .json(&json!({
+            "email": email,
+            "password": password,
+            "region": region,
+            "device_fp": [state.device_id.clone()],
+        }))
         .send()
         .await
         .map_err(err)?;
