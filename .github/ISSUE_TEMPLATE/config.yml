@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security problem
+    url: https://github.com/asale-ai/asale/security/advisories/new
+    about: Vulnerabilities are reported privately, not in public issues.
+  - name: Documentation
+    url: https://github.com/asale-ai/asale/tree/main/docs
+    about: Architecture, local development, packaging and the asale command line.
+  - name: Website, market and wallet
+    url: https://asale.ai
+    about: Account questions, prices and the live market. Not a place for bug reports.
