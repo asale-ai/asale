@@ -376,18 +376,18 @@ jobs:
             tag="v${v}-${GITHUB_RUN_NUMBER}"
           fi
 
-          # Draft, not a published release: install the artifacts and verify them yourself
-          # before publishing by hand.
+          # Draft, not a published release: install the artifacts and verify them
+          # yourself before publishing by hand.
+          #
+          # The notes are a fixed install header (.github/release-notes-header.md) plus
+          # the commits since the previous tag, which --generate-notes appends under
+          # "What's Changed" — so every release carries a real changelog instead of the
+          # same paragraph every time. The pre-publish checklist is internal: it goes to
+          # the run summary, not to the public release page.
           gh release create "$tag" dl/* \
             --draft \
             --title "Asale client $tag" \
-            --notes "Installers for all three platforms, built by the release workflow.
+            --notes-file .github/release-notes-header.md \
+            --generate-notes
 
-          Before publishing, confirm:
-          - the macOS .dmg is signed and notarized (otherwise other machines report it as damaged)
-          - the Windows installer is Authenticode-signed — the build asserts this when the
-            Azure credentials are configured, but on a fresh Windows machine also check that
-            \`Get-AuthenticodeSignature\` reports Valid and that SmartScreen stays quiet
-            (a brand-new certificate has no reputation yet and can still warn for a while)
-          - every bundle has a matching .sig next to it (required for auto-update)
-          - install once and verify login and going on the market, then publish manually"
+          cat .github/release-checklist.md >> "$GITHUB_STEP_SUMMARY"
