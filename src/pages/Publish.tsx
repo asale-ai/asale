@@ -11,13 +11,14 @@ import { IconTrash, IconShield, IconChip, IconRefresh, IconPlus, IconPencil, Ico
 import { errText } from "../errors";
 
 /**
- * How the matcher currently sees this seller. `blocked` means every lane below
- * is declared, indexed, and skipped — the failure with no other symptom.
+ * How the matcher currently sees this seller. `deprioritised` means every lane
+ * below is declared and indexed but served last — the failure with no other
+ * symptom.
  */
 interface SellerStatus {
   score: number;
   min_score: number;
-  blocked: boolean;
+  deprioritised: boolean;
 }
 
 /** Subscriptions connected by signing in through a loopback OAuth callback. */
@@ -1104,18 +1105,18 @@ export function Publish() {
 
       <Err>{err}</Err>
 
-      {/* Above everything on this page: while it is showing, nothing below it
-          can earn, however healthy it looks. */}
-      {sellerStatus?.blocked && (
-        <div className="callout danger" role="alert">
+      {/* Above everything on this page: while it is showing, little below it
+          will earn, however healthy it looks. */}
+      {sellerStatus?.deprioritised && (
+        <div className="callout warn" role="alert">
           <IconInfo />
           <div>
-            <strong>{t("publish.blockedTitle")}</strong>
+            <strong>{t("publish.rankedLastTitle")}</strong>
             <div className="text-sm" style={{ marginTop: 4 }}>
-              {t("publish.blockedBody", { score: sellerStatus.score, min: sellerStatus.min_score })}
+              {t("publish.rankedLastBody", { score: sellerStatus.score, min: sellerStatus.min_score })}
             </div>
             <div className="text-sm faint" style={{ marginTop: 4 }}>
-              {t("publish.blockedHow")}
+              {t("publish.rankedLastHow")}
             </div>
           </div>
         </div>

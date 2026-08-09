@@ -186,12 +186,13 @@ pub struct ControlPayload {
     pub resume_requires_user: bool,
     /// For `seller.status`: this seller's reputation, and the floor matching
     /// applies to it. `score < min_score` means every lane this device declares
-    /// is being filtered out.
+    /// is served only after the healthier ones — on any model that has other
+    /// supply, close to never.
     ///
-    /// Sent because a seller filtered out of matching has *no other symptom*:
+    /// Sent because a seller at the back of the queue has *no other symptom*:
     /// the client is connected, its lanes are declared, its console says it is
-    /// selling, and no request ever arrives. On 2026-08-05 that state lasted
-    /// hours and was only diagnosable by reading the gateway's Redis by hand.
+    /// selling, and no request arrives. On 2026-08-05 that state lasted hours
+    /// and was only diagnosable by reading the gateway's Redis by hand.
     #[serde(default)]
     pub score: i32,
     #[serde(default)]

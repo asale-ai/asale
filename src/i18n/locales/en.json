@@ -267,9 +267,9 @@
     "endpointTermsHint": "The floor is the share of list price below which this endpoint stops selling — it costs real money per token, so this is what keeps it from selling under cost. One key per account: connect several keys of the same vendor under different names, or the later one replaces the earlier. Both terms can be changed later on the account below.",
     "endpointChecking": "Checking…",
     "endpointConnected": "{{account}} connected over {{wire}}: serves {{served}} models, {{selling}} of them tradable here.",
-    "blockedTitle": "Your listings are not being matched",
-    "blockedBody": "Reputation is {{score}}, below the {{min}} the platform requires to route traffic to a seller. Your models stay listed, but no request will reach them.",
-    "blockedHow": "Reputation is recalculated from the last 24 hours of trades — success rate, latency and metering accuracy. It recovers on its own once the failed calls age out. If failures are ongoing, check the upstream account above."
+    "rankedLastTitle": "Your listings are last in line",
+    "rankedLastBody": "Reputation is {{score}}, below the {{min}} the platform treats as healthy. Your models stay listed and will still be used when nothing better is free, but every healthier seller is served ahead of you — on a busy model that means almost no traffic.",
+    "rankedLastHow": "Reputation is recalculated from the last 24 hours of trades — success rate, latency and metering accuracy. It recovers on its own once the failed calls age out. If failures are ongoing, check the upstream account above."
   },
   "consume": {
     "title": "Buy",

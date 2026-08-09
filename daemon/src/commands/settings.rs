@@ -42,11 +42,15 @@ pub fn upgrade_notice() -> Value {
     }
 }
 
-/// This seller's standing with the matcher: `{score, min_score, blocked}`, or
-/// `null` before the gateway has reported one.
+/// This seller's standing with the matcher: `{score, min_score, deprioritised}`,
+/// or `null` before the gateway has reported one.
 pub fn seller_status() -> Value {
     match asale_client_core::seller_status::get() {
-        Some(s) => json!({"score": s.score, "min_score": s.min_score, "blocked": s.blocked()}),
+        Some(s) => json!({
+            "score": s.score,
+            "min_score": s.min_score,
+            "deprioritised": s.deprioritised(),
+        }),
         None => Value::Null,
     }
 }
