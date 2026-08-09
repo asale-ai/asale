@@ -788,6 +788,7 @@
     "verifyResend": "重新发送链接",
     "verifyResent": "新的验证链接已发送。",
     "verifySendFailed": "账号已创建，但验证邮件发送失败，请重新获取链接。",
+    "verifyResendFailed": "验证邮件暂时发送失败，请过几分钟再试一次。",
     "backToSignIn": "返回登录"
   },
   "settings": {

@@ -788,6 +788,7 @@
     "verifyResend": "Send a new link",
     "verifyResent": "A new verification link is on its way.",
     "verifySendFailed": "Your account was created, but the verification email could not be sent. Please request a new link.",
+    "verifyResendFailed": "We could not send the verification email just now. Please try again in a few minutes.",
     "backToSignIn": "Back to sign in"
   },
   "settings": {

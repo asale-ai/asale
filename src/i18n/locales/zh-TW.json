@@ -788,6 +788,7 @@
     "verifyResend": "重新寄送連結",
     "verifyResent": "新的驗證連結已寄出。",
     "verifySendFailed": "帳號已建立，但驗證郵件寄送失敗，請重新取得連結。",
+    "verifyResendFailed": "驗證郵件暫時寄送失敗，請過幾分鐘再試一次。",
     "backToSignIn": "返回登入"
   },
   "settings": {

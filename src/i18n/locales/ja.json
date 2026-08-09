@@ -788,6 +788,7 @@
     "verifyResend": "新しいリンクを送信",
     "verifyResent": "新しい確認リンクを送信しました。",
     "verifySendFailed": "アカウントは作成されましたが、確認メールを送信できませんでした。新しいリンクを再送信してください。",
+    "verifyResendFailed": "確認メールを送信できませんでした。数分後にもう一度お試しください。",
     "backToSignIn": "ログインに戻る"
   },
   "settings": {

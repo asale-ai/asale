@@ -87,8 +87,14 @@ export function Account() {
   async function resendVerification() {
     setErr(""); setNotice(""); setBusy(true);
     try {
-      await invoke("resend_verification", { email: pending });
-      setNotice(t("account.verifyResent"));
+      // The call succeeding only means the server accepted the request; `sent`
+      // is what says a mail left. An unknown or already-verified address also
+      // reports `true` — the server will not say which addresses are
+      // registered — so `false` specifically means the provider refused a link
+      // this user is waiting for, and must not be dressed up as success.
+      const r = await invoke<{ sent?: boolean }>("resend_verification", { email: pending });
+      if (r?.sent === false) setErr(t("account.verifyResendFailed"));
+      else setNotice(t("account.verifyResent"));
     } catch (e) { setErr(errText(e)); } finally { setBusy(false); }
   }
 
