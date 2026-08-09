@@ -6,7 +6,7 @@ Asale relays other people's AI subscription quota, so a bug here can leak creden
 
 Please **do not open a public issue** for anything security-sensitive.
 
-Use GitHub's private reporting instead: [Security → Report a vulnerability](https://github.com/asale-ai/asale/security/advisories/new). It stays private between you and the maintainers until a fix ships.
+Use GitHub's private reporting instead: [Security → Report a vulnerability](https://github.com/asale-ai/asale/security/advisories/new). It stays private between you and the maintainers until a fix ships. If you cannot use GitHub advisories, email asale.user@gmail.com instead.
 
 What helps most: the client version, your OS, what you expected, what actually happened, and the smallest set of steps that reproduces it. Please strip any real credentials or tokens out of the report before sending it.
 
