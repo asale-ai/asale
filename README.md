@@ -4,6 +4,13 @@
 
 # Asale Client
 
+[![publish](https://img.shields.io/github/actions/workflow/status/asale-ai/asale/release.yml?label=publish&logo=github&style=flat-square)](https://github.com/asale-ai/asale/actions/workflows/release.yml)
+[![release](https://img.shields.io/github/v/release/asale-ai/asale?include_prereleases&label=release&style=flat-square)](https://github.com/asale-ai/asale/releases)
+[![version](https://img.shields.io/badge/version-alpha-orange?style=flat-square)](https://github.com/asale-ai/asale/releases)
+[![downloads](https://img.shields.io/github/downloads/asale-ai/asale/total?style=flat-square&color=brightgreen)](https://github.com/asale-ai/asale/releases)
+[![commit activity](https://img.shields.io/github/commit-activity/m/asale-ai/asale?style=flat-square)](https://github.com/asale-ai/asale/commits/main)
+[![license](https://img.shields.io/github/license/asale-ai/asale?style=flat-square)](LICENSE)
+
 ### Share the tokens you don't use
 
 Turn idle quota into income; when you hit a limit, someone else takes over.
