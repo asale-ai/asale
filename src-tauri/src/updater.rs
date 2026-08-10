@@ -19,6 +19,14 @@
 //!   3. open the app again — whether or not step 2 worked, because an update
 //!      the user cancelled must not leave them with no application.
 //!
+//! Step 3 is two things, not one. Starting the app is the helper's job and it
+//! is reliable. Putting it *in front of* the windows the user was left with
+//! while the installer ran is not: the helper is by then an orphan with no
+//! session of its own to activate from, and an app that came up behind a
+//! browser is indistinguishable from an update that reopened nothing. So the
+//! helper nudges (`activate`), and the build that comes up raises itself —
+//! see `take_relaunch_flag`, which `lib.rs` reads on startup.
+//!
 //! Elevation belongs to the helper, not to us: `/usr/local/bin` is root-owned
 //! and a piped installer has no terminal for `sudo` to prompt on. macOS gets
 //! the system authorization dialog (`osascript … with administrator
@@ -94,6 +102,7 @@ pub fn install_command() -> String {
 pub fn run(app: &AppHandle) -> Result<(), String> {
     let script = write_helper()?;
     spawn_detached(&script)?;
+    mark_relaunch();
     tracing::info!("update helper started: {}", script.display());
 
     // Quit on a delay rather than here: the command has to return first, or the
@@ -114,6 +123,35 @@ fn work_dir() -> PathBuf {
     let dir = PathBuf::from(asale_daemon::state::data_dir());
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+/// Left behind by the build that quit for an update, picked up by the build
+/// that replaces it. A file rather than a launch argument because the two ends
+/// are different binaries started minutes apart by a script in between, and an
+/// argument would have to survive `open`, `Start-Process` and the
+/// single-instance plugin to get here.
+fn relaunch_flag() -> PathBuf {
+    work_dir().join("reopen-after-update")
+}
+
+fn mark_relaunch() {
+    if let Err(e) = std::fs::write(relaunch_flag(), "") {
+        // Not fatal: the helper still reopens the app, it just may come up
+        // behind another window.
+        tracing::warn!("could not record the post-update relaunch: {e}");
+    }
+}
+
+/// Whether this launch is the one that follows an update — consumed on read, so
+/// a flag stranded by a crash mid-install cannot raise the window on every
+/// launch from then on.
+pub fn take_relaunch_flag() -> bool {
+    let path = relaunch_flag();
+    if path.exists() {
+        let _ = std::fs::remove_file(&path);
+        return true;
+    }
+    false
 }
 
 /// The app to open once the installer is done.
@@ -178,7 +216,19 @@ fn write_helper() -> Result<PathBuf, String> {
     // By path first, by name second: the installer replaces the bundle where it
     // stands, so the path this build was launched from is still right — and it
     // is the only thing that tells a dev build apart from the release beside it.
-    let relaunch = format!("/usr/bin/open {target} || /usr/bin/open -a Asale\n");
+    //
+    // Then `activate`, because `open` from here only hands a launch request to
+    // LaunchServices: the app starts, but nothing promises it starts *in front*
+    // of whatever the user turned to while the installer ran. The sleep is for
+    // the webview — activating a bundle that has not finished launching does
+    // nothing — and AppleScript's `activate` launches the app itself if `open`
+    // somehow did not, so this doubles as the last fallback.
+    let relaunch = format!(
+        "/usr/bin/open {target} || /usr/bin/open -a Asale || echo 'could not reopen Asale'\n\
+         sleep 3\n\
+         /usr/bin/osascript -e 'tell application \"Asale\" to activate' >/dev/null 2>&1 \
+         || echo 'reopened, but could not bring the window to the front'\n"
+    );
 
     #[cfg(not(target_os = "macos"))]
     let install = format!(
@@ -311,5 +361,51 @@ fn sq(s: &str) -> String {
 #[cfg(windows)]
 fn pq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// One test, not two: both halves point `ASALE_DATA_DIR` at a scratch
+    /// directory, and cargo runs tests in threads of a single process.
+    ///
+    /// The helper is a shell script assembled from format strings, and it runs
+    /// in the one place with no window left to report a syntax error into — so
+    /// hand it to `sh -n` here instead, and check that the part the user
+    /// actually notices (the app coming back) is in it.
+    #[test]
+    fn the_helper_reopens_the_app_and_says_so_to_the_next_launch() {
+        let dir = std::env::temp_dir().join("asale-updater-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("ASALE_DATA_DIR", &dir);
+
+        let path = write_helper().expect("helper written");
+        let body = std::fs::read_to_string(&path).expect("helper readable");
+
+        let out = Command::new("/bin/sh").arg("-n").arg(&path).output().expect("sh -n ran");
+        assert!(out.status.success(), "helper is not valid sh: {}", String::from_utf8_lossy(&out.stderr));
+
+        // The relaunch must come after the installer, unconditionally: an
+        // update the user cancelled must still leave them with an app.
+        let install = body.find("install.sh").expect("the helper runs the installer");
+        let reopen = if cfg!(target_os = "macos") {
+            body.find("/usr/bin/open").expect("the helper reopens the app")
+        } else {
+            body.rfind(&relaunch_target().to_string_lossy().to_string())
+                .expect("the helper reopens the app")
+        };
+        assert!(reopen > install, "the app is reopened before the installer runs");
+
+        // Read once, then gone: a flag stranded by a crash mid-install would
+        // otherwise pull the window to the front on every launch from then on.
+        assert!(!take_relaunch_flag(), "no update has run, so nothing to raise");
+        mark_relaunch();
+        assert!(take_relaunch_flag(), "the launch after an update raises the window");
+        assert!(!take_relaunch_flag(), "and only that one launch does");
+
+        std::env::remove_var("ASALE_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 

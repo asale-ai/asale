@@ -566,6 +566,53 @@ export interface Lane {
   max_ratio: number;
 }
 
+/** What the gateway says about who served a request. */
+export interface Provenance {
+  /** The subscription kind that answered — `claude`, `codex`, `custom`, … */
+  upstream: string;
+  model: string;
+  task: string;
+  /** Buyer and seller were the same account. Always true for a supply test,
+   *  and worth showing: it is the proof the request came back to this device
+   *  rather than being served by somebody else's lane. */
+  self: boolean;
+}
+
+/** The result of buying from this device's own lane (`test_supply`).
+ *
+ *  A failure is a *result*, not a thrown error: "the market refused to route to
+ *  me" is the answer the seller pressed the button for, and it has to be
+ *  readable next to the row it belongs to rather than flashing past as a toast.
+ *  Only the reasons the test could not be *run* — no such model, selling
+ *  switched off — arrive as exceptions. */
+export interface SupplyTest {
+  ok: boolean;
+  /** How far the request got: `transport` never reached the gateway,
+   *  `gateway` was refused by it, `unpinned` was answered by a different seller
+   *  (so it proves nothing about this device), `served` came back from here. */
+  stage: "transport" | "gateway" | "unpinned" | "served";
+  status?: number;
+  elapsed_ms: number;
+  model: string;
+  wire: string;
+  provenance?: Provenance;
+  /** The assistant's words, when the dialect and the model produced any. Empty
+   *  on a reasoning model that spent its whole ceiling thinking — which is a
+   *  success, and `out_tokens` is what says so. */
+  reply?: string;
+  in_tokens?: number;
+  out_tokens?: number;
+  /** Set when the gateway answered 200 with a refusal rather than a model's
+   *  answer — "nobody is selling this", "top up", "upgrade the app". Carries the
+   *  refusal's code; the prose it came with is in `error`. */
+  notice?: string;
+  /** Present only when `ok` is false. The same `{error, key, params}` envelope
+   *  a thrown command failure carries, so `toDaemonError` + `errText` render it
+   *  in the user's language — a market refusal reads the same whether it
+   *  arrived as an exception or as a result. */
+  error?: { error?: string; key?: string; params?: Record<string, string | number | boolean> };
+}
+
 export interface AccountStatus {
   provider: string;
   account_id: string;

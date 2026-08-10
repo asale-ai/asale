@@ -117,6 +117,29 @@ pub const H_CHALLENGE: &str = "x-asale-challenge";
 /// that means exactly one thing survives a UA-string reformat.
 pub const H_CLIENT_VERSION: &str = "x-asale-client-version";
 
+/// Buy-side request header naming the one device that may serve it.
+///
+/// Matching normally chooses, and that is the whole point of a market — so this
+/// exists for the single question a market cannot answer: *is my own selling
+/// working?* A seller watching a lane sit at "online, earning nothing" has no
+/// way to tell an upstream that has stopped answering apart from a market that
+/// simply has not sent them anything, and every indirect test (probing the
+/// vendor by hand, waiting for a buyer) checks something other than the path a
+/// real request takes.
+///
+/// So the test is a real buy that happens to be pinned: same key, same gateway,
+/// same catalog and price checks, same relay frame, same executor on the seller
+/// side, same metering afterwards. Only the choice of lane is taken away from
+/// the matcher.
+///
+/// **The gateway must verify the named device belongs to the caller** (see
+/// `relay::handle_inner`). Unverified, this header would be a way to aim
+/// requests at a stranger's subscription — picking out one seller to drain, or
+/// to fail repeatedly until their reputation collapses. Owning both sides makes
+/// it a self-test and nothing else: the tokens come off the caller's own
+/// subscription window, which is exactly what they are trying to measure.
+pub const H_TARGET_DEVICE: &str = "x-asale-target-device";
+
 /// The exact bytes both sides sign and verify. Defined once so the two can
 /// never disagree about field order or separator.
 pub fn handshake_signing_body(

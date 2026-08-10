@@ -190,6 +190,29 @@
     "cliRescanHint": "重新掃描本機 CLI 憑證並匯入（啟動時已自動執行一次）",
     "cliImportedN": "已從本機匯入 {{n}} 個帳號。",
     "sellSwitch": "賣出此帳號",
+    "test": {
+      "open": "測試賣出",
+      "title": "測試賣出",
+      "body": "按買家的真實路徑，向 {{account}} 買一次短回覆，然後把結果顯示給你。",
+      "modelLabel": "模型",
+      "modelNotSelling": "該模型目前不在市場上，測試會被拒絕。",
+      "wireLabel": "協定",
+      "wireHint": "請求使用的協定格式。平台會做轉換，所以這幾種協定都可以由該帳號來服務。",
+      "costNote": "這是一次真實購買：會花掉少量餘額，也會消耗該訂閱的一點額度。",
+      "run": "開始測試",
+      "running": "測試中…",
+      "pass": "賣出正常",
+      "fail": {
+        "transport": "無法連線到平台",
+        "gateway": "市場沒有把請求路由到本裝置",
+        "unpinned": "這次是別的賣家應答的，無法證明你的通道是否正常。請更新平台後重試。",
+        "served": "已服務，但回覆無法解析"
+      },
+      "tookSeconds": "往返 {{s}} 秒",
+      "servedBy": "由誰服務",
+      "tokens": "輸入 / 輸出 Token",
+      "reply": "回覆"
+    },
     "sharedBadge": "與本機 CLI 共用",
     "sharedHint": "此憑證由本機安裝的 CLI 匯入，兩者使用同一個上游登入。",
     "ownedBadge": "Asale 獨佔",
@@ -859,7 +882,8 @@
     "requestFailed": "請求失敗，請重試。",
     "listSep": "、",
     "refresh": "重新整理",
-    "cancel": "取消"
+    "cancel": "取消",
+    "close": "關閉"
   },
   "modelPicker": {
     "title": "選擇模型",
@@ -940,7 +964,9 @@
       "disabled": "API Key 已被停用。"
     },
     "gateway": {
-      "unknownDialect": "此介面不支援路徑 {{path}}。"
+      "unknownDialect": "此介面不支援路徑 {{path}}。",
+      "targetDeviceNotYours": "指定的賣家裝置不屬於目前帳號。",
+      "targetDeviceMalformed": "請求中指定的賣家裝置無法辨識。"
     },
     "market": {
       "noSupply": "目前沒有賣家在售 {{model}}。",
@@ -1074,6 +1100,11 @@
     "share": {
       "badImage": "這不是一張有效的收益卡片圖片。",
       "saveFailed": "圖片寫入磁碟失敗。"
+    },
+    "probe": {
+      "noModel": "請選擇要測試的模型。",
+      "noLane": "`{{model}}` 不是該帳號的模型。",
+      "sellOff": "請先開啟該帳號的賣出開關，再進行測試。"
     }
   },
   "tray": {

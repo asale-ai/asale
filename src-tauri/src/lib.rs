@@ -163,6 +163,26 @@ pub fn run() {
                     .build()?;
             }
 
+            // A launch that follows "restart to update" has to end with a window
+            // the user can see. The helper script can only ask the platform to
+            // start this build; by then it is an orphan of the process that
+            // quit, with no session of its own to activate from, and a window
+            // that came up behind the browser they read the release notes in
+            // looks exactly like an update that reopened nothing. This process
+            // is the one thing that can raise it, so it does.
+            //
+            // On a timer, not inline: the window is created a few lines up and
+            // the webview behind it is not on screen yet, so showing it here
+            // would be showing something that is about to be laid out again.
+            if updater::take_relaunch_flag() {
+                tracing::info!("relaunched after an update — bringing the window to the front");
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(800));
+                    show_main(&handle);
+                });
+            }
+
             // The tray overview panel. Built hidden and positioned on each open
             // (see tray::toggle_panel). A failure here is not fatal: the tray
             // menu still works, and a left click falls back to opening the app.

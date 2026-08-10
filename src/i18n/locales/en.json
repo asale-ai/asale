@@ -190,6 +190,29 @@
     "cliRescanHint": "Re-scan this machine's CLI credentials and import them (already done once at startup)",
     "cliImportedN": "Imported {{n}} account(s) from this machine.",
     "sellSwitch": "Sell this account",
+    "test": {
+      "open": "Test selling",
+      "title": "Test selling",
+      "body": "Buys one short reply from {{account}} through the market, exactly the way a buyer would — then shows what came back.",
+      "modelLabel": "Model",
+      "modelNotSelling": "This model is not on the market right now, so the test will be refused.",
+      "wireLabel": "Protocol",
+      "wireHint": "The dialect the request is written in. The platform translates, so any of these can be served by this account.",
+      "costNote": "This is a real purchase: it spends a little balance and a little of this subscription's quota.",
+      "run": "Run test",
+      "running": "Testing…",
+      "pass": "Your selling works",
+      "fail": {
+        "transport": "Could not reach the platform",
+        "gateway": "The market did not route to this device",
+        "unpinned": "Another seller answered — this proves nothing about your lane. Update the platform and try again.",
+        "served": "Served, but the reply could not be read"
+      },
+      "tookSeconds": "{{s}}s round trip",
+      "servedBy": "Served by",
+      "tokens": "Tokens in / out",
+      "reply": "Reply"
+    },
     "sharedBadge": "shared with local CLI",
     "sharedHint": "This credential was imported from a CLI installed on this machine, so both use the same upstream login.",
     "ownedBadge": "Asale only",
@@ -859,7 +882,8 @@
     "requestFailed": "The request failed. Please try again.",
     "listSep": ", ",
     "refresh": "Refresh",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "close": "Close"
   },
   "modelPicker": {
     "title": "Choose models",
@@ -940,7 +964,9 @@
       "disabled": "That API key has been disabled."
     },
     "gateway": {
-      "unknownDialect": "This endpoint does not accept requests at {{path}}."
+      "unknownDialect": "This endpoint does not accept requests at {{path}}.",
+      "targetDeviceNotYours": "That seller device is not on this account.",
+      "targetDeviceMalformed": "The request named a seller device that could not be read."
     },
     "market": {
       "noSupply": "No provider is selling {{model}} right now.",
@@ -1074,6 +1100,11 @@
     "share": {
       "badImage": "That is not a share card image.",
       "saveFailed": "Could not write the image to disk."
+    },
+    "probe": {
+      "noModel": "Choose a model to test.",
+      "noLane": "`{{model}}` is not one of this account's models.",
+      "sellOff": "Turn selling on for this account before testing it."
     }
   },
   "tray": {

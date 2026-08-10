@@ -190,6 +190,29 @@
     "cliRescanHint": "重新扫描本机 CLI 凭据并导入（启动时已自动执行一次）",
     "cliImportedN": "已从本机导入 {{n}} 个账号。",
     "sellSwitch": "卖出该账号",
+    "test": {
+      "open": "测试卖出",
+      "title": "测试卖出",
+      "body": "按买家的真实路径，向 {{account}} 买一次短回复，然后把结果展示给你。",
+      "modelLabel": "模型",
+      "modelNotSelling": "该模型当前不在市场上，测试会被拒绝。",
+      "wireLabel": "协议",
+      "wireHint": "请求使用的协议格式。平台会做转换，所以这几种协议都可以由该账号来服务。",
+      "costNote": "这是一次真实购买：会花掉少量余额，也会消耗该订阅的一点额度。",
+      "run": "开始测试",
+      "running": "测试中…",
+      "pass": "卖出正常",
+      "fail": {
+        "transport": "无法连接到平台",
+        "gateway": "市场没有把请求路由到本设备",
+        "unpinned": "这次是别的卖家应答的，无法证明你的通道是否正常。请更新平台后重试。",
+        "served": "已服务，但回复无法解析"
+      },
+      "tookSeconds": "往返 {{s}} 秒",
+      "servedBy": "由谁服务",
+      "tokens": "输入 / 输出 Token",
+      "reply": "回复"
+    },
     "sharedBadge": "与本机 CLI 共用",
     "sharedHint": "该凭据从本机安装的 CLI 导入，两者使用同一个上游登录。",
     "ownedBadge": "Asale 独占",
@@ -859,7 +882,8 @@
     "requestFailed": "请求失败，请重试。",
     "listSep": "、",
     "refresh": "刷新",
-    "cancel": "取消"
+    "cancel": "取消",
+    "close": "关闭"
   },
   "modelPicker": {
     "title": "选择模型",
@@ -940,7 +964,9 @@
       "disabled": "API Key 已被停用。"
     },
     "gateway": {
-      "unknownDialect": "该接口不支持路径 {{path}}。"
+      "unknownDialect": "该接口不支持路径 {{path}}。",
+      "targetDeviceNotYours": "指定的卖家设备不属于当前账号。",
+      "targetDeviceMalformed": "请求中指定的卖家设备无法识别。"
     },
     "market": {
       "noSupply": "当前没有卖家在售 {{model}}。",
@@ -1074,6 +1100,11 @@
     "share": {
       "badImage": "这不是一张有效的收益卡片图片。",
       "saveFailed": "图片写入磁盘失败。"
+    },
+    "probe": {
+      "noModel": "请选择要测试的模型。",
+      "noLane": "`{{model}}` 不是该账号的模型。",
+      "sellOff": "请先打开该账号的卖出开关，再进行测试。"
     }
   },
   "tray": {

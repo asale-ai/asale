@@ -556,6 +556,14 @@ rpc_args! {
         #[serde(default, alias = "account_id")] account_id: Option<String>,
         #[serde(default)] model: Option<String>,
     }
+    // The supply self-test. `wire` absent → the OpenAI-compatible dialect,
+    // which is the one every buyer's tool can speak.
+    ProbeArgs      {
+        provider: String,
+        #[serde(alias = "account_id")] account_id: String,
+        model: String,
+        #[serde(default)] wire: Option<String>,
+    }
     PeriodArgs     { #[serde(default)] period: Option<String> }
     ForceArgs      { #[serde(default)] force: Option<bool> }
     OverviewArgs   { #[serde(default)] period: Option<String>, #[serde(default)] scope: Option<String> }
@@ -800,6 +808,12 @@ async fn rpc(
         "remove_custom_endpoint" => {
             let p: EndpointArgs = args(&a)?;
             commands::remove_custom_endpoint(st, p.account_id).await.map(Value::Bool)?
+        },
+        // Buy from this device's own lane, on purpose. Costs real money and
+        // real subscription quota — see `commands::probe`.
+        "test_supply" => {
+            let p: ProbeArgs = args(&a)?;
+            commands::test_supply(st, p.provider, p.account_id, p.model, p.wire.unwrap_or_default()).await?
         },
         "resume_lane" => {
             let p: LaneArgs = args(&a)?;

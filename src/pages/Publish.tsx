@@ -3,11 +3,14 @@ import { useTranslation } from "react-i18next";
 import { groupModelsByFamily } from "@shared/model-groups";
 import {
   invoke, inTauri, realTauri, runOAuthFlow, submitOAuthCode, fmtTokens,
-  isSignedOut, gotoSignIn, requireSignIn, DaemonError,
-  type AccountStatus, type ClientStatus, type ImportAllResult, type Lane,
+  isSignedOut, gotoSignIn, requireSignIn, DaemonError, toDaemonError,
+  type AccountStatus, type ClientStatus, type ImportAllResult, type Lane, type SupplyTest,
 } from "../lib";
 import { Card, Ok, Err, SkeletonRows, PageHead, IconAction, Empty, Mark, CopyChip, FoldToggle } from "../ui";
-import { IconTrash, IconShield, IconChip, IconRefresh, IconPlus, IconPencil, IconInfo } from "../icons";
+import {
+  IconTrash, IconShield, IconChip, IconRefresh, IconPlus, IconPencil, IconInfo,
+  IconZap, IconX, IconCheck, IconAlert,
+} from "../icons";
 import { errText } from "../errors";
 
 /**
@@ -364,6 +367,209 @@ function DiscountRank({
  *  The market session simply follows these switches (the daemon connects on the
  *  first account switched on and disconnects with the last), and the link's own
  *  state is shown by the global status widget in the top bar. */
+/** The dialects a test request can be written in, in the order offered.
+ *
+ * This is a *buyer's* choice, not a fact about the seller: the gateway
+ * translates between dialects, so an OpenAI-shaped request is legitimately
+ * served by a Claude subscription. Offering it is what lets the test answer
+ * "can the tool I care about buy from me" — Codex speaks Responses, Claude Code
+ * speaks Anthropic, and the translation between them is itself a thing that can
+ * break while every lane looks healthy.
+ *
+ * OpenAI-compatible is first because it is the one every buyer's tool can
+ * speak, so it is the answer when the seller has no particular tool in mind.
+ * The ids match `commands::probe::WIRES` on the daemon. */
+const TEST_WIRES = [
+  { id: "openai", label: "OpenAI" },
+  { id: "claude", label: "Anthropic" },
+  { id: "gemini", label: "Gemini" },
+  { id: "responses", label: "OpenAI Responses" },
+];
+
+/** Buy from one of this account's own lanes, and show what came back.
+ *
+ * Every other control on this page reports what *this machine* believes. This
+ * one is the only thing on it that can be wrong in the direction that matters:
+ * it asks the market for an answer and gets one, or does not. So the result
+ * says which of the two happened and how long it took, and — on the success
+ * path — which subscription actually served, because a device can hold several
+ * accounts of one provider and the seller-side pool, not this dialog, decides
+ * which of them takes the request.
+ *
+ * The cost is stated before the button rather than after it. This spends real
+ * balance and real subscription quota, and a test that quietly bills someone is
+ * a worse tool than one that asks.
+ */
+function TestDialog({
+  account, lanes, onClose,
+}: {
+  account: AccountStatus;
+  lanes: Lane[];
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  // Selling lanes first, then the rest: the default has to be a model that
+  // could actually answer, or the first thing every seller sees is a failure
+  // that is about their choice rather than about their supply.
+  const options = useMemo(() => {
+    const rank = (l: Lane) => (l.status === "selling" ? 0 : l.sell_enabled ? 1 : 2);
+    return [...lanes].sort((a, b) => rank(a) - rank(b) || a.model.localeCompare(b.model));
+  }, [lanes]);
+
+  const [model, setModel] = useState(() => options[0]?.model ?? "");
+  const [wire, setWire] = useState(TEST_WIRES[0].id);
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<SupplyTest | null>(null);
+  const [err, setErr] = useState("");
+
+  const chosen = options.find((l) => l.model === model);
+
+  async function run() {
+    setRunning(true);
+    setResult(null);
+    setErr("");
+    try {
+      setResult(await invoke<SupplyTest>("test_supply", {
+        provider: account.provider,
+        accountId: account.account_id,
+        model,
+        wire,
+      }));
+    } catch (e) {
+      // Only the reasons the test could not be *run* land here; a refusal by
+      // the market comes back as a result with `ok: false`.
+      setErr(errText(e));
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return (
+    <div
+      className="modal-backdrop"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget && !running) onClose();
+      }}
+    >
+      <div className="modal" role="dialog" aria-modal="true">
+        <div className="modal-head">
+          <h3>{t("publish.test.title")}</h3>
+          <button type="button" className="modal-x" onClick={onClose} disabled={running}>
+            <IconX />
+          </button>
+        </div>
+        <div style={{ padding: "0 var(--s5) var(--s5)" }}>
+          <p className="sub">{t("publish.test.body", { account: account.account_id })}</p>
+
+          <div className="field">
+            <label>{t("publish.test.modelLabel")}</label>
+            <select
+              className="input"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              disabled={running || options.length === 0}
+            >
+              {options.map((l) => (
+                <option key={l.model} value={l.model}>
+                  {l.model}
+                  {l.status !== "selling" ? ` · ${t(`publish.laneStatus.${l.status}`, { defaultValue: l.status })}` : ""}
+                </option>
+              ))}
+            </select>
+            {/* A model that is not on the market will fail, and it will fail for
+                a reason this page already shows above. Saying so first is
+                cheaper than letting them buy the answer. */}
+            {chosen && chosen.status !== "selling" && (
+              <div className="hint">{t("publish.test.modelNotSelling")}</div>
+            )}
+          </div>
+
+          <div className="field">
+            <label>{t("publish.test.wireLabel")}</label>
+            <select className="input" value={wire} onChange={(e) => setWire(e.target.value)} disabled={running}>
+              {TEST_WIRES.map((w) => (
+                <option key={w.id} value={w.id}>{w.label}</option>
+              ))}
+            </select>
+            <div className="hint">{t("publish.test.wireHint")}</div>
+          </div>
+
+          <div className="callout compact">
+            <IconInfo /><span>{t("publish.test.costNote")}</span>
+          </div>
+
+          <div className="btn-row" style={{ marginTop: "var(--s4)" }}>
+            <button className="btn" onClick={run} disabled={running || !model}>
+              {running ? t("publish.test.running") : t("publish.test.run")}
+            </button>
+            <button className="btn subtle" onClick={onClose} disabled={running}>
+              {t("common.close")}
+            </button>
+          </div>
+
+          {result && <TestResult result={result} />}
+          <Err>{err}</Err>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** What came back, in the terms the seller asked the question in.
+ *
+ * A pass is not "200 OK" — it is that a request took the buyer's path and this
+ * machine answered it, so the line that matters is the round trip and who
+ * served. A failure is not a stack trace either: the market's own refusal
+ * already carries a translated sentence, and the stage is what tells the seller
+ * whether to look at their network, their balance, or their subscription.
+ */
+function TestResult({ result: r }: { result: SupplyTest }) {
+  const { t } = useTranslation();
+  const seconds = (r.elapsed_ms / 1000).toFixed(1);
+  return (
+    <div className={`callout ${r.ok ? "" : "warn"} card-foot`} style={{ display: "block" }}>
+      <div className="value-row">
+        {r.ok ? <IconCheck /> : <IconAlert />}
+        <span className="value-strong">
+          {r.ok ? t("publish.test.pass") : t(`publish.test.fail.${r.stage}`, { defaultValue: t("publish.test.fail.gateway") })}
+        </span>
+        <span className="faint mono">{t("publish.test.tookSeconds", { s: seconds })}</span>
+      </div>
+
+      {r.ok ? (
+        <div className="fact-grid tight" style={{ marginTop: "var(--s3)" }}>
+          <div className="fact">
+            <span className="fact-k">{t("publish.test.servedBy")}</span>
+            <span className="fact-v mono">{r.provenance?.upstream || "—"}</span>
+          </div>
+          <div className="fact">
+            <span className="fact-k">{t("publish.test.tokens")}</span>
+            <span className="fact-v mono">{`${r.in_tokens ?? 0} / ${r.out_tokens ?? 0}`}</span>
+          </div>
+          {/* Empty is a real answer from a reasoning model that spent its whole
+              ceiling thinking, so the row is only drawn when there are words. */}
+          {r.reply && (
+            <div className="fact">
+              <span className="fact-k">{t("publish.test.reply")}</span>
+              <span className="fact-v mono">{r.reply}</span>
+            </div>
+          )}
+        </div>
+      ) : (
+        // Only when there is something to add. A failure whose headline is the
+        // whole explanation — nobody else served this, so nothing was proved —
+        // would otherwise be followed by a generic "request failed", which reads
+        // as a second, vaguer fault rather than as the same one.
+        r.error && (
+          <div className="hint" style={{ marginTop: "var(--s2)" }}>
+            {errText(toDaemonError(r.error, t("common.requestFailed")))}
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
 export function Publish() {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
@@ -375,6 +581,8 @@ export function Publish() {
   const [acctErr, setAcctErr] = useState("");
   /** Accounts with a sell action in flight, keyed by `provider:account_id`. */
   const [pending, setPending] = useState<Record<string, boolean>>({});
+  /** Which account's supply test is open, by the same key; "" = none. */
+  const [testing, setTesting] = useState("");
 
   // Per-model lane state. `now` ticks once a second so the countdowns on
   // cooling lanes actually count down between the 4s account polls.
@@ -504,6 +712,11 @@ export function Publish() {
     const id = setInterval(poll, 30000);
     return () => clearInterval(id);
   }, []);
+
+  // The account whose test dialog is open. Resolved from the live list rather
+  // than captured when the button was pressed, so an account removed (or
+  // switched off) under a four-second poll closes its own dialog.
+  const testAccount = accounts.find((a) => keyOf(a) === testing && a.sell_enabled);
 
   /** Put a lane the operator has fixed back on the market. */
   async function resume(lane: Lane) {
@@ -1216,6 +1429,18 @@ export function Publish() {
                         />
                         <span className="track" />
                       </label>
+                      {/* Only offered on an account that is actually selling: a
+                          test of a switched-off account has one possible answer
+                          and the switch beside it already gives it. */}
+                      <button
+                        className="icon-btn sm"
+                        onClick={() => setTesting(k)}
+                        disabled={!inTauri || !a.sell_enabled || own.length === 0}
+                        title={t("publish.test.open")}
+                        aria-label={t("publish.test.open")}
+                      >
+                        <IconZap />
+                      </button>
                       <button className="icon-btn ghost-danger" onClick={() => removeAccount(a)} title={t("publish.remove")}>
                         <IconTrash />
                       </button>
@@ -1524,6 +1749,17 @@ export function Publish() {
         <Err>{importErr}</Err>
         <Err>{acctErr}</Err>
       </Card>
+
+      {/* Keyed on the account so switching rows resets the dialog's own state
+          rather than showing the previous account's result under a new name. */}
+      {testAccount && (
+        <TestDialog
+          key={testing}
+          account={testAccount}
+          lanes={lanes.filter((l) => l.provider === testAccount.provider && l.account_id === testAccount.account_id)}
+          onClose={() => setTesting("")}
+        />
+      )}
     </div>
   );
 }

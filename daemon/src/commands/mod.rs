@@ -23,6 +23,7 @@
 //!                       tools this machine buys through
 //!   [`settings`]      — daemon identity, upstream proxy, consume mode
 //!   [`sell`]          — publishing switch, devices, publisher policy
+//!   [`probe`]         — buying your own lane, to prove it can be bought from
 //!   [`accounts`]      — subscription discovery/import + per-account sell rules
 //!   [`buy`]           — pointing a local AI CLI at the proxy, and back
 //!   [`records`]       — task records and reconciliation
@@ -39,6 +40,7 @@ pub mod apikeys;
 pub mod auth;
 pub mod buy;
 pub mod oauth_flow;
+pub mod probe;
 pub mod records;
 pub mod sell;
 pub mod server_client;
@@ -52,6 +54,7 @@ pub use apikeys::*;
 pub use auth::*;
 pub use buy::*;
 pub use oauth_flow::*;
+pub use probe::*;
 pub use records::*;
 pub use sell::*;
 pub use settings::*;
