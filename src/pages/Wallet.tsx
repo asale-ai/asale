@@ -10,14 +10,14 @@ import {
   type Wallet, type WalletHistory,
 } from "../lib";
 import { Card, Skeleton, PageHead, IconAction, Empty } from "../ui";
-import { WalletDialog, type WalletMode } from "../components/WalletDialog";
+import { WalletDialog, CardTopUpDialog, type WalletMode } from "../components/WalletDialog";
 import { EarningsShareDialog } from "../components/EarningsShareDialog";
 import { errText } from "../errors";
 import { sitePage } from "../links";
 import { openExternal } from "../shell";
 import {
   IconWallet, IconRefresh, IconDownload, IconArrowRight,
-  IconShield, IconCheck, IconRecords, IconShare, IconExternal,
+  IconShield, IconCheck, IconRecords, IconShare, IconExternal, IconChevronDown,
 } from "../icons";
 
 type HistTab = "all" | "deposit" | "withdraw";
@@ -55,6 +55,24 @@ export function WalletPage() {
   /* Which funding sheet is open; null = none. */
   const [pane, setPane] = useState<WalletMode | null>(null);
   const [sharing, setSharing] = useState(false);
+  /* The card sheet is its own door, not a tab on the one above. */
+  const [cardOpen, setCardOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  /* A menu that only closes by picking something is a menu you cannot back out
+     of — the two ways everyone already tries are clicking away and Escape. */
+  useEffect(() => {
+    if (!menuOpen) return;
+    const away = (e: MouseEvent) => {
+      if (!(e.target as Element | null)?.closest(".split-btn")) setMenuOpen(false);
+    };
+    const key = (e: KeyboardEvent) => { if (e.key === "Escape") setMenuOpen(false); };
+    document.addEventListener("mousedown", away);
+    document.addEventListener("keydown", key);
+    return () => {
+      document.removeEventListener("mousedown", away);
+      document.removeEventListener("keydown", key);
+    };
+  }, [menuOpen]);
   const [histTab, setHistTab] = useState<HistTab>("all");
 
   const refresh = useCallback((manual = false) => {
@@ -126,9 +144,42 @@ export function WalletPage() {
             )}
           </div>
           <div className="wh-actions">
-            <button className="btn" onClick={() => setPane("deposit")} disabled={!inTauri}>
-              <IconDownload />{t("wallet.tabDeposit")}
-            </button>
+            {/* Two doors behind one button. The card is the default because it
+                is the only one someone can finish without already holding USDT
+                somewhere; buying crypto sits in the menu beside it. Where no
+                processor is configured there is no menu and the button opens
+                the crypto sheet directly — the old behaviour. */}
+            {hist?.card ? (
+              <div className="split-btn">
+                <button className="btn split-btn-main" onClick={() => setCardOpen(true)} disabled={!inTauri}>
+                  <IconDownload />{t("wallet.tabDeposit")}
+                </button>
+                <button
+                  className="btn split-btn-more"
+                  aria-haspopup="menu"
+                  aria-expanded={menuOpen}
+                  aria-label={t("wallet.depositMore")}
+                  onClick={() => setMenuOpen((v) => !v)}
+                  disabled={!inTauri}
+                >
+                  <IconChevronDown />
+                </button>
+                {menuOpen && (
+                  <div className="split-menu" role="menu">
+                    <button
+                      role="menuitem"
+                      onClick={() => { setMenuOpen(false); setPane("deposit"); }}
+                    >
+                      <IconWallet />{t("wallet.depositCrypto")}
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <button className="btn" onClick={() => setPane("deposit")} disabled={!inTauri}>
+                <IconDownload />{t("wallet.tabDeposit")}
+              </button>
+            )}
             <button className="btn ghost" onClick={() => setPane("withdraw")} disabled={!inTauri}>
               <IconArrowRight />{t("wallet.tabWithdraw")}
             </button>
@@ -148,6 +199,12 @@ export function WalletPage() {
             limits={hist}
             balance={availableMicros}
             onClose={() => setPane(null)}
+            onDone={() => refresh()}
+          />
+          <CardTopUpDialog
+            open={cardOpen}
+            limits={hist?.card ?? null}
+            onClose={() => setCardOpen(false)}
             onDone={() => refresh()}
           />
           {sharing && <EarningsShareDialog onClose={() => setSharing(false)} />}

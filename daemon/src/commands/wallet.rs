@@ -163,6 +163,10 @@ pub async fn wallet_deposit_session(state: &AppState, chain: String, amount: Opt
 /// payment page — its CSP forbids the frame, and a card form inside somebody
 /// else's shell is the shape a phishing page has — so the desktop build pays in
 /// a real browser and watches the session from here.
+/// `amount` is optional and the choice is not cosmetic: with a figure the
+/// charge is fixed here and the wallet gains exactly that, without one the
+/// processor's page collects it and the surcharge comes out of what arrives
+/// instead. `null` and an omitted field mean the same thing to the server.
 pub async fn wallet_card_session(state: &AppState, amount: Option<i64>, open_local: bool) -> R<Value> {
     let out = authed(
         state,

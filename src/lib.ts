@@ -399,10 +399,13 @@ export interface WalletHistory {
  *  hosted checkout to open and the arithmetic behind the charge. */
 export interface CardSession extends DepositSession {
   checkout_url: string;
-  /** Surcharge, micro-USDT. */
-  fee: number;
-  /** What the card is billed, micro-USDT — the top-up plus the fee. */
-  charge: number;
+  /** Surcharge, micro-USDT. Null when the amount is still to be typed on the
+   *  processor's page: the fee is real but not yet a number, and the webhook
+   *  takes it out of whatever arrives. */
+  fee: number | null;
+  /** What the card is billed, micro-USDT — the top-up plus the fee. Null for
+   *  the same reason as `fee`. */
+  charge: number | null;
 }
 
 /** Base58 alphabet Solana (and Bitcoin) use — no 0, O, I or l. */

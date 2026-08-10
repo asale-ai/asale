@@ -1777,6 +1777,41 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .pay-done-split { font-size: var(--fs-meta); color: var(--fg-3); margin: -2px 0 0; font-variant-numeric: tabular-nums; }
 .pay-done-desc { font-size: var(--fs-sub); color: var(--fg-3); max-width: 300px; line-height: 1.6; margin: 0; }
 
+/* ── Split button ───────────────────────────────────────────────────────────
+   One primary action with a second, rarer one folded in beside it. Used by the
+   wallet: topping up by card is what almost everyone wants, and buying crypto
+   is the door for the few who already hold it — a second full-width button
+   would have given equal weight to the rarer path.
+
+   The two halves are one visual button: the divider is a hairline rather than
+   a gap, so the pair does not read as two separate controls.
+   Mirrors asale-web's `.split-btn`. */
+.split-btn { position: relative; display: inline-flex; }
+.split-btn-main {
+  border-top-right-radius: 0; border-bottom-right-radius: 0;
+  border-right: none;
+}
+.split-btn-more {
+  border-top-left-radius: 0; border-bottom-left-radius: 0;
+  padding-left: var(--s2); padding-right: var(--s2);
+  border-left: 1px solid rgb(255 255 255 / 0.22);
+}
+.split-menu {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 30;
+  min-width: max(100%, 176px);
+  display: flex; flex-direction: column;
+  padding: 4px; border-radius: var(--r2);
+  background: var(--bg-1); border: 1px solid var(--line);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.28);
+}
+.split-menu button {
+  display: flex; align-items: center; gap: var(--s2);
+  padding: var(--s2) var(--s3); border-radius: var(--r1);
+  font-size: var(--fs-sub); color: var(--fg-1); text-align: left;
+  background: none; border: none; cursor: pointer; width: 100%;
+}
+.split-menu button:hover { background: var(--bg-2); }
+
 /* ── Card top-up ────────────────────────────────────────────────────────────
    The rail with no address and no QR: an amount, a receipt for what it will
    cost, and one button. The receipt is the part that earns its place — the
