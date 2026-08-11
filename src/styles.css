@@ -150,6 +150,13 @@ body {
 
 button, input, select, textarea { font-family: inherit; font-size: inherit; }
 
+/* Icon floor. The stroke-icon set carries no intrinsic size — it is sized by
+   whatever container it lands in (`.btn svg`, `.navitem svg`, …), all of which
+   outrank this single class. Without a floor, an icon placed somewhere that has
+   no such rule falls back to the SVG default of 300×150 and blows the layout
+   open. Only icons.tsx sets `.ico`, so map and QR SVGs are untouched. */
+.ico { width: 15px; height: 15px; flex-shrink: 0; }
+
 ::selection { background: var(--accent-soft); }
 
 /* Scrollbars — present, not decorative. */
@@ -1808,8 +1815,12 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
   display: flex; align-items: center; gap: var(--s2);
   padding: var(--s2) var(--s3); border-radius: var(--r1);
   font-size: var(--fs-sub); color: var(--fg-1); text-align: left;
+  white-space: nowrap;
   background: none; border: none; cursor: pointer; width: 100%;
 }
+/* Same treatment as `.menu-item`: the icon is a marker beside the label, not a
+   second focus for the eye. */
+.split-menu button svg { width: 14px; height: 14px; flex-shrink: 0; color: var(--fg-3); }
 .split-menu button:hover { background: var(--bg-2); }
 
 /* ── Card top-up ────────────────────────────────────────────────────────────
@@ -1837,6 +1848,7 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
   display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2);
   font-size: var(--fs-meta); color: var(--fg-2);
 }
+.card-waiting svg { width: 14px; height: 14px; flex-shrink: 0; color: var(--fg-3); }
 .card-waiting a { color: var(--accent); }
 .card-waiting .dot {
   width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex-shrink: 0;

@@ -4,12 +4,10 @@ import type { ReactNode, SVGProps } from "react";
 
 type P = SVGProps<SVGSVGElement> & { size?: number };
 
-function Svg({ size, children, ...rest }: P & { children: ReactNode }) {
+function Svg({ size, className, style, children, ...rest }: P & { children: ReactNode }) {
   return (
     <svg
       viewBox="0 0 24 24"
-      width={size}
-      height={size}
       fill="none"
       stroke="currentColor"
       strokeWidth={1.8}
@@ -17,6 +15,12 @@ function Svg({ size, children, ...rest }: P & { children: ReactNode }) {
       strokeLinejoin="round"
       aria-hidden="true"
       {...rest}
+      /* `.ico` is the floor, not the size: every rule that sizes icons by their
+         container (`.btn svg`, `.navitem svg`, …) outranks it. It exists so an
+         icon dropped somewhere without such a rule renders as an icon rather
+         than at the SVG default of 300×150. */
+      className={className ? `ico ${className}` : "ico"}
+      style={size == null ? style : { width: size, height: size, ...style }}
     >
       {children}
     </svg>
