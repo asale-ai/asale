@@ -65,9 +65,14 @@ pub fn check_state_dir(
         home.map(str::trim).filter(|s| !s.is_empty()),
         userprofile.map(str::trim).filter(|s| !s.is_empty()),
     );
-    // No home at all: state lands beside the working directory, so it moves
-    // whenever the daemon is started from somewhere else. Always wrong.
-    let Some(home) = home else {
+    // No *spelling* of home at all: state lands beside the working directory, so
+    // it moves whenever the daemon is started from somewhere else. Always wrong.
+    //
+    // Which spelling is missing does not matter — [`crate::state::home_dir`]
+    // accepts any of them, and on Windows launched from Explorer or the Start
+    // menu `HOME` is *always* unset while `USERPROFILE` is what resolves. Reading
+    // `HOME` alone reported every one of those launches as lost credentials.
+    let Some(home) = home.or(userprofile) else {
         return Some(Finding {
             id: "noHome",
             severity: "error",
@@ -149,10 +154,19 @@ pub fn check_sell_switches(total: usize, enabled: usize) -> Option<Finding> {
 pub async fn run(state: &crate::state::AppState) -> Vec<Finding> {
     let mut out = Vec::new();
 
+    // The profile spelling, including the split-across-two-variables form that
+    // `home_dir()` falls back to. Same directory either way, so it is the same
+    // spelling as far as this check is concerned.
+    let userprofile = std::env::var("USERPROFILE").ok().filter(|s| !s.trim().is_empty()).or_else(|| {
+        match (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
+            (Ok(d), Ok(p)) if !d.trim().is_empty() && !p.trim().is_empty() => Some(format!("{d}{p}")),
+            _ => None,
+        }
+    });
     if let Some(f) = check_state_dir(
         std::env::var("ASALE_DATA_DIR").ok().as_deref(),
         std::env::var("HOME").ok().as_deref(),
-        std::env::var("USERPROFILE").ok().as_deref(),
+        userprofile.as_deref(),
         // "Has this directory ever been used?" — the secret store is the file
         // that only exists once something was actually saved there, which is
         // what distinguishes a real second half from an empty directory.
@@ -337,6 +351,21 @@ mod tests {
         let f = check_state_dir(None, None, None, &none).expect("flagged");
         assert_eq!(f.id, "noHome");
         assert_eq!(f.severity, "error");
+    }
+
+    /// Windows launched from Explorer or the Start menu: `HOME` unset,
+    /// `USERPROFILE` set. `data_dir()` resolves it, so there is nothing wrong —
+    /// and this is the *default* way the app is started, so getting it wrong
+    /// showed every Windows user a red "your credentials are lost" banner.
+    #[test]
+    fn the_profile_variable_alone_is_a_perfectly_good_home() {
+        assert!(check_state_dir(None, None, Some("C:/Users/u"), &all).is_none());
+        assert!(check_state_dir(None, None, Some("C:/Users/u"), &none).is_none());
+        // Blank counts as unset, here as everywhere else.
+        assert_eq!(
+            check_state_dir(None, Some("  "), Some("C:/Users/u"), &all).is_none(),
+            true
+        );
     }
 
     #[test]
