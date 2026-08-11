@@ -1,0 +1,16 @@
+# LF everywhere, in the working tree too.
+#
+# Git already stores these blobs with LF; the problem is the checkout. On
+# Windows `core.autocrlf=true` is the default, so the working tree comes back
+# CRLF -- and the release tooling runs against the working tree, from WSL:
+#
+#   deploy/bump-version.sh reads the version out of Cargo.toml with awk. The
+#   section header arrives as `[workspace.package]\r`, never equals
+#   `[workspace.package]`, and the release stops at "no version field found".
+#   In Cargo.lock the same stray \r makes the package-name match miss, which is
+#   worse -- nothing errors, the lockfile simply keeps the old version.
+#
+# The parent repo settled this the same way on 2026-07-31, for the same reason:
+# pin the whole tree rather than patch one parser at a time. text=auto leaves
+# binaries alone.
+* text=auto eol=lf
