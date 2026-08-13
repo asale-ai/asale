@@ -381,6 +381,27 @@ pub async fn set_buy_tool(
         if keychain::get("access_token").map_err(err)?.is_none() {
             return Err(cmd_err!("errors.session.signInToBuy", "sign in before buying"));
         }
+        // A config `apply` would refuse anyway (Hermes ignores YAML it cannot
+        // parse). Asked here so the refusal reaches the user in their own
+        // language — `apply`'s own guard raises English prose, which is what a
+        // Chinese-locale user was shown when their config.yaml went bad.
+        let t = tool.clone();
+        if !tokio::task::spawn_blocking(move || tool_config::config_is_writable(&t))
+            .await
+            .map_err(err)?
+        {
+            let path = tool_config::primary_config_path(&tool).to_string_lossy().to_string();
+            return Err(cmd_err!(
+                "errors.tool.configUnparsable",
+                format!(
+                    "{path} is not valid YAML — {} ignores the whole file when it cannot parse it, \
+                     so writing the buy settings into it would report success and change nothing",
+                    tool_config::label(&tool)
+                ),
+                tool = tool_config::label(&tool),
+                path = path.as_str()
+            ));
+        }
         let key = ensure_consumer_key(state).await?;
         let base = tool_config::proxy_base();
 

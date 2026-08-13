@@ -372,10 +372,22 @@ pub fn current_base_url(tool: &str) -> Option<String> {
         // Same rule again: the top-level `model` is what opencode starts on, so
         // it decides which provider block is the live one. A leftover `asale`
         // block the user has since stopped selecting is not "in effect".
+        //
+        // No `model` key at all is a different case, and the one `apply` itself
+        // produces: it only writes `model` once a model has been picked, so a
+        // switch turned on before any selection left a config that named no
+        // provider — which this read then reported as "not pointed at us", i.e.
+        // as drift, over a file holding exactly what asale had just written.
+        // `reconcile_configs` rewrote it on every poll and the page showed a
+        // warning blaming another program, which no amount of re-applying could
+        // clear. Falling back to our own block cannot resurrect a stale one:
+        // `strip_opencode` deletes the block outright when the switch goes off.
         "opencode" => {
             let v = read_json(&primary_config_path(tool));
-            let model = v.get("model")?.as_str()?;
-            let active = model.split_once('/').map(|(p, _)| p).unwrap_or(model);
+            let active = match v.get("model").and_then(Value::as_str) {
+                Some(model) => model.split_once('/').map(|(p, _)| p).unwrap_or(model),
+                None => OPENCODE_PROVIDER_ID,
+            };
             v.get("provider")?
                 .get(active)?
                 .get("options")?
@@ -384,6 +396,25 @@ pub fn current_base_url(tool: &str) -> Option<String> {
                 .map(String::from)
         }
         _ => None,
+    }
+}
+
+/// Can asale rewrite this tool's config as it stands?
+///
+/// Only Hermes ever answers no: it ignores a config file it cannot parse, so
+/// writing the buy settings into a broken one would report success and change
+/// nothing (see [`apply_hermes`], which keeps the same check as its backstop).
+///
+/// It lives here, beside the rule it asks about, for the reason the rest of
+/// this module does — a caller that restated the condition is what once made
+/// OpenClaw and Hermes report "not in effect" over configs that were fine. The
+/// switch asks *before* applying only so it can explain the refusal in the
+/// user's own language; `apply`'s own error text is English prose.
+pub fn config_is_writable(tool: &str) -> bool {
+    match tool {
+        // A file that is not there yet is one `apply` will create.
+        "hermes" => read_raw(&primary_config_path(tool)).is_none_or(|raw| yaml_is_editable(&raw)),
+        _ => true,
     }
 }
 
@@ -1759,6 +1790,38 @@ mod tests {
         });
     }
 
+    /// Switching opencode on before picking a model wrote a config that named
+    /// no provider, and `current_base_url` — which read the provider *out of*
+    /// `model` — then answered "not pointed at us" over asale's own writing.
+    /// The Buy page drew that as drift ("another program changed your config"),
+    /// `reconcile_configs` rewrote the file on every poll, and the re-apply
+    /// button could not clear either, because nothing was broken to begin with.
+    #[test]
+    fn opencode_with_nothing_picked_yet_is_not_drift() {
+        with_temp_home(|| {
+            let path = primary_config_path("opencode");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+            apply("opencode", "http://127.0.0.1:9787", "sk-asale-ocode", &[]).unwrap();
+
+            let v = read_json(&path);
+            assert!(v.get("model").is_none(), "nothing picked, so nothing to start on");
+            assert!(points_at_proxy("opencode"), "the file holds exactly what asale wrote");
+
+            // The fallback reaches for our own block only while no model names a
+            // provider. Once one does, that provider decides — a config the user
+            // has since pointed elsewhere must still read as not in effect.
+            let mut root = v.as_object().unwrap().clone();
+            root.insert("model".into(), Value::String("ollama/llama4".into()));
+            root["provider"].as_object_mut().unwrap().insert(
+                "ollama".into(),
+                serde_json::json!({ "options": { "baseURL": "http://127.0.0.1:11434/v1" } }),
+            );
+            std::fs::write(&path, serde_json::to_string_pretty(&Value::Object(root)).unwrap()).unwrap();
+            assert!(!points_at_proxy("opencode"), "a model naming another provider wins");
+        });
+    }
+
     #[test]
     fn opencode_strip_keeps_what_the_user_configured() {
         let raw = r#"{
@@ -1927,6 +1990,30 @@ auxiliary:
             let with_our_url = format!("{broken}  base_url: \"{}\"\n", proxy_base_for("hermes"));
             std::fs::write(&path, &with_our_url).unwrap();
             assert!(!points_at_proxy("hermes"), "an unparseable config is not in effect");
+        });
+    }
+
+    /// What the buy switch asks before it applies, so the refusal above can be
+    /// shown in the user's own language instead of `apply`'s English prose.
+    #[test]
+    fn config_writability_matches_what_apply_will_accept() {
+        with_temp_home(|| {
+            let path = primary_config_path("hermes");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+            assert!(config_is_writable("hermes"), "a file apply would create counts as writable");
+
+            std::fs::write(&path, "# mine\nMY_FLAG=1\n").unwrap();
+            assert!(!config_is_writable("hermes"));
+
+            std::fs::write(&path, "# mine\nmodel:\n  provider: \"zai\"\n").unwrap();
+            assert!(config_is_writable("hermes"));
+
+            // No other tool has a parse gate; answering no for one would lock
+            // its switch out with a message about YAML it does not even use.
+            for tool in TOOLS.iter().filter(|t| **t != "hermes") {
+                assert!(config_is_writable(tool), "{tool} has no such rule");
+            }
         });
     }
 
