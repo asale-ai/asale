@@ -66,7 +66,17 @@ pub(crate) fn open_local_browser(url: &str) {
 /// case finishes through `oauth_submit_code` (the user pastes the redirect URL
 /// back), or through an SSH port-forward, or `import_from_cli`.
 pub async fn oauth_login(state: &Arc<AppState>, provider: String, open_local: bool) -> R<Value> {
-    let p = oauth::provider(&provider).ok_or("unknown provider")?;
+    let p = oauth::provider(&provider).ok_or_else(|| {
+        if oauth::provider_unconfigured(&provider) {
+            cmd_err!(
+                "errors.oauth.providerUnconfigured",
+                format!("{provider} sign-in is not configured in this build"),
+                provider = provider.as_str()
+            )
+        } else {
+            cmd_err!("errors.oauth.unknownProvider", "unknown provider", provider = provider.as_str())
+        }
+    })?;
     let (url, fut) = oauth::begin(&p).await.map_err(err)?;
     let flow_id = uuid::Uuid::new_v4().simple().to_string();
     flow_set(state, &flow_id, FlowStatus::Pending).await;

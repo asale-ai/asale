@@ -1005,6 +1005,7 @@
     },
     "oauth": {
       "unknownProvider": "不支持的登录方式：{{provider}}。",
+      "providerUnconfigured": "这个客户端版本没有内置 {{provider}} 登录所需的 OAuth 凭据，所以该入口用不了。请改用打包时注入了凭据的版本，或在启动客户端前用环境变量提供（见 .env.package.example）。",
       "notConfigured": "本站未启用 {{provider}} 登录。",
       "halfConfigured": "{{provider}} 登录配置不完整：{{missing}} 为空。",
       "badRedirectUri": "登录回调地址无效：{{detail}}",
@@ -1067,6 +1068,7 @@
       "unknown": "不支持的工具：{{tool}}，请选择 Claude、Codex 或 Gemini。",
       "notAConfig": "{{path}} 不是 Asale 会改写的配置文件。",
       "configMissing": "{{path}} 还没有生成，所在文件夹也不存在。",
+      "configUnparsable": "{{path}} 不是合法的 YAML。{{tool}} 遇到读不了的配置文件会整个忽略它，把买入设置写进去只会显示成功、实际什么都不改。请先修好这个文件（{{tool}} 启动时会指出出错的那一行），再打开买入开关。",
       "openFailed": "无法打开该文件——这台机器没有可以打开它的程序。"
     },
     "cli": {

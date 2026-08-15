@@ -1005,6 +1005,7 @@
     },
     "oauth": {
       "unknownProvider": "{{provider}} はサポートされていないサインイン方法です。",
+      "providerUnconfigured": "このビルドには {{provider}} サインインに必要な OAuth 認証情報が含まれていないため、この入口は使用できません。パッケージ時に認証情報を埋め込んだビルドを使うか、クライアント起動前に環境変数で指定してください（.env.package.example を参照）。",
       "notConfigured": "このサイトでは {{provider}} サインインが有効になっていません。",
       "halfConfigured": "{{provider}} サインインの設定が未完了です：{{missing}} が空です。",
       "badRedirectUri": "サインインのコールバック URL が無効です：{{detail}}",
@@ -1067,6 +1068,7 @@
       "unknown": "サポートされていないツールです：{{tool}}。Claude / Codex / Gemini から選んでください。",
       "notAConfig": "{{path}} は Asale が書き換える設定ファイルではありません。",
       "configMissing": "{{path}} はまだ作成されておらず、そのフォルダも存在しません。",
+      "configUnparsable": "{{path}} は正しい YAML ではありません。{{tool}} は解析できない設定ファイルを丸ごと無視するため、購入設定を書き込んでも成功と表示されるだけで実際には何も変わりません。ファイルを修正してから（{{tool}} は起動時に問題の行を指摘します）、購入スイッチを入れ直してください。",
       "openFailed": "ファイルを開けませんでした。このマシンには開けるアプリケーションが設定されていません。"
     },
     "cli": {

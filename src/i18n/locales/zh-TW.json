@@ -1005,6 +1005,7 @@
     },
     "oauth": {
       "unknownProvider": "不支援的登入方式：{{provider}}。",
+      "providerUnconfigured": "這個用戶端版本沒有內建 {{provider}} 登入所需的 OAuth 憑證，所以這個入口用不了。請改用打包時注入了憑證的版本，或在啟動用戶端前用環境變數提供（見 .env.package.example）。",
       "notConfigured": "本站未啟用 {{provider}} 登入。",
       "halfConfigured": "{{provider}} 登入設定不完整：{{missing}} 為空。",
       "badRedirectUri": "登入回呼位址無效：{{detail}}",
@@ -1067,6 +1068,7 @@
       "unknown": "不支援的工具：{{tool}}，請選擇 Claude、Codex 或 Gemini。",
       "notAConfig": "{{path}} 不是 Asale 會改寫的設定檔。",
       "configMissing": "{{path}} 尚未產生，所在資料夾也不存在。",
+      "configUnparsable": "{{path}} 不是合法的 YAML。{{tool}} 遇到讀不了的設定檔會整個忽略它，把買入設定寫進去只會顯示成功、實際什麼都不改。請先修好這個檔案（{{tool}} 啟動時會指出出錯的那一行），再打開買入開關。",
       "openFailed": "無法開啟該檔案——這台機器沒有可以開啟它的程式。"
     },
     "cli": {

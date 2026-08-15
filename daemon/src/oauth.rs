@@ -62,6 +62,18 @@ pub fn gemini_client_secret() -> String {
     env_or("ASALE_OAUTH_CLIENT_SECRET_GEMINI", GEMINI_CLIENT_SECRET)
 }
 
+/// A provider asale knows, whose client credentials this build was not given.
+///
+/// [`provider`] answers `None` for this and for a name it has never heard of,
+/// which is fine for deciding whether a flow can start and wrong for saying why
+/// it cannot: a client packaged without Gemini's Google id/secret reported
+/// `unknown provider`, sending the reader to hunt for a typo in a name they had
+/// picked off a button. Kept beside the guard in [`provider`] so the two cannot
+/// drift apart.
+pub fn provider_unconfigured(name: &str) -> bool {
+    name == "gemini" && (gemini_client_id().is_empty() || gemini_client_secret().is_empty())
+}
+
 /// Provider OAuth endpoints/client (spec §3.2 constants).
 #[derive(Clone)]
 pub struct OAuthProvider {
@@ -585,6 +597,27 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two halves of "why can this flow not start" must not drift: whenever
+    /// `provider_unconfigured` claims a name is merely missing credentials,
+    /// `provider` has to be the one refusing it, and a name that is not a
+    /// provider at all must never be reported that way — answering a typo with
+    /// instructions about packaging OAuth secrets helps nobody.
+    ///
+    /// Deliberately environment-agnostic: whether *this* build carries Gemini's
+    /// Google id/secret is a packaging choice, and a test that demanded one
+    /// answer would fail on half the machines that run it.
+    #[test]
+    fn unconfigured_only_ever_describes_a_provider_we_know() {
+        for name in ["nope", "", "claude", "claude_work", "codex"] {
+            assert!(!provider_unconfigured(name), "{name} has no credential gate");
+        }
+        assert_eq!(
+            provider_unconfigured("gemini"),
+            provider("gemini").is_none(),
+            "gemini is refused if and only if its credentials are missing"
+        );
+    }
 
     /// Anthropic (and OpenAI) whitelist the loopback redirect by hostname, and
     /// reject `http://127.0.0.1:{port}/…` with "Redirect URI … is not supported

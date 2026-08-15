@@ -1005,6 +1005,7 @@
     },
     "oauth": {
       "unknownProvider": "{{provider}} is not a supported sign-in provider.",
+      "providerUnconfigured": "This build does not carry the OAuth credentials {{provider}} sign-in needs, so that entry point cannot be used. Use a build that had them injected at packaging time, or supply them through environment variables before starting the client (see .env.package.example).",
       "notConfigured": "{{provider}} sign-in is not enabled on this deployment.",
       "halfConfigured": "{{provider}} sign-in is only half-configured: {{missing}} is empty.",
       "badRedirectUri": "The sign-in callback address was rejected: {{detail}}",
@@ -1067,6 +1068,7 @@
       "unknown": "Unsupported tool: {{tool}}. Choose Claude, Codex or Gemini.",
       "notAConfig": "{{path}} is not one of the config files Asale writes.",
       "configMissing": "There is no config at {{path}} yet, and its folder does not exist either.",
+      "configUnparsable": "{{path}} is not valid YAML. {{tool}} ignores a config file it cannot parse, so writing the buy settings into it would report success and change nothing. Fix the file ({{tool}} names the offending line on startup), then switch buying on again.",
       "openFailed": "Could not open the file — this machine has no application set to open it."
     },
     "cli": {
