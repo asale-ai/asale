@@ -1621,6 +1621,54 @@ mod tests {
     }
 
     #[test]
+    fn codex_offers_every_bought_model_even_past_the_native_slugs() {
+        with_temp_home(|| {
+            codex_stub(&["gpt-5.5", "gpt-5.2"]);
+            let paths = config_paths("codex");
+            std::fs::create_dir_all(paths[0].parent().unwrap()).unwrap();
+
+            let bought = models(&["claude-fable-5", "claude-opus-5", "claude-haiku-5", "gpt-5.2"]);
+            apply("codex", "http://127.0.0.1:9787", "sk-asale-codex", &bought).unwrap();
+
+            let listed: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(crate::codex_catalog::path()).unwrap())
+                    .unwrap();
+            let offered: Vec<&str> = listed["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|m| m["visibility"] == "list")
+                .map(|m| m["display_name"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                offered,
+                ["claude-fable-5", "gpt-5.2", "claude-opus-5", "claude-haiku-5"],
+                "the whole selection is browsable; only two natives were free to carry one"
+            );
+            // The third one had to be published under a slug of its own, cloned
+            // from a native so it inherits the harness prompt.
+            let synth = listed["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["slug"] == "claude-haiku-5")
+                .expect("published under the market id");
+            assert_eq!(synth["base_instructions"], "native", "cloned, not hand-authored");
+            assert_eq!(
+                crate::codex_catalog::alias_for("claude-haiku-5").as_deref(),
+                Some("claude-haiku-5"),
+                "a synthesized slug stands for itself"
+            );
+            assert_eq!(crate::codex_catalog::alias_for("gpt-5.5").as_deref(), Some("claude-fable-5"));
+            assert_eq!(
+                crate::codex_catalog::alias_for("gpt-5.2").as_deref(),
+                Some("gpt-5.2"),
+                "a bought model Codex already knows keeps its own slug"
+            );
+        });
+    }
+
+    #[test]
     fn codex_without_a_selection_leaves_the_model_and_catalog_alone() {
         with_temp_home(|| {
             codex_stub(&["gpt-5.2"]);

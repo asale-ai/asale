@@ -7,26 +7,45 @@
 //! set to. The one supported override is the `model_catalog_json` config key:
 //! a path to a JSON document that *replaces* the built-in catalog wholesale.
 //!
-//! ## Why the entries wear OpenAI's slugs
+//! ## Why most entries wear OpenAI's slugs
 //!
 //! Overriding the catalog is only half the battle. The ChatGPT desktop app's
 //! renderer takes the list its own app-server just returned and filters it
-//! *again*, against an allowlist of slugs delivered from OpenAI's servers
-//! (a Statsig dynamic config carrying `available_models` / `use_hidden_models`).
-//! A slug the market invented is not on that list, so it is dropped before the
-//! picker ever sees it: the app falls back to labelling the composer "Custom"
-//! and offers nothing to switch to. This is upstream bug openai/codex#19694,
-//! still open — restarting the app cannot help, the allowlist is refetched
-//! every launch.
+//! *again*. That filter reads (deminified from the shipped bundle):
 //!
-//! So the catalog we generate does not introduce slugs. It takes native entries
-//! that are already on that allowlist and *rewrites them in place* — the slug
-//! stays `gpt-5.5`, the display name becomes the model the user bought — and
-//! records the slug → market model mapping in [`aliases_path`] so the local
+//! ```js
+//! additionalAvailableModels?.has(m.model) === true ||
+//!   (m.model !== "codex-auto-review" &&
+//!     (useHiddenModels && !isCustomModelProvider && authMethod !== "amazonBedrock"
+//!       ? availableModels.has(m.model)   // ← allowlist from OpenAI's servers
+//!       : !m.hidden))                    // ← everything the catalog lists
+//! ```
+//!
+//! `availableModels` is an allowlist of slugs delivered from OpenAI's servers
+//! (a Statsig dynamic config carrying `available_models` / `use_hidden_models`),
+//! and a slug the market invented is not on it — the picker drops it and the
+//! composer falls back to "Custom" (upstream bug openai/codex#19694). But that
+//! branch is only taken when the config has *no* custom provider, and asale
+//! always writes one (`model_provider = "asale"` plus the matching
+//! `[model_providers.asale]`, which is exactly what the app tests for). With
+//! the switch on, the app is therefore in the `!m.hidden` branch: it lists
+//! whatever our catalog lists, invented slugs included.
+//!
+//! We still hand out native slugs first, because that path needs no such
+//! reasoning — a rewritten native entry is browsable on any build, allowlist or
+//! not — and only synthesize entries once the natives run out. So each selected
+//! model is published as, in order of preference:
+//!   1. *itself*, when the market id is already a native slug (`gpt-5.6-sol`);
+//!   2. a **carrier** — a native entry rewritten in place, slug kept as
+//!      `gpt-5.5`, display name becoming the model the user bought;
+//!   3. a **synthesized** entry: a native one cloned under the market id as its
+//!      slug, which only the custom-provider branch above will show.
+//!
+//! The slug → market model mapping is recorded in [`aliases_path`] so the local
 //! proxy can translate requests back on the way out (see `proxy::buy_gate`).
-//! Everything else is forced to `visibility: "hide"`, so the app's internal
-//! lookups (auto-review and friends) still resolve while the picker stops
-//! offering models the market cannot serve.
+//! Every entry not carrying a selected model is forced to `visibility: "hide"`,
+//! so the app's internal lookups (auto-review and friends) still resolve while
+//! the picker stops offering models the market cannot serve.
 //!
 //! Rewriting rather than hand-authoring matters for a second reason: the entry
 //! schema is large (~30 fields, including the harness prompt) and unversioned.
@@ -88,40 +107,44 @@ pub fn write(models: &[String]) -> Result<Option<Generated>> {
         tracing::warn!("no codex binary found to dump a model catalog; the picker will not list asale models");
         return Ok(None);
     };
-    let carriers = pick_carriers(&native);
-    if carriers.is_empty() {
+    let publish = assign(&native, models);
+    // `assign` gives every model a slug, so this only trips on a catalog with
+    // no entry at all to clone — in which case there is nothing to publish.
+    let Some(start_slug) = publish.first().map(|(slug, _)| slug.clone()) else {
         tracing::warn!("codex model catalog has no entry that can carry a market model");
         return Ok(None);
-    }
-    // One carrier per selected model. A selection longer than the native
-    // catalog cannot be shown in full, and saying so beats a picker that
-    // silently lists a prefix.
-    if carriers.len() < models.len() {
-        tracing::warn!(
-            "codex can only offer {} of the {} selected models in its picker ({} not shown: {})",
-            carriers.len(),
-            models.len(),
-            models.len() - carriers.len(),
-            models[carriers.len()..].join(", ")
-        );
-    }
-    let assigned: BTreeMap<&str, &str> = carriers
+    };
+    // slug → the model it publishes, and the picker position it takes.
+    let order: BTreeMap<&str, (usize, &str)> = publish
         .iter()
-        .zip(models.iter())
-        .map(|(slug, model)| (slug.as_str(), model.as_str()))
+        .enumerate()
+        .map(|(i, (slug, model))| (slug.as_str(), (i, model.as_str())))
         .collect();
 
     let mut entries: Vec<Value> = Vec::new();
-    for m in native {
-        match assigned.get(slug_of(&m)) {
-            Some(model) => {
-                let order = carriers.iter().position(|s| s == slug_of(&m)).unwrap_or(0);
-                entries.push(carrier(m, model, order));
-            }
-            None => entries.push(hidden(m)),
+    for m in native.iter() {
+        match order.get(slug_of(m)) {
+            Some((i, model)) => entries.push(carrier(m.clone(), model, *i)),
+            None => entries.push(hidden(m.clone())),
         }
     }
+    // Whatever no native entry could publish gets one cloned for it, so the
+    // schema (~30 fields, harness prompt included) is never hand-authored.
+    let native_slugs: Vec<&str> = native.iter().map(slug_of).collect();
+    for (i, (slug, model)) in publish.iter().enumerate() {
+        if native_slugs.contains(&slug.as_str()) {
+            continue;
+        }
+        let Some(t) = template(&native) else { break };
+        let mut e = t.clone();
+        if let Some(o) = e.as_object_mut() {
+            o.insert("slug".into(), json!(slug));
+        }
+        entries.push(carrier(e, model, i));
+    }
 
+    let assigned: BTreeMap<&str, &str> =
+        publish.iter().map(|(slug, model)| (slug.as_str(), model.as_str())).collect();
     let target = path();
     write_atomic(&target, &serde_json::to_string_pretty(&json!({ "models": entries }))?)?;
     write_atomic(
@@ -130,7 +153,7 @@ pub fn write(models: &[String]) -> Result<Option<Generated>> {
             assigned.iter().map(|(s, m)| ((*s).to_string(), json!(m))).collect::<Map<_, _>>(),
         ))?,
     )?;
-    Ok(Some(Generated { path: target, start_slug: carriers[0].clone() }))
+    Ok(Some(Generated { path: target, start_slug }))
 }
 
 /// The market model a slug Codex asked for stands for, if it is one of ours.
@@ -274,7 +297,44 @@ fn slug_of(entry: &Value) -> &str {
     entry.get("slug").and_then(Value::as_str).unwrap_or_default()
 }
 
-/// The native entries a market model may be published under, best first.
+/// The slug each selected model is published under, in picker order.
+///
+/// Preference order per model — see the module docs for why: its own slug when
+/// the market id is one Codex already knows, then an unclaimed carrier, then
+/// the market id as a slug of its own. Every result is distinct: carriers that
+/// a model will claim as *itself* are held back, so the two can never collide,
+/// and the market ids are unique to begin with.
+fn assign(native: &[Value], models: &[String]) -> Vec<(String, String)> {
+    let is_native = |slug: &str| native.iter().any(|m| slug_of(m) == slug);
+    let mut carriers = pick_carriers(native)
+        .into_iter()
+        .filter(|slug| !models.iter().any(|m| m == slug))
+        .collect::<Vec<_>>()
+        .into_iter();
+    models
+        .iter()
+        .map(|model| {
+            let slug = if is_native(model) {
+                model.clone()
+            } else {
+                carriers.next().unwrap_or_else(|| model.clone())
+            };
+            (slug, model.clone())
+        })
+        .collect()
+}
+
+/// The entry a synthesized one is cloned from: the best carrier if there is
+/// one, so the clone inherits a shape the app is known to render, and any entry
+/// at all otherwise — a catalog we could not recognize still beats none.
+fn template(native: &[Value]) -> Option<&Value> {
+    let best = pick_carriers(native).into_iter().next();
+    best.and_then(|slug| native.iter().find(|m| slug_of(m) == slug)).or_else(|| native.first())
+}
+
+/// The native entries a market model may be published under *someone else's*
+/// name, best first. An entry publishing itself goes through [`assign`] and is
+/// held to none of this — nothing is being disguised there.
 ///
 /// Everything here is read off the dump rather than named, so a new OpenAI
 /// generation changes which slugs get used without changing this code:
@@ -305,8 +365,9 @@ fn hidden(mut entry: Value) -> Value {
     entry
 }
 
-/// A native entry wearing a market model's identity. Its `slug` is deliberately
-/// left alone — that is the whole point (see the module docs).
+/// An entry wearing a market model's identity. Its `slug` is left exactly as
+/// the caller set it — a native one it keeps, or the market id a synthesized
+/// entry was cloned under (see the module docs).
 fn carrier(mut entry: Value, model: &str, order: usize) -> Value {
     let Some(o) = entry.as_object_mut() else { return entry };
     set(o, "display_name", json!(model));
@@ -369,6 +430,53 @@ mod tests {
         assert_eq!(e["priority"], 1, "listed ahead of the hidden natives");
         assert_eq!(e["base_instructions"], "5.2 prompt", "harness prompt is inherited");
         assert_eq!(e["upgrade"], Value::Null, "the replaced model's upgrade banner is not");
+    }
+
+    fn ids(models: &[&str]) -> Vec<String> {
+        models.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_selection_longer_than_the_carriers_still_gets_published_in_full() {
+        // The two carriers go first — they are browsable whatever the app's
+        // allowlist says — and the rest take slugs of their own rather than
+        // being dropped, which is what left the picker showing a prefix.
+        assert_eq!(
+            assign(&native(), &ids(&["claude-opus-5", "claude-sonnet-5", "claude-haiku-5"])),
+            [
+                ("gpt-5.5".into(), "claude-opus-5".to_string()),
+                ("gpt-5.2".into(), "claude-sonnet-5".to_string()),
+                ("claude-haiku-5".into(), "claude-haiku-5".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_model_codex_already_knows_is_published_as_itself() {
+        // sol is no carrier — but publishing it under its own slug disguises
+        // nothing, and it leaves gpt-5.5 free for the model that needs one.
+        assert_eq!(
+            assign(&native(), &ids(&["gpt-5.6-sol", "claude-opus-5"])),
+            [
+                ("gpt-5.6-sol".into(), "gpt-5.6-sol".to_string()),
+                ("gpt-5.5".into(), "claude-opus-5".to_string()),
+            ]
+        );
+        // And a carrier a later model will claim as itself is never handed to
+        // an earlier one, which would leave both wanting the same slug.
+        assert_eq!(
+            assign(&native(), &ids(&["claude-opus-5", "gpt-5.5"])),
+            [
+                ("gpt-5.2".into(), "claude-opus-5".to_string()),
+                ("gpt-5.5".into(), "gpt-5.5".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_synthesized_entry_is_cloned_from_the_best_carrier() {
+        assert_eq!(slug_of(template(&native()).unwrap()), "gpt-5.5");
+        assert!(template(&[]).is_none(), "nothing to clone from an empty catalog");
     }
 
     #[test]

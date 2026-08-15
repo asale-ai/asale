@@ -201,12 +201,16 @@ fn direct_candidates(path: &str) -> &'static [&'static str] {
 /// The official upstream URL + extra headers for a direct forward. `path` is the
 /// request path (e.g. `/v1/messages` or `/v1/messages/count_tokens`) so the same
 /// forwarder serves both message calls and the count_tokens preflight.
+/// The `anthropic-version` every Anthropic-shaped request has to carry, on the
+/// direct hop to the vendor and on the market hop to the gateway alike.
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+
 fn direct_upstream(provider: &str, path: &str, path_and_query: &str) -> Option<(String, Vec<(&'static str, String)>)> {
     match provider {
         "claude" | "claude_work" => Some((
             format!("https://api.anthropic.com{path}"),
             vec![
-                ("anthropic-version", "2023-06-01".to_string()),
+                ("anthropic-version", ANTHROPIC_VERSION.to_string()),
                 // OAuth (subscription) tokens require the oauth beta flag.
                 ("anthropic-beta", "oauth-2025-04-20".to_string()),
                 (
@@ -465,6 +469,16 @@ async fn send_market(
         .request(method.clone(), target)
         .header("authorization", format!("Bearer {key}"))
         .header("content-type", "application/json");
+    // Anthropic's API requires this header and rejects a request without it, so
+    // an Anthropic-shaped call has to carry one on every hop. This proxy builds
+    // a fresh request rather than relaying the caller's, which meant the header
+    // the tool did send was dropped here and the gateway saw a request no
+    // first-party API would have accepted. Sent for the message routes only —
+    // the same body reaches OpenAI- and Gemini-shaped endpoints too, and a
+    // vendor header on someone else's route is noise at best.
+    if target.contains("/v1/messages") {
+        req = req.header("anthropic-version", ANTHROPIC_VERSION);
+    }
     // The gateway answers a few refusals — "upgrade the app", "nobody is selling
     // this", "top up" — as an assistant turn inside the user's AI session rather
     // than as a status code their tool prints raw. It writes that sentence in
@@ -925,6 +939,44 @@ mod tests {
         let resp = post_message(port, "claude-opus-4-8-20260101").await;
         assert_eq!(resp.status(), 200);
         assert_eq!(captured_body(rx.await.unwrap())["model"], "claude-fable-5", "served as the bought family");
+    }
+
+    /// This proxy builds a fresh request to the gateway rather than relaying
+    /// the caller's, so a header the tool did send is dropped unless it is put
+    /// back. Anthropic's API requires this one and rejects a request without
+    /// it — and the gateway, being an Anthropic-compatible endpoint, is entitled
+    /// to do the same.
+    #[tokio::test]
+    async fn an_anthropic_call_reaches_the_gateway_with_its_version_header() {
+        let (addr, rx) = capturing_gateway().await;
+        let mut st = state(Some("sk-asale-test")).await;
+        st.server_api_base = format!("http://{addr}");
+        let port = serve(st).await;
+
+        let resp = post_message(port, "claude-fable-5").await;
+        assert_eq!(resp.status(), 200);
+        let raw = String::from_utf8_lossy(&rx.await.unwrap()).to_ascii_lowercase();
+        assert!(raw.contains("anthropic-version:"), "the gateway hop carried no version header:\n{raw}");
+    }
+
+    /// The same body reaches OpenAI- and Gemini-shaped routes; a vendor header
+    /// on someone else's endpoint is noise at best.
+    #[tokio::test]
+    async fn a_non_anthropic_call_carries_no_anthropic_header() {
+        let (addr, rx) = capturing_gateway().await;
+        let mut st = state(Some("sk-asale-test")).await;
+        st.server_api_base = format!("http://{addr}");
+        let port = serve(st).await;
+
+        let resp = asale_client_core::http::plain()
+            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .json(&serde_json::json!({"model": "gpt-5-codex", "messages": []}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let raw = String::from_utf8_lossy(&rx.await.unwrap()).to_ascii_lowercase();
+        assert!(!raw.contains("anthropic-version:"), "an OpenAI-shaped call was stamped as Anthropic:\n{raw}");
     }
 
     #[tokio::test]
