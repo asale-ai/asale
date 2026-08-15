@@ -39,8 +39,10 @@ asale-client/
 
 ```bash
 pnpm install
-pnpm dev:app          # 起 daemon + Tauri 視窗（注入 ASALE_QUOTA_PUBKEY）
-cargo test            # workspace 全量測試
+# 起 daemon + Tauri 視窗（注入 ASALE_QUOTA_PUBKEY）
+pnpm dev:app
+# workspace 全量測試
+cargo test
 cargo test -p asale-client-core
 ```
 
@@ -79,11 +81,16 @@ OAuth 用戶端憑證見 [`.env.package.example`](../.env.package.example)（Gem
 調 `asale start` 的行為、在本機重現無桌面模式），用 `scripts/link.sh`：
 
 ```bash
-./scripts/link.sh                 # debug 建置，軟連結到 /usr/local/bin（要 sudo）
-./scripts/link.sh --release       # 啟動快、體積小，編譯慢
-./scripts/link.sh --prefix ~/.local/bin   # 不動 /usr/local/bin，也就不用 sudo
-./scripts/link.sh --status        # 現在的 asale / asaled 指向哪裡
-./scripts/link.sh --unlink        # 撤銷：刪軟連結，把備份的正式版放回去
+# debug 建置，軟連結到 /usr/local/bin（要 sudo）
+./scripts/link.sh
+# 啟動快、體積小，編譯慢
+./scripts/link.sh --release
+# 不動 /usr/local/bin，也就不用 sudo
+./scripts/link.sh --prefix ~/.local/bin
+# 現在的 asale / asaled 指向哪裡
+./scripts/link.sh --status
+# 撤銷：刪軟連結，把備份的正式版放回去
+./scripts/link.sh --unlink
 ```
 
 裝的是**軟連結**不是複製，所以連結完之後改程式碼只要再 `cargo build`，終端機裡的
@@ -114,12 +121,17 @@ Windows 上沒有對應腳本，直接 `cargo run -p asale-cli -- status`。
 二進位檔：桌面端按兩下啟動，沒有 shell 環境，位址與閘道公鑰必須編進去。
 
 ```bash
-cp .env.package.example .env.package      # 填 ASALE_QUOTA_PUBKEY，缺了打出來的用戶端不能賣出
+# 填 ASALE_QUOTA_PUBKEY，缺了打出來的用戶端不能賣出
+cp .env.package.example .env.package
 
-./scripts/package.sh                          # macOS → .dmg（預設 arm64 + x86_64 通用二進位檔）
-./scripts/package.sh --bundles deb,appimage   # 在 Linux 上
-pwsh scripts/package.ps1                      # 在 Windows 上 → .msi / .exe
-./scripts/package.sh --no-sign --debug        # 本機試打：不簽更新包，編譯快很多
+# macOS → .dmg（預設 arm64 + x86_64 通用二進位檔）
+./scripts/package.sh
+# 在 Linux 上
+./scripts/package.sh --bundles deb,appimage
+# 在 Windows 上 → .msi / .exe
+pwsh scripts/package.ps1
+# 本機試打：不簽更新包，編譯快很多
+./scripts/package.sh --no-sign --debug
 ```
 
 腳本除了拼 `pnpm tauri build`，還會先擋幾件裝到使用者機器上才會發現的事：位址必須是
@@ -150,8 +162,10 @@ Tauri 不能跨系統打包：`.dmg` 只能在 macOS 出，`.msi`/`.exe` 只能�
 > 路徑會互相覆蓋。所以本機是 `cargo run -p asale-cli -- status`，裝完是 `asale status`。
 
 ```bash
-./scripts/package.sh --cli-only     # 只出歸檔，不打 .dmg/.deb/.AppImage
-./scripts/package.sh --no-cli       # 只打安裝包，跟以前一樣
+# 只出歸檔，不打 .dmg/.deb/.AppImage
+./scripts/package.sh --cli-only
+# 只打安裝包，跟以前一樣
+./scripts/package.sh --no-cli
 ```
 
 `--cli-only` 仍然會先建置前端：Web UI 是編進 `asaled` 的，跳過 `pnpm build` 出來的服務

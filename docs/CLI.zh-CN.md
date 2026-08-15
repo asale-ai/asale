@@ -9,8 +9,10 @@ Asale 的全部逻辑都在一个服务里：`asaled`。桌面窗口是它的一
 `asale` 就是管这个服务的命令。装桌面版时会一并装上；在无桌面的机器上，它就是安装的全部。
 
 ```
-curl -fsSL https://asale.ai/dl/install.sh | sh      # macOS / Linux
-irm https://asale.ai/dl/install.ps1 | iex           # Windows
+# macOS / Linux
+curl -fsSL https://asale.ai/dl/install.sh | sh
+# Windows
+irm https://asale.ai/dl/install.ps1 | iex
 ```
 
 同一条命令再跑一遍就是升级：先停服务、换掉二进制、原来在跑的话再起回来。
@@ -22,10 +24,14 @@ irm https://asale.ai/dl/install.ps1 | iex           # Windows
 
 ```sh
 curl -fsSL https://asale.ai/dl/install.sh | sh
-asale start                # 启动服务
-asale expose on            # 允许其他机器访问，长期生效
-asale url                  # 要打开的网址，已带访问 token
-asale autostart enable     # 重启后自动回来
+# 启动服务
+asale start
+# 允许其他机器访问，长期生效
+asale expose on
+# 要打开的网址，已带访问 token
+asale url
+# 重启后自动回来
+asale autostart enable
 ```
 
 用任意浏览器打开那个网址，就是完整的客户端：登录、连接订阅、打开出售开关、看钱包。
@@ -94,11 +100,16 @@ asale autostart enable     # 重启后自动回来
 正在跑的服务，并同步写进开机自启的定义里，所以一次重启或一次重启机器不会把它悄悄改回去。
 
 ```sh
-asale expose on                  # 所有网卡，端口不变
-asale expose on --port 8080      # 顺便换个端口
-asale expose on --host 10.0.0.5  # 只绑一张网卡——VPN 地址
-asale expose off                 # 收回到 127.0.0.1
-asale expose status              # 现在听在哪里、谁能访问到
+# 所有网卡，端口不变
+asale expose on
+# 顺便换个端口
+asale expose on --port 8080
+# 只绑一张网卡——VPN 地址
+asale expose on --host 10.0.0.5
+# 收回到 127.0.0.1
+asale expose off
+# 现在听在哪里、谁能访问到
+asale expose status
 ```
 
 服务没在跑时，`on` 会把它拉起来——你要的就是「能访问」；`off` 不会，它只是把已经在跑的
@@ -113,8 +124,10 @@ asale expose status              # 现在听在哪里、谁能访问到
 浏览器如果就是你自己的，SSH 隧道比开端口更划算——链路本来就加密，token 不会明文过网络：
 
 ```sh
-ssh -N -L 9800:127.0.0.1:9700 user@你的服务器   # 开着别关
-ssh user@你的服务器 'asale url'                 # 拿到网址，token 已带上
+# 开着别关
+ssh -N -L 9800:127.0.0.1:9700 user@你的服务器
+# 拿到网址，token 已带上
+ssh user@你的服务器 'asale url'
 ```
 
 把那个网址的端口改成 `9800` 再打开——你自己机器上的桌面版可能已经占了 9700。
@@ -181,7 +194,8 @@ asale status >/dev/null || echo "asale 掉了：$(hostname)"
 
 ```sh
 git clone https://github.com/asale-ai/asale && cd asale
-cp .env.package.example .env.package          # 填 ASALE_QUOTA_PUBKEY，见文件里的说明
+# 填 ASALE_QUOTA_PUBKEY，见文件里的说明
+cp .env.package.example .env.package
 ./scripts/package.sh --cli-only
 ```
 

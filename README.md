@@ -108,10 +108,12 @@ other**, so the platform's fee ratio is verifiable. The same data is available i
 Free. One line does the whole thing — app, plus the `asale` command line:
 
 ```sh
-curl -fsSL https://asale.ai/dl/install.sh | sh      # macOS / Linux
+# macOS / Linux
+curl -fsSL https://asale.ai/dl/install.sh | sh
 ```
 ```powershell
-irm https://asale.ai/dl/install.ps1 | iex           # Windows
+# Windows
+irm https://asale.ai/dl/install.ps1 | iex
 ```
 
 Run the same line again later to upgrade. On a machine with **no desktop** the script
@@ -165,10 +167,14 @@ session is not a lesser install — it is the same client on a port:
 
 ```sh
 curl -fsSL https://asale.ai/dl/install.sh | sh
-asale start                # start the service
-asale expose on            # allow access from other machines, for good
-asale url                  # the URL to open — access token included
-asale autostart enable     # come back automatically after a reboot
+# start the service
+asale start
+# allow access from other machines, for good
+asale expose on
+# the URL to open — access token included
+asale url
+# come back automatically after a reboot
+asale autostart enable
 ```
 
 Open that URL from any browser and you get the full client. The token in it is the entire
@@ -179,8 +185,10 @@ keep the port behind a firewall or a TLS reverse proxy.
 you the same UI over an already-encrypted link, with `expose` left off:
 
 ```sh
-ssh -N -L 9800:127.0.0.1:9700 user@your-server   # leave this running
-ssh user@your-server 'asale url'                 # the URL, token included
+# leave this running
+ssh -N -L 9800:127.0.0.1:9700 user@your-server
+# the URL, token included
+ssh user@your-server 'asale url'
 ```
 
 Open that URL with the port changed to `9800` — the desktop app may already hold 9700 on

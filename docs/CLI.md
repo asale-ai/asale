@@ -11,8 +11,10 @@ URL from anywhere.
 desktop app on every platform, and it is the *entire* install on a headless box.
 
 ```
-curl -fsSL https://asale.ai/dl/install.sh | sh      # macOS / Linux
-irm https://asale.ai/dl/install.ps1 | iex           # Windows
+# macOS / Linux
+curl -fsSL https://asale.ai/dl/install.sh | sh
+# Windows
+irm https://asale.ai/dl/install.ps1 | iex
 ```
 
 Re-run the same line to upgrade: it stops the service, replaces the binaries, and
@@ -25,10 +27,14 @@ you having to remember the URL.
 
 ```sh
 curl -fsSL https://asale.ai/dl/install.sh | sh
-asale start                # start the service
-asale expose on            # allow access from other machines, for good
-asale url                  # the URL to open — access token included
-asale autostart enable     # come back automatically after a reboot
+# start the service
+asale start
+# allow access from other machines, for good
+asale expose on
+# the URL to open — access token included
+asale url
+# come back automatically after a reboot
+asale autostart enable
 ```
 
 Open that URL in any browser and you have the full client: sign in, connect
@@ -102,11 +108,16 @@ down, applied to the running service immediately, and pushed into the autostart
 definition so a restart or a reboot cannot quietly undo it.
 
 ```sh
-asale expose on                  # every interface, port unchanged
-asale expose on --port 8080      # and move it
-asale expose on --host 10.0.0.5  # one interface only — a VPN address
-asale expose off                 # back to 127.0.0.1
-asale expose status              # where it listens, and who can get there
+# every interface, port unchanged
+asale expose on
+# and move it
+asale expose on --port 8080
+# one interface only — a VPN address
+asale expose on --host 10.0.0.5
+# back to 127.0.0.1
+asale expose off
+# where it listens, and who can get there
+asale expose status
 ```
 
 `on` starts the service if it is stopped, since being reachable is the point of
@@ -124,8 +135,10 @@ When the browser is your own, an SSH tunnel beats opening the port — the link 
 already encrypted, so the token never crosses the network in the clear:
 
 ```sh
-ssh -N -L 9800:127.0.0.1:9700 user@your-server   # leave this running
-ssh user@your-server 'asale url'                 # the URL, token included
+# leave this running
+ssh -N -L 9800:127.0.0.1:9700 user@your-server
+# the URL, token included
+ssh user@your-server 'asale url'
 ```
 
 Open that URL with the port changed to `9800` — the desktop app may already hold
@@ -200,7 +213,8 @@ other architecture — an arm64 server, for instance — build the pair from sou
 
 ```sh
 git clone https://github.com/asale-ai/asale && cd asale
-cp .env.package.example .env.package          # fill in ASALE_QUOTA_PUBKEY, see the file
+# fill in ASALE_QUOTA_PUBKEY, see the file
+cp .env.package.example .env.package
 ./scripts/package.sh --cli-only
 ```
 

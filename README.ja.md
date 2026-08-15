@@ -107,10 +107,12 @@ Claude Pro / Max · ChatGPT / Codex · Google Gemini · Kimi · xAI Grok
 無料です。1 行で完了します —— アプリと `asale` コマンドラインの両方が入ります:
 
 ```sh
-curl -fsSL https://asale.ai/dl/install.sh | sh      # macOS / Linux
+# macOS / Linux
+curl -fsSL https://asale.ai/dl/install.sh | sh
 ```
 ```powershell
-irm https://asale.ai/dl/install.ps1 | iex           # Windows
+# Windows
+irm https://asale.ai/dl/install.ps1 | iex
 ```
 
 あとで同じ 1 行を実行すればアップグレードです。**デスクトップのない**マシンでは、描画できない
@@ -152,10 +154,14 @@ GUI の代わりにウェブモードが入ります ——
 
 ```sh
 curl -fsSL https://asale.ai/dl/install.sh | sh
-asale start                # サービスを起動
-asale expose on            # 他のマシンからのアクセスを恒久的に許可
-asale url                  # 開くべき URL（アクセストークン込み）
-asale autostart enable     # 再起動後も自動で戻る
+# サービスを起動
+asale start
+# 他のマシンからのアクセスを恒久的に許可
+asale expose on
+# 開くべき URL（アクセストークン込み）
+asale url
+# 再起動後も自動で戻る
+asale autostart enable
 ```
 
 その URL を任意のブラウザーで開けば、完全なクライアントになります。URL に含まれるトークンが
@@ -166,8 +172,10 @@ asale autostart enable     # 再起動後も自動で戻る
 すでに暗号化された経路で同じ UI を使えます。`expose` は切ったままで構いません:
 
 ```sh
-ssh -N -L 9800:127.0.0.1:9700 user@サーバー   # 実行したままにしておく
-ssh user@サーバー 'asale url'                 # URL（トークン込み）を取得
+# 実行したままにしておく
+ssh -N -L 9800:127.0.0.1:9700 user@サーバー
+# URL（トークン込み）を取得
+ssh user@サーバー 'asale url'
 ```
 
 その URL のポートを `9800` に変えて開きます —— 手元のマシンではデスクトップアプリが

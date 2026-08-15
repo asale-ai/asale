@@ -94,10 +94,12 @@ Claude Pro / Max · ChatGPT / Codex · Google Gemini · Kimi · xAI Grok
 免費。一行指令裝完——桌面應用，外加 `asale` 命令列：
 
 ```sh
-curl -fsSL https://asale.ai/dl/install.sh | sh      # macOS / Linux
+# macOS / Linux
+curl -fsSL https://asale.ai/dl/install.sh | sh
 ```
 ```powershell
-irm https://asale.ai/dl/install.ps1 | iex           # Windows
+# Windows
+irm https://asale.ai/dl/install.ps1 | iex
 ```
 
 之後再跑同一行就是升級。**沒有桌面環境**的機器上，腳本會裝成網頁模式，而不是裝一個畫不出來的
@@ -133,10 +135,14 @@ irm https://asale.ai/dl/install.ps1 | iex           # Windows
 
 ```sh
 curl -fsSL https://asale.ai/dl/install.sh | sh
-asale start                # 啟動服務
-asale expose on            # 允許其他機器存取，長期生效
-asale url                  # 要開啟的網址，已帶存取 token
-asale autostart enable     # 重開機後自動回來
+# 啟動服務
+asale start
+# 允許其他機器存取，長期生效
+asale expose on
+# 要開啟的網址，已帶存取 token
+asale url
+# 重開機後自動回來
+asale autostart enable
 ```
 
 用任意瀏覽器開啟那個網址就是完整用戶端。網址裡的 token 就是全部存取憑證——拿到它的人能讀你的
@@ -146,8 +152,10 @@ asale autostart enable     # 重開機後自動回來
 同一個介面，`expose` 保持關著：
 
 ```sh
-ssh -N -L 9800:127.0.0.1:9700 user@你的伺服器   # 開著別關
-ssh user@你的伺服器 'asale url'                 # 拿到網址，token 已帶上
+# 開著別關
+ssh -N -L 9800:127.0.0.1:9700 user@你的伺服器
+# 拿到網址，token 已帶上
+ssh user@你的伺服器 'asale url'
 ```
 
 把那個網址的連接埠改成 `9800` 再開啟——你自己機器上的桌面版可能已經占了 9700。

@@ -41,8 +41,10 @@ Rust（stable）、Node 20+、pnpm が必要です。
 
 ```bash
 pnpm install
-pnpm dev:app          # daemon + Tauri ウィンドウを起動（ASALE_QUOTA_PUBKEY を注入）
-cargo test            # workspace 全体のテスト
+# daemon + Tauri ウィンドウを起動（ASALE_QUOTA_PUBKEY を注入）
+pnpm dev:app
+# workspace 全体のテスト
+cargo test
 cargo test -p asale-client-core
 ```
 
@@ -90,11 +92,16 @@ OAuth のクライアント認証情報は [`.env.package.example`](../.env.pack
 ローカル再現）は `scripts/link.sh` を使います:
 
 ```bash
-./scripts/link.sh                 # debug ビルドを /usr/local/bin にシンボリックリンク（sudo が要る）
-./scripts/link.sh --release       # 起動が速く小さい。コンパイルは遅い
-./scripts/link.sh --prefix ~/.local/bin   # /usr/local/bin を触らない＝sudo も不要
-./scripts/link.sh --status        # 今 asale / asaled がどこを指しているか
-./scripts/link.sh --unlink        # 取り消し: リンクを削除し、バックアップした正式版を戻す
+# debug ビルドを /usr/local/bin にシンボリックリンク（sudo が要る）
+./scripts/link.sh
+# 起動が速く小さい。コンパイルは遅い
+./scripts/link.sh --release
+# /usr/local/bin を触らない＝sudo も不要
+./scripts/link.sh --prefix ~/.local/bin
+# 今 asale / asaled がどこを指しているか
+./scripts/link.sh --status
+# 取り消し: リンクを削除し、バックアップした正式版を戻す
+./scripts/link.sh --unlink
 ```
 
 コピーではなく**シンボリックリンク**なので、一度リンクすれば後は `cargo build` するだけで
@@ -130,12 +137,17 @@ Windows 版のスクリプトはありません。`cargo run -p asale-cli -- sta
 埋め込むしかありません。
 
 ```bash
-cp .env.package.example .env.package      # ASALE_QUOTA_PUBKEY を記入。無いとビルドしたクライアントは販売できない
+# ASALE_QUOTA_PUBKEY を記入。無いとビルドしたクライアントは販売できない
+cp .env.package.example .env.package
 
-./scripts/package.sh                          # macOS → .dmg（既定は arm64 + x86_64 のユニバーサルバイナリ）
-./scripts/package.sh --bundles deb,appimage   # Linux 上で
-pwsh scripts/package.ps1                      # Windows 上で → .msi / .exe
-./scripts/package.sh --no-sign --debug        # ローカル試験ビルド：更新パッケージに署名せず、ビルドが大幅に速い
+# macOS → .dmg（既定は arm64 + x86_64 のユニバーサルバイナリ）
+./scripts/package.sh
+# Linux 上で
+./scripts/package.sh --bundles deb,appimage
+# Windows 上で → .msi / .exe
+pwsh scripts/package.ps1
+# ローカル試験ビルド：更新パッケージに署名せず、ビルドが大幅に速い
+./scripts/package.sh --no-sign --debug
 ```
 
 スクリプトは `pnpm tauri build` の呼び出しを組み立てるだけでなく、ユーザーのマシンに
@@ -173,8 +185,10 @@ Tauri はクロスプラットフォームでパッケージングできませ�
 > インストール後は `asale status` になります。
 
 ```bash
-./scripts/package.sh --cli-only     # アーカイブのみ。.dmg/.deb/.AppImage は作らない
-./scripts/package.sh --no-cli       # インストーラのみ。従来どおり
+# アーカイブのみ。.dmg/.deb/.AppImage は作らない
+./scripts/package.sh --cli-only
+# インストーラのみ。従来どおり
+./scripts/package.sh --no-cli
 ```
 
 `--cli-only` でもフロントエンドは先にビルドされます。ウェブ UI は `asaled` の *中に*

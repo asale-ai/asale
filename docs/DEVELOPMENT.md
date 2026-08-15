@@ -41,8 +41,10 @@ Requires Rust (stable), Node 20+, pnpm.
 
 ```bash
 pnpm install
-pnpm dev:app          # starts daemon + Tauri window (injects ASALE_QUOTA_PUBKEY)
-cargo test            # whole workspace
+# starts daemon + Tauri window (injects ASALE_QUOTA_PUBKEY)
+pnpm dev:app
+# whole workspace
+cargo test
 cargo test -p asale-client-core
 ```
 
@@ -89,11 +91,16 @@ should be this code too — working on the CLI, on what `asale start` does, or r
 headless mode locally — use `scripts/link.sh`:
 
 ```bash
-./scripts/link.sh                 # debug build, symlinked into /usr/local/bin (needs sudo)
-./scripts/link.sh --release       # starts faster and is smaller; slower to compile
-./scripts/link.sh --prefix ~/.local/bin   # leave /usr/local/bin alone, and skip sudo
-./scripts/link.sh --status        # where asale / asaled currently point
-./scripts/link.sh --unlink        # undo: remove the symlinks, restore the backup
+# debug build, symlinked into /usr/local/bin (needs sudo)
+./scripts/link.sh
+# starts faster and is smaller; slower to compile
+./scripts/link.sh --release
+# leave /usr/local/bin alone, and skip sudo
+./scripts/link.sh --prefix ~/.local/bin
+# where asale / asaled currently point
+./scripts/link.sh --status
+# undo: remove the symlinks, restore the backup
+./scripts/link.sh --unlink
 ```
 
 These are **symlinks, not copies**, so after linking once a plain `cargo build` is enough —
@@ -129,12 +136,17 @@ double-click has no shell environment, so endpoints and the gateway public key m
 compiled in.
 
 ```bash
-cp .env.package.example .env.package      # set ASALE_QUOTA_PUBKEY — without it the built client cannot sell
+# set ASALE_QUOTA_PUBKEY — without it the built client cannot sell
+cp .env.package.example .env.package
 
-./scripts/package.sh                          # macOS → .dmg (defaults to an arm64 + x86_64 universal binary)
-./scripts/package.sh --bundles deb,appimage   # on Linux
-pwsh scripts/package.ps1                      # on Windows → .msi / .exe
-./scripts/package.sh --no-sign --debug        # local trial build: no updater signature, much faster
+# macOS → .dmg (defaults to an arm64 + x86_64 universal binary)
+./scripts/package.sh
+# on Linux
+./scripts/package.sh --bundles deb,appimage
+# on Windows → .msi / .exe
+pwsh scripts/package.ps1
+# local trial build: no updater signature, much faster
+./scripts/package.sh --no-sign --debug
 ```
 
 Besides assembling the `pnpm tauri build` invocation, the scripts catch a few things up
@@ -171,8 +183,10 @@ what lets a build machine produce them without any of the desktop dependencies:
 > other. So `cargo run -p asale-cli -- status` locally, `asale status` once installed.
 
 ```bash
-./scripts/package.sh --cli-only     # just the archive, no .dmg/.deb/.AppImage
-./scripts/package.sh --no-cli       # just the installers, as before
+# just the archive, no .dmg/.deb/.AppImage
+./scripts/package.sh --cli-only
+# just the installers, as before
+./scripts/package.sh --no-cli
 ```
 
 `--cli-only` still builds the frontend first: the web UI is compiled *into* `asaled`, so
