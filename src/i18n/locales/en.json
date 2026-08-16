@@ -15,7 +15,8 @@
     "groupTrade": "Sharing",
     "groupUsage": "Stats",
     "groupFinance": "Finance",
-    "apikeys": "API keys"
+    "apikeys": "API keys",
+    "betaTip": "Asale is still in beta, so updates ship often. If you hit a problem — or a charge looks wrong — email us at support@asale.ai."
   },
   "dashboard": {
     "title": "Dashboard",

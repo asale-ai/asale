@@ -15,7 +15,8 @@
     "groupTrade": "シェア",
     "groupUsage": "統計",
     "groupFinance": "資金",
-    "apikeys": "API キー"
+    "apikeys": "API キー",
+    "betaTip": "Asale は現在ベータ版のため、更新が頻繁に行われます。不具合や料金計算の誤りがありましたら、support@asale.ai までメールでご連絡ください。"
   },
   "dashboard": {
     "title": "ダッシュボード",

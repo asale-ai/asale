@@ -15,7 +15,8 @@
     "groupTrade": "共享",
     "groupUsage": "统计",
     "groupFinance": "资金",
-    "apikeys": "API 密钥"
+    "apikeys": "API 密钥",
+    "betaTip": "Asale 目前处于 Beta 阶段，更新会比较频繁。如果遇到问题，或者费用计算有误，可以发邮件到 support@asale.ai 联系我们。"
   },
   "dashboard": {
     "title": "概览",

@@ -185,6 +185,12 @@ export function App() {
         <div className="logo">
           <img className="logo-mark" src="/logo.svg" alt="Asale" />
           <span>Asale</span>
+          {/* The product is pre-1.0 and says so where the name is, not buried in
+              settings: the tooltip is what turns the mark into the thing a user
+              needs when a number looks wrong — an address to write to. */}
+          <span className="logo-badge beta" tabIndex={0} role="note" data-tip={t("nav.betaTip")}>
+            beta
+          </span>
           {/* The native title bar is hidden, so "Asale (Dev)" from
               tauri.dev.conf.json is never shown — this is what tells a dev
               instance apart from the installed release beside it. */}
