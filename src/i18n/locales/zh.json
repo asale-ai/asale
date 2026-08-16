@@ -212,7 +212,8 @@
       "tookSeconds": "往返 {{s}} 秒",
       "servedBy": "由谁服务",
       "tokens": "输入 / 输出 Token",
-      "reply": "回复"
+      "reply": "回复",
+      "tab": "连通性测试"
     },
     "sharedBadge": "与本机 CLI 共用",
     "sharedHint": "该凭据从本机安装的 CLI 导入，两者使用同一个上游登录。",
@@ -293,7 +294,58 @@
     "endpointConnected": "{{account}} 已按 {{wire}} 协议连接：端点提供 {{served}} 个模型，其中 {{selling}} 个平台在交易。",
     "rankedLastTitle": "你的挂单排在最后",
     "rankedLastBody": "当前信誉分 {{score}}，低于平台认可的 {{min}}。模型仍在挂着，没有更好的卖家时依然会派给你，但所有信誉更高的卖家都排在你前面 —— 热门模型上基本等于没有单。",
-    "rankedLastHow": "信誉分按最近 24 小时的成交情况重算 —— 成功率、延迟、计量准确性。失败记录滑出窗口后会自动恢复。如果还在持续失败，先检查上面的上游账号。"
+    "rankedLastHow": "信誉分按最近 24 小时的成交情况重算 —— 成功率、延迟、计量准确性。失败记录滑出窗口后会自动恢复。如果还在持续失败，先检查上面的上游账号。",
+    "verify": {
+      "tab": "模型验证",
+      "title": "模型验证",
+      "gateTitle": "开启卖出前的模型验证",
+      "body": "平台会按买家的真实路径向 {{account}} 买几次短回复，检查它的表现是否符合所售模型。整个过程在服务端进行，本机只接收进度和结果。",
+      "gateBody": "开启卖出意味着 {{account}} 的订阅额度将开始为陌生人服务。在那之前，平台会先验证这条通道背后真的是它所声称的模型。",
+      "gateModelLabel": "先验证哪个模型",
+      "gateModelHint": "这里只验证一个模型；该账号的其它模型会在首次成交前各自验证。",
+      "never": "这条通道还没有验证过。",
+      "run": "开始验证",
+      "rerun": "重新验证",
+      "running": "验证中…",
+      "starting": "正在建立验证任务…",
+      "confirmSell": "确认卖出",
+      "confirmBlocked": "验证通过后才能开启卖出。",
+      "samplingNote": "通过之后仍会继续抽检：平台会不定期地、不预先通知地向这条通道下单复核，抽检请求与买家请求完全一致，也照常按市场价付款给你。",
+      "costNote": "验证是真实购买：会消耗少量订阅额度，费用由平台承担。",
+      "sampleRecord": "已抽检 {{samples}} 次：{{fails}} 次未通过，{{unclear}} 次未得出结论。",
+      "expires": "本次验证有效期至 {{date}}，到期后会自动复核。",
+      "outcome": {
+        "pass": "验证通过",
+        "watch": "结论不确定",
+        "reject": "未通过验证",
+        "pending": "尚未验证",
+        "verifying": "验证中"
+      },
+      "outcomeBody": {
+        "pass": "这条通道的表现与所售模型一致，可以正常卖出。",
+        "watch": "本次探测没有得出确定结论。这不是指控，通道照常卖出，平台会提高对它的抽检频率，通常几天内就能给出明确结论。",
+        "reject": "有较强证据表明这条通道背后并不是所售模型，该通道已下架。如果你认为判定有误，可以查看证据并申诉。"
+      },
+      "step": {
+        "preflight": "连通性检查",
+        "identity": "模型身份探测",
+        "capability": "能力档位测定",
+        "verbosity": "回复风格测定",
+        "perf": "生成速度测定",
+        "signature_drift": "多次请求一致性",
+        "cache_replay": "缓存重放检查",
+        "max_tokens_truncation": "长度上限行为",
+        "stop_sequence": "停止序列行为",
+        "system_adherence": "系统提示遵循度"
+      },
+      "evidence": {
+        "open": "查看验证证据",
+        "summary": "本次共 {{requests}} 次真实请求，深度 {{depth}}，随机种子 {{seed}}（同样的种子可以逐条复现）。"
+      },
+      "cancelSell": "取消并关闭卖出",
+      "alreadyOn": "开关已打开，但在验证通过前平台不会把买家请求路由到这条通道。",
+      "expired": "上次验证已过期，这条通道当前不接买家请求。重新验证即可恢复。"
+    }
   },
   "consume": {
     "title": "买入",
@@ -1088,7 +1140,8 @@
       "notAnApiKeyProvider": "该服务通过登录连接，而不是粘贴 API Key；API Key 仅用于按量计费的平台接口（kimi_api、xai_api）。",
       "apiKeyRejected": "{{provider}} 拒绝了该 API Key，请确认已完整复制且未被吊销。",
       "apiKeyEmpty": "请输入 API Key。",
-      "apiKeyHasWhitespace": "API Key 中包含空格，请只粘贴密钥本身，而不是整条命令。"
+      "apiKeyHasWhitespace": "API Key 中包含空格，请只粘贴密钥本身，而不是整条命令。",
+      "customEndpointsAdminOnly": "自定义端点卖出仅面向平台管理员开放。"
     },
     "settings": {
       "unknownProxyMode": "未知的代理模式：{{value}}。",

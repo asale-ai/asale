@@ -97,6 +97,26 @@ pub struct SupplyItem {
     /// such endpoint was assumed to speak the OpenAI schema.
     #[serde(default)]
     pub wire: String,
+
+    /// An opaque, stable mark for the credential currently behind this lane.
+    ///
+    /// A lane's identity is `(device, provider, model)`, and none of those move
+    /// when the seller signs the account in again, swaps in a different
+    /// subscription under the same address, or repoints a custom endpoint. The
+    /// thing that was checked has changed while everything naming it has
+    /// stayed put — so a verdict keyed on the lane alone goes on vouching for
+    /// something nobody looked at.
+    ///
+    /// This is what closes that. It is a hash, never the credential: the
+    /// gateway compares it with the one attached to the last verdict and asks
+    /// for a fresh verification when they differ. It cannot be reversed into a
+    /// token, and it is not a stable identifier across devices — see
+    /// `credential_fp` on the client for why it is salted per install.
+    ///
+    /// Empty from an older publisher, which reads as "no opinion": the verdict
+    /// stands on its expiry alone, exactly as before this field existed.
+    #[serde(default)]
+    pub credential_fp: String,
 }
 
 fn default_true() -> bool {
@@ -125,6 +145,7 @@ impl SupplyItem {
             paused_reason: String::new(),
             resume_at: 0,
             wire: String::new(),
+            credential_fp: String::new(),
         }
     }
 
@@ -259,12 +280,30 @@ mod tests {
             paused_reason: String::new(),
             resume_at: 0,
             wire: String::new(),
+            credential_fp: "a1b2c3d4".into(),
         };
         let v = serde_json::to_value(&item).unwrap();
         assert_eq!(v["provider"], "claude");
         assert_eq!(v["window_remaining"], 1000);
         assert_eq!(v["concurrency_free"], 4);
         assert_eq!(v["ask_ratio"], 60);
+        assert_eq!(v["credential_fp"], "a1b2c3d4");
+    }
+
+    /// A gateway that has not been updated must still parse a frame carrying
+    /// the field, and a publisher that has not been updated must still produce
+    /// one this side accepts. Both halves of the rollout run at once.
+    #[test]
+    fn a_declaration_without_a_credential_mark_still_parses() {
+        let older = serde_json::json!({
+            "model": "claude-opus-5",
+            "provider": "claude",
+            "window_remaining": 1000,
+            "price_min": 3000,
+        });
+        let item: SupplyItem = serde_json::from_value(older).unwrap();
+        assert_eq!(item.credential_fp, "", "absent reads as not stated, never as a mismatch");
+        assert!(item.available, "and the other defaults are unchanged");
     }
 
     /// A publisher built before the field existed declares no floor, and the

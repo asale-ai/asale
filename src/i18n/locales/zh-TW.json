@@ -212,7 +212,8 @@
       "tookSeconds": "往返 {{s}} 秒",
       "servedBy": "由誰服務",
       "tokens": "輸入 / 輸出 Token",
-      "reply": "回覆"
+      "reply": "回覆",
+      "tab": "連線測試"
     },
     "sharedBadge": "與本機 CLI 共用",
     "sharedHint": "此憑證由本機安裝的 CLI 匯入，兩者使用同一個上游登入。",
@@ -293,7 +294,58 @@
     "endpointConnected": "{{account}} 已依 {{wire}} 協定連接：端點提供 {{served}} 個模型，其中 {{selling}} 個平台在交易。",
     "rankedLastTitle": "你的掛單排在最後",
     "rankedLastBody": "目前信譽分 {{score}}，低於平台認可的 {{min}}。模型仍在掛著，沒有更好的賣家時仍會派給你，但所有信譽更高的賣家都排在你前面 —— 熱門模型上幾乎等於沒有單。",
-    "rankedLastHow": "信譽分依最近 24 小時的成交情況重算 —— 成功率、延遲、計量準確性。失敗記錄滑出視窗後會自動恢復。若仍持續失敗，請先檢查上方的上游帳號。"
+    "rankedLastHow": "信譽分依最近 24 小時的成交情況重算 —— 成功率、延遲、計量準確性。失敗記錄滑出視窗後會自動恢復。若仍持續失敗，請先檢查上方的上游帳號。",
+    "verify": {
+      "tab": "模型驗證",
+      "title": "模型驗證",
+      "gateTitle": "開啟賣出前的模型驗證",
+      "body": "平台會依買家的真實路徑向 {{account}} 購買幾次簡短回覆，檢查其表現是否符合所售模型。整個過程在伺服器端進行，本機僅接收進度與結果。",
+      "gateBody": "開啟賣出代表 {{account}} 的訂閱額度將開始為陌生人服務。在那之前，平台會先驗證這條通道背後真的是它所聲稱的模型。",
+      "gateModelLabel": "先驗證哪個模型",
+      "gateModelHint": "這裡只驗證一個模型；該帳號的其他模型會在首次成交前各自驗證。",
+      "never": "這條通道尚未驗證過。",
+      "run": "開始驗證",
+      "rerun": "重新驗證",
+      "running": "驗證中…",
+      "starting": "正在建立驗證任務…",
+      "confirmSell": "確認賣出",
+      "confirmBlocked": "驗證通過後才能開啟賣出。",
+      "samplingNote": "通過之後仍會持續抽檢：平台會不定期、且不預先通知地向這條通道下單複核，抽檢請求與買家請求完全一致，也照常按市價付款給你。",
+      "costNote": "驗證是真實購買：會消耗少量訂閱額度，費用由平台承擔。",
+      "sampleRecord": "已抽檢 {{samples}} 次：{{fails}} 次未通過，{{unclear}} 次未得出結論。",
+      "expires": "本次驗證有效期至 {{date}}，到期後會自動複核。",
+      "outcome": {
+        "pass": "驗證通過",
+        "watch": "結論不確定",
+        "reject": "未通過驗證",
+        "pending": "尚未驗證",
+        "verifying": "驗證中"
+      },
+      "outcomeBody": {
+        "pass": "這條通道的表現與所售模型一致，可以正常賣出。",
+        "watch": "本次探測沒有得出確定結論。這不是指控，通道照常賣出，平台會提高對它的抽檢頻率，通常幾天內就能給出明確結論。",
+        "reject": "有較強證據顯示這條通道背後並非所售模型，該通道已下架。若你認為判定有誤，可以查看證據並申訴。"
+      },
+      "step": {
+        "preflight": "連線檢查",
+        "identity": "模型身分探測",
+        "capability": "能力層級測定",
+        "verbosity": "回覆風格測定",
+        "perf": "生成速度測定",
+        "signature_drift": "多次請求一致性",
+        "cache_replay": "快取重播檢查",
+        "max_tokens_truncation": "長度上限行為",
+        "stop_sequence": "停止序列行為",
+        "system_adherence": "系統提示遵循度"
+      },
+      "evidence": {
+        "open": "檢視驗證證據",
+        "summary": "本次共 {{requests}} 次真實請求，深度 {{depth}}，隨機種子 {{seed}}（相同種子可逐條重現）。"
+      },
+      "cancelSell": "取消並關閉賣出",
+      "alreadyOn": "開關已開啟，但在驗證通過前平台不會把買家請求路由到這條通道。",
+      "expired": "上次驗證已過期，這條通道目前不接買家請求。重新驗證即可恢復。"
+    }
   },
   "consume": {
     "title": "買入",
@@ -1088,7 +1140,8 @@
       "notAnApiKeyProvider": "此服務透過登入連接，而不是貼上 API Key；API Key 僅用於按量計費的平台介面（kimi_api、xai_api）。",
       "apiKeyRejected": "{{provider}} 拒絕了該 API Key，請確認已完整複製且未被撤銷。",
       "apiKeyEmpty": "請輸入 API Key。",
-      "apiKeyHasWhitespace": "API Key 中包含空格，請只貼上金鑰本身，而不是整條命令。"
+      "apiKeyHasWhitespace": "API Key 中包含空格，請只貼上金鑰本身，而不是整條命令。",
+      "customEndpointsAdminOnly": "自訂端點賣出僅開放給平台管理員。"
     },
     "settings": {
       "unknownProxyMode": "未知的代理模式：{{value}}。",

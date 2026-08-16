@@ -529,20 +529,29 @@ pub async fn resume_lane(
 // and the model set comes from the endpoint's own model list rather than from a
 // vendor's plan.
 //
-// It began as platform-internal machinery for putting supply behind models the
-// subscription sellers happen not to cover, armed by `ASALE_CUSTOM_ENDPOINTS=1`.
-// It is now an ordinary way to sell, offered to everyone; the variable survives
-// only as `=0`, for a build that should not have it at all.
+// It is platform-internal machinery for putting supply behind models the
+// subscription sellers happen not to cover, and it is gated on the seller being
+// a platform operator — the first difference above is why. An upstream URL that
+// travels with the account means the gateway does not decide where a buyer's
+// prompt goes; whoever filled in the form does. Every other provider at least
+// names a vendor.
+//
+// The rule is the server's (`wsrelay::session::declare_supply` drops a `custom`
+// item from anybody else) and is mirrored here so the sell page does not offer
+// a form whose every result would be silently refused. It was briefly open to
+// everyone, which is what `purge_custom_endpoints` exists to undo.
+//
+// `ASALE_CUSTOM_ENDPOINTS=0` is a second, independent gate: a build that should
+// not carry the feature at all.
 
 /// Env var that turns the custom-endpoint commands off.
 const CUSTOM_ENDPOINTS_ENV: &str = "ASALE_CUSTOM_ENDPOINTS";
 
-/// Whether this daemon is running the custom-endpoint feature.
+/// Whether this build is running the custom-endpoint feature at all.
 ///
-/// On unless explicitly turned off. It started as platform-internal machinery
-/// armed by this variable; connecting an endpoint of one's own is now an
-/// ordinary way to sell, so an install that says nothing gets it. The variable
-/// stays as the way to build a client that does not have it at all.
+/// On unless explicitly turned off — the gate that decides *who* may use it is
+/// [`platform_operator`], not this one. This variable stays as the way to build
+/// a client that does not have the commands at all.
 pub fn custom_endpoints_enabled() -> bool {
     !matches!(
         std::env::var(CUSTOM_ENDPOINTS_ENV).ok().as_deref().map(str::trim),
@@ -550,14 +559,145 @@ pub fn custom_endpoints_enabled() -> bool {
     )
 }
 
+/// How long the operator verdict is reused before `/me/profile` is asked again.
+///
+/// The sell page polls the status below every few seconds, so without a cache
+/// an open sell page would be a `/me/profile` call on that same clock. A minute
+/// is short enough that a promotion — or a sign-out — still shows up while the
+/// user is looking at the page.
+const OPERATOR_TTL_SECS: i64 = 60;
+
+/// Whether the signed-in account may sell through a custom endpoint.
+///
+/// `Some(true)` — a platform operator (`users.role == "admin"`).
+/// `Some(false)` — the server answered, and this account is not one.
+/// `None` — nobody is signed in, or the server did not answer.
+///
+/// The third case exists because the two things that read this want opposite
+/// defaults from it. Showing the tile wants "no unless told yes": an unknown
+/// answer must not offer a feature the gateway will refuse. Deleting somebody's
+/// endpoints wants "no unless told no": a flight with no wifi is not a
+/// demotion, and the accounts it would take away carry keys the user pasted in
+/// by hand.
+///
+/// A cache miss is served under the write lock, so the sell page's poll cannot
+/// have three of these in flight at once while a slow `/me/profile` is pending:
+/// whoever arrives second waits for the first and reads its answer.
+pub async fn platform_operator(state: &AppState) -> Option<bool> {
+    if let Some((at, verdict)) = *state.operator.read().await {
+        if now_secs() - at < OPERATOR_TTL_SECS {
+            return verdict;
+        }
+    }
+    let mut slot = state.operator.write().await;
+    // Somebody may have filled it while we waited for the lock.
+    if let Some((at, verdict)) = *slot {
+        if now_secs() - at < OPERATOR_TTL_SECS {
+            return verdict;
+        }
+    }
+    // A missing or non-string `role` is the server declining to say — see
+    // `api::profile::get_profile`, which leaves it null when the lookup fails
+    // rather than guessing "user" and having us delete somebody's endpoints.
+    let verdict = match super::me_profile(state).await {
+        Ok(v) => v["role"].as_str().map(|r| r == "admin"),
+        Err(_) => None,
+    };
+    *slot = Some((now_secs(), verdict));
+    verdict
+}
+
 /// Whether this daemon will accept the custom-endpoint commands.
 ///
-/// Always answerable — unlike the commands themselves, which refuse when the
-/// feature is off. The UI asks this to decide whether to show the tab at all:
-/// an install that is not running the feature should not display a page whose
-/// every action would be rejected.
-pub async fn custom_endpoints_status(_state: &AppState) -> R<Value> {
-    Ok(json!({"enabled": custom_endpoints_enabled()}))
+/// Two gates, and the tile needs both: the build has to be running the feature
+/// at all, and the signed-in account has to be a platform operator. The second
+/// is the server's rule — `wsrelay::session::declare_supply` drops a `custom`
+/// lane from anyone else — mirrored here so an ordinary seller is not offered a
+/// form whose every result would be silently refused.
+pub async fn custom_endpoints_status(state: &AppState) -> R<Value> {
+    let enabled = custom_endpoints_enabled() && platform_operator(state).await == Some(true);
+    Ok(json!({"enabled": enabled}))
+}
+
+/// Gate a custom-endpoint command on the server's own rule.
+///
+/// An unknown verdict refuses too: the alternative is connecting an endpoint
+/// that the gateway will drop from every declaration, which looks to its
+/// operator like a lane that sells nothing for no reason.
+async fn require_operator(state: &AppState) -> R<()> {
+    match platform_operator(state).await {
+        Some(true) => Ok(()),
+        _ => Err(cmd_err!(
+            "errors.cli.customEndpointsAdminOnly",
+            "custom endpoints are available to platform operators only"
+        )),
+    }
+}
+
+/// The account ids of this device's custom endpoints, if it has any.
+///
+/// A local SQLite read, and on virtually every install it comes back empty —
+/// which is what makes it worth doing before anything that costs a request.
+async fn custom_endpoint_ids(state: &AppState) -> Vec<String> {
+    match state.store.list_tools().await {
+        Ok(tools) => tools
+            .iter()
+            .filter(|t| t.provider == publisher::CUSTOM_PROVIDER)
+            .map(|t| t.account_id.clone())
+            .collect(),
+        Err(e) => {
+            tracing::warn!("reading the tool list failed: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// Take this device's custom endpoints away if the account behind them is not a
+/// platform operator (any more). Answers how many were removed.
+///
+/// The supervisor runs this once a minute, forever, on every install — so the
+/// order matters: the local "does this device even have one" read comes first,
+/// and the `/me/profile` call happens only on the few devices where the answer
+/// could change anything. Otherwise every client on the network, signed in or
+/// not, would be asking a question about a feature it does not use on the same
+/// one-minute clock.
+pub async fn enforce_custom_endpoint_policy(state: &AppState) -> usize {
+    if custom_endpoint_ids(state).await.is_empty() {
+        return 0;
+    }
+    // Only on a definite `Some(false)`: not signed in, or a server that did not
+    // answer, must never be the reason somebody's pasted-in keys are deleted.
+    if platform_operator(state).await != Some(false) {
+        return 0;
+    }
+    purge_custom_endpoints(state).await
+}
+
+/// Remove every custom endpoint on this device, keys and settings included.
+///
+/// Called when the server has said this account is not a platform operator.
+/// Selling through a custom endpoint used to be open to everyone, so an
+/// ordinary seller may well have one connected; leaving it would leave an
+/// account on the sell page that is declared every minute and refused every
+/// minute, with nothing on the page to say why.
+///
+/// Returns how many were removed, so the caller can keep quiet when there was
+/// nothing to do — which is the usual case, on every device, forever.
+pub async fn purge_custom_endpoints(state: &AppState) -> usize {
+    let mut removed = 0;
+    for account_id in custom_endpoint_ids(state).await {
+        // Not `remove_custom_endpoint`: that one refuses when the feature is
+        // switched off, and a build with `ASALE_CUSTOM_ENDPOINTS=0` is exactly
+        // where a leftover endpoint most needs clearing out.
+        match forget_custom_endpoint(state, &account_id).await {
+            Ok(_) => {
+                removed += 1;
+                tracing::info!(account = %account_id, "removed a custom endpoint: this account is not a platform operator");
+            }
+            Err(e) => tracing::warn!(account = %account_id, "removing a custom endpoint failed: {e}"),
+        }
+    }
+    removed
 }
 
 /// Re-read one endpoint's model list now, rather than at the next hourly
@@ -573,6 +713,7 @@ pub async fn refresh_custom_endpoint(state: &AppState, account_id: String) -> R<
             "custom endpoints are turned off on this client (ASALE_CUSTOM_ENDPOINTS=0)"
         ));
     }
+    require_operator(state).await?;
     let tool = state
         .store
         .list_tools()
@@ -623,11 +764,20 @@ pub async fn remove_custom_endpoint(state: &AppState, account_id: String) -> R<b
             "custom endpoints are turned off on this client (ASALE_CUSTOM_ENDPOINTS=0)"
         ));
     }
+    // Deliberately not gated on `require_operator`: taking an endpoint away is
+    // the one action that stays available to somebody who has lost the right to
+    // add one.
+    forget_custom_endpoint(state, &account_id).await
+}
+
+/// The removal itself, with no gate on it. See [`remove_custom_endpoint`] for
+/// what it clears and why.
+async fn forget_custom_endpoint(state: &AppState, account_id: &str) -> R<bool> {
     let removed =
-        remove_account(state, publisher::CUSTOM_PROVIDER.to_string(), account_id.clone()).await?;
-    let _ = state.store.set_setting(&publisher::custom_base_key(&account_id), "").await;
-    let _ = state.store.set_setting(&publisher::custom_wire_key(&account_id), "").await;
-    let _ = publisher::store_custom_models(&state.store, &account_id, &[]).await;
+        remove_account(state, publisher::CUSTOM_PROVIDER.to_string(), account_id.to_string()).await?;
+    let _ = state.store.set_setting(&publisher::custom_base_key(account_id), "").await;
+    let _ = state.store.set_setting(&publisher::custom_wire_key(account_id), "").await;
+    let _ = publisher::store_custom_models(&state.store, account_id, &[]).await;
     Ok(removed)
 }
 
@@ -672,6 +822,7 @@ pub async fn connect_custom_endpoint(
             "custom endpoints are turned off on this client (ASALE_CUSTOM_ENDPOINTS=0)"
         ));
     }
+    require_operator(state).await?;
     let base = base_url.trim().trim_end_matches('/').to_string();
     if base.is_empty() {
         return Err(cmd_err!("errors.cli.customBaseEmpty", "base URL is empty"));

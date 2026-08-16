@@ -7,7 +7,12 @@ use serde_json::{json, Value};
 use super::{CmdError, R, err};
 use crate::cmd_err;
 
-pub(crate) async fn finish_auth(v: &Value) -> R<Value> {
+/// Persist the token pair a sign-in returned, and hand the UI the account.
+///
+/// Takes the state only to forget what it cached about the *previous* account:
+/// see [`super::forget_account_cache`] for why an account switch that skipped
+/// this would delete somebody's custom endpoints.
+pub(crate) async fn finish_auth(state: &AppState, v: &Value) -> R<Value> {
     let access = v["tokens"]["access_token"].as_str().unwrap_or_default();
     let refresh = v["tokens"]["refresh_token"].as_str().unwrap_or_default();
     if access.is_empty() {
@@ -15,6 +20,7 @@ pub(crate) async fn finish_auth(v: &Value) -> R<Value> {
     }
     keychain::set("access_token", access).map_err(err)?;
     keychain::set("refresh_token", refresh).map_err(err)?;
+    super::forget_account_cache(state).await;
     Ok(json!({
         "user_id": v["user_id"],
         "email": v["email"],

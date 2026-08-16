@@ -47,6 +47,7 @@ pub mod server_client;
 pub mod settings;
 pub mod share;
 pub mod usage;
+pub mod verify;
 pub mod wallet;
 
 pub use accounts::*;
@@ -60,7 +61,27 @@ pub use sell::*;
 pub use settings::*;
 pub use share::*;
 pub use usage::*;
+pub use verify::*;
 pub use wallet::*;
+
+/// Drop everything [`AppState`](crate::state::AppState) remembers about *which*
+/// account is signed in. Called on every sign-in and on sign-out.
+///
+/// One machine serves whoever is signed in at the time, and the caches here are
+/// keyed to nothing — so without this an answer about the previous account
+/// outlives them. That is not a cosmetic staleness: `platform_operator`'s
+/// verdict decides whether the supervisor deletes this device's custom
+/// endpoints, and a stale `Some(false)` carried across a sign-in would delete an
+/// operator's endpoints and the keys they pasted into them. The inverse is
+/// milder but still wrong — a stale `Some(true)` offers an ordinary seller a
+/// form whose every result the gateway refuses.
+///
+/// Not the consumer API key: that one is per-account too, but it lives in the
+/// encrypted store as well as in memory, so it is dropped through
+/// [`wallet::forget_key`] rather than here.
+pub(crate) async fn forget_account_cache(state: &crate::state::AppState) {
+    *state.operator.write().await = None;
+}
 
 /// Every command returns either a JSON value or a failure the frontend puts on
 /// screen — so the error type carries what the frontend needs to *translate* it.

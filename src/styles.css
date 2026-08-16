@@ -2428,3 +2428,38 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 }
 .tk-pct { flex-shrink: 0; font-size: var(--fs-meta); font-weight: 500; color: var(--fg); }
 .tk-tile .mark { opacity: 0.85; }
+
+/* ── Model verification ──────────────────────────────────────────────
+   The dialog stacks a state block, two standing notices and a button, so the
+   gaps are set once here rather than as inline margins on four elements. */
+.verify-panel { display: flex; flex-direction: column; gap: var(--s3); }
+.verify-progress { display: flex; flex-direction: column; gap: var(--s2); }
+.verify-bar {
+  height: 6px; border-radius: 999px; overflow: hidden;
+  background: var(--bg-2);
+}
+.verify-bar-fill {
+  height: 100%; border-radius: 999px; background: var(--accent);
+  /* A run's progress arrives on a 1.5s poll and jumps several points at a
+     time. Without the transition the bar snaps, which reads as a glitch
+     rather than as work being done. */
+  transition: width 400ms ease-out;
+}
+.verify-verdict-head {
+  display: flex; align-items: center; gap: var(--s2);
+  margin-bottom: var(--s2);
+}
+.verify-evidence { display: flex; flex-direction: column; gap: var(--s2); }
+.verify-probes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.verify-probe {
+  display: grid; grid-template-columns: 1.2em minmax(0, 12em) minmax(0, 1fr);
+  gap: var(--s2); align-items: baseline;
+  font-size: var(--fs-meta); color: var(--fg-2);
+}
+.verify-probe-status { text-align: center; color: var(--fg-3); }
+.verify-probe.pass .verify-probe-status { color: var(--success); }
+.verify-probe.fail .verify-probe-status { color: var(--danger); }
+.verify-probe.warn .verify-probe-status { color: var(--warning); }
+.verify-probe-name { color: var(--fg); }
+/* A probe's own sentence can be long; the row must not push the dialog wide. */
+.verify-probe-note { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

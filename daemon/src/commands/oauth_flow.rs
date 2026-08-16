@@ -596,7 +596,7 @@ pub async fn platform_oauth_login(
             if link {
                 Ok(json!({"linked": v["linked"], "provider": v["provider"], "email": v["email"]}))
             } else {
-                finish_auth(&v).await
+                finish_auth(&st, &v).await
             }
         }
         .await;

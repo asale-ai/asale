@@ -468,6 +468,11 @@ pub struct LaneStatusView {
     /// accounts may each speak a different one (`custom`). `None` everywhere
     /// else — and it is what marks a view as belonging to such an account.
     pub upstream_wire: Option<Wire>,
+    /// Where this account's requests go, for that same provider. Carried on
+    /// the lane so the declaration can mark *which upstream* it is offering:
+    /// repointing a custom endpoint changes what a buyer is served by while
+    /// leaving the account id, and therefore the lane, looking identical.
+    pub upstream_base: Option<String>,
 }
 
 pub struct AccountPool {
@@ -877,6 +882,7 @@ impl AccountPool {
                     max_ratio: a.sell_max_ratio,
                     concurrency_max: a.concurrency_max,
                     upstream_wire: a.upstream_wire,
+                    upstream_base: a.upstream_base.clone(),
                 });
             }
         }

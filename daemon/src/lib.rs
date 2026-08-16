@@ -285,6 +285,15 @@ pub async fn start(bind: SocketAddr) -> anyhow::Result<StartedDaemon> {
             let mut complained = false;
             loop {
                 tick.tick().await;
+                // Selling through a custom endpoint is a platform-operator
+                // capability now, and it did not used to be — so an ordinary
+                // seller may still have one connected from when it was open to
+                // everyone. The gateway refuses those lanes on every
+                // declaration; this is what stops them being declared at all,
+                // and what takes them off the sell page rather than leaving an
+                // account there that can never earn. Costs a local read on a
+                // device with no custom endpoint, which is nearly all of them.
+                commands::enforce_custom_endpoint_policy(&st).await;
                 if !commands::publish_wanted(&st).await {
                     continue;
                 }

@@ -564,6 +564,12 @@ rpc_args! {
         model: String,
         #[serde(default)] wire: Option<String>,
     }
+    // Model verification. Addressed by (provider, model) rather than by
+    // account: the lane the market knows is `(device, provider, model)`, and
+    // the device half is the daemon's own — a client that could name someone
+    // else's device would be a way to spend a stranger's subscription.
+    VerifyLaneArgs { provider: String, model: String }
+    VerifyJobArgs  { #[serde(alias = "job_id")] job_id: String }
     PeriodArgs     { #[serde(default)] period: Option<String> }
     ForceArgs      { #[serde(default)] force: Option<bool> }
     OverviewArgs   { #[serde(default)] period: Option<String>, #[serde(default)] scope: Option<String> }
@@ -814,6 +820,22 @@ async fn rpc(
         "test_supply" => {
             let p: ProbeArgs = args(&a)?;
             commands::test_supply(st, p.provider, p.account_id, p.model, p.wire.unwrap_or_default()).await?
+        },
+        // Model verification. Every one of these is a proxy — see
+        // `commands::verify` for why the daemon deliberately decides nothing
+        // here.
+        "start_lane_verification" => {
+            let p: VerifyLaneArgs = args(&a)?;
+            commands::start_lane_verification(st, p.provider, p.model).await?
+        },
+        "lane_verification_job" => {
+            let p: VerifyJobArgs = args(&a)?;
+            commands::lane_verification_job(st, p.job_id).await?
+        },
+        "lane_verification_overview" => commands::lane_verification_overview(st).await?,
+        "lane_verification_report" => {
+            let p: VerifyLaneArgs = args(&a)?;
+            commands::lane_verification_report(st, p.provider, p.model).await?
         },
         "resume_lane" => {
             let p: LaneArgs = args(&a)?;

@@ -819,6 +819,10 @@ struct LaneOffer {
     /// opinion about the price but no capacity behind it, and quoting a floor
     /// nothing can serve would let an idle account set the market's price.
     ask_ratio: Option<i64>,
+    /// Marks for the credentials behind this lane, one per contributing
+    /// account, collected in a set so the declaration does not change when the
+    /// accounts happen to be iterated in a different order.
+    credentials: std::collections::BTreeSet<String>,
 }
 
 #[async_trait]
@@ -875,6 +879,7 @@ pub async fn build_supply_items(store: &LocalStore, pool: &StdMutex<AccountPool>
             }
         }
         let offer = offers.entry(key).or_default();
+        offer.credentials.insert(credential_mark(&v.provider, &v.account_id, &v.upstream_base));
         if v.status == "selling" {
             // Each account's headroom is its own (spec §4): summing here
             // never lets one account borrow another's quota, because
@@ -940,6 +945,7 @@ pub async fn build_supply_items(store: &LocalStore, pool: &StdMutex<AccountPool>
             if let Some(ask) = o.ask_ratio {
                 item = item.asking(ask as i32);
             }
+            item.credential_fp = lane_credential_fp(&o.credentials);
             Some(if o.window_remaining > 0 {
                 item
             } else {
@@ -955,6 +961,95 @@ pub async fn build_supply_items(store: &LocalStore, pool: &StdMutex<AccountPool>
         );
     }
     json!(items)
+}
+
+/// A stable, opaque mark for one account's credential.
+///
+/// # What goes in
+///
+/// What identifies *which subscription* is behind the lane, and nothing else:
+/// the provider, the account key, and — for the one provider whose host is the
+/// operator's own — where its requests go. Repointing a custom endpoint at a
+/// different upstream is exactly the change this exists to notice, and it is
+/// invisible in the account id alone.
+///
+/// Not the token. The token rotates on its own schedule — refreshed hourly on
+/// some providers — and a mark that moved with it would demand a fresh
+/// verification every hour for no reason at all.
+///
+/// # Why it is salted
+///
+/// The mark leaves this machine, so an unsalted hash of an email address is an
+/// email address: the set of possible inputs is small enough to enumerate, and
+/// the same seller on two devices would hash identically, making the two
+/// linkable by anyone who saw both. The salt is per install and never leaves,
+/// which keeps the value stable where it needs to be — this lane, this device,
+/// over time — and meaningless anywhere else.
+fn credential_mark(provider: &str, account_id: &str, upstream_base: &Option<String>) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(credential_salt().as_bytes());
+    h.update(b"|");
+    h.update(provider.as_bytes());
+    h.update(b"|");
+    h.update(account_id.as_bytes());
+    h.update(b"|");
+    h.update(upstream_base.as_deref().unwrap_or("").as_bytes());
+    hex16(&h.finalize())
+}
+
+/// One lane's mark, over every account that contributes to it.
+///
+/// A lane can be served by several accounts, and the question the gateway asks
+/// is "is this the same set of credentials I verified", not "is this the same
+/// one". Adding a second subscription to a lane changes what a buyer may be
+/// served by, so it should cost a re-verification; the sorted set makes that
+/// the only thing that changes it.
+fn lane_credential_fp(marks: &std::collections::BTreeSet<String>) -> String {
+    use sha2::{Digest, Sha256};
+    if marks.is_empty() {
+        return String::new();
+    }
+    let mut h = Sha256::new();
+    for m in marks {
+        h.update(m.as_bytes());
+        h.update(b"|");
+    }
+    hex16(&h.finalize())
+}
+
+fn hex16(bytes: &[u8]) -> String {
+    bytes.iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+/// Per-install salt for [`credential_mark`], generated once and kept locally.
+///
+/// Read through a `OnceLock` because it is consulted for every account on
+/// every declaration — once a minute, forever — and the file behind it never
+/// changes.
+fn credential_salt() -> &'static str {
+    static SALT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SALT.get_or_init(|| {
+        let path = std::path::PathBuf::from(crate::state::data_dir()).join("credential-salt");
+        if let Ok(s) = std::fs::read_to_string(&path) {
+            let s = s.trim().to_string();
+            if !s.is_empty() {
+                return s;
+            }
+        }
+        let fresh = uuid::Uuid::new_v4().simple().to_string();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        // A failed write is survivable and must not be fatal: the salt is
+        // regenerated next start, every mark changes, and the platform asks
+        // for one extra verification per lane. Refusing to publish over it
+        // would be the worse trade.
+        if let Err(e) = std::fs::write(&path, &fresh) {
+            tracing::warn!("could not persist the credential salt ({e}); lanes will re-verify once");
+        }
+        fresh
+    })
 }
 
 /// Whether `a` is a nearer (and known) return time than `b`. 0 means "needs the

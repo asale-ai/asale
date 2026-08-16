@@ -78,6 +78,21 @@ export interface MarketModel {
   calls_last_minute: number;
   /** Alias of `calls_last_minute`, kept for older clients. */
   demand: number;
+  /**
+   * How much of this model's live supply has proved it serves this model.
+   *
+   * A pair, not a boolean, and both `null` when the platform has no reading —
+   * a model with no supply, or a deployment with verification switched off.
+   * "3 of 5 checked" is something a buyer can weigh; a green tick over a
+   * market where one lane in five passed would be a claim the platform cannot
+   * support, and a red one would accuse sellers nobody has got to yet.
+   *
+   * Aggregate by design. Which *lanes* failed is not on a public endpoint:
+   * that list is a directory of who is under suspicion, and it is nobody's
+   * business but the seller's and the operator's.
+   */
+  verified_lanes: number | null;
+  declared_lanes: number | null;
 }
 
 /**

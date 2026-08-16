@@ -12,6 +12,18 @@ import {
   IconZap, IconX, IconCheck, IconAlert,
 } from "../icons";
 import { errText } from "../errors";
+import {
+  VerifyPanel, type LaneVerdict, type VerifyOverview,
+} from "../components/VerifyPanel";
+
+/** The selling terms `setSell` can edit. Every field means "leave as is" when
+ *  omitted — the page edits the switch, the cap and the band independently. */
+interface SellTerms {
+  dailyLimit?: number;
+  minRatio?: number;
+  maxRatio?: number;
+  concurrency?: number;
+}
 
 /**
  * How the matcher currently sees this seller. `deprioritised` means every lane
@@ -401,13 +413,23 @@ const TEST_WIRES = [
  * a worse tool than one that asks.
  */
 function TestDialog({
-  account, lanes, onClose,
+  account, lanes, verdicts, onClose,
 }: {
   account: AccountStatus;
   lanes: Lane[];
+  verdicts: LaneVerdict[];
   onClose: () => void;
 }) {
   const { t } = useTranslation();
+  /* Two questions about the same lane, and sellers arrive wanting either.
+   *
+   * "Does it work" and "is it genuine" are not the same check and must not be
+   * one button. The first is a round trip: one purchase, seconds, and a plain
+   * yes or no. The second is a dozen purchases scored against how the model is
+   * supposed to behave, and its answer is a standing that expires. Collapsing
+   * them would make the fast check slow and the slow check look like a
+   * connectivity test. */
+  const [tab, setTab] = useState<"test" | "verify">("test");
   // Selling lanes first, then the rest: the default has to be a model that
   // could actually answer, or the first thing every seller sees is a failure
   // that is about their choice rather than about their supply.
@@ -453,13 +475,34 @@ function TestDialog({
     >
       <div className="modal" role="dialog" aria-modal="true">
         <div className="modal-head">
-          <h3>{t("publish.test.title")}</h3>
+          <h3>{t(tab === "test" ? "publish.test.title" : "publish.verify.title")}</h3>
           <button type="button" className="modal-x" onClick={onClose} disabled={running}>
             <IconX />
           </button>
         </div>
         <div style={{ padding: "0 var(--s5) var(--s5)" }}>
-          <p className="sub">{t("publish.test.body", { account: account.account_id })}</p>
+          <div className="band-presets" style={{ marginBottom: "var(--s4)" }}>
+            <button
+              className={`chip ${tab === "test" ? "on" : ""}`}
+              onClick={() => setTab("test")}
+              disabled={running}
+            >
+              {t("publish.test.tab")}
+            </button>
+            <button
+              className={`chip ${tab === "verify" ? "on" : ""}`}
+              onClick={() => setTab("verify")}
+              disabled={running}
+            >
+              {t("publish.verify.tab")}
+            </button>
+          </div>
+
+          <p className="sub">
+            {t(tab === "test" ? "publish.test.body" : "publish.verify.body", {
+              account: account.account_id,
+            })}
+          </p>
 
           <div className="field">
             <label>{t("publish.test.modelLabel")}</label>
@@ -484,31 +527,164 @@ function TestDialog({
             )}
           </div>
 
-          <div className="field">
-            <label>{t("publish.test.wireLabel")}</label>
-            <select className="input" value={wire} onChange={(e) => setWire(e.target.value)} disabled={running}>
-              {TEST_WIRES.map((w) => (
-                <option key={w.id} value={w.id}>{w.label}</option>
-              ))}
-            </select>
-            <div className="hint">{t("publish.test.wireHint")}</div>
-          </div>
+          {tab === "test" ? (
+            <>
+              <div className="field">
+                <label>{t("publish.test.wireLabel")}</label>
+                <select className="input" value={wire} onChange={(e) => setWire(e.target.value)} disabled={running}>
+                  {TEST_WIRES.map((w) => (
+                    <option key={w.id} value={w.id}>{w.label}</option>
+                  ))}
+                </select>
+                <div className="hint">{t("publish.test.wireHint")}</div>
+              </div>
 
-          <div className="callout compact">
-            <IconInfo /><span>{t("publish.test.costNote")}</span>
-          </div>
+              <div className="callout compact">
+                <IconInfo /><span>{t("publish.test.costNote")}</span>
+              </div>
+
+              <div className="btn-row" style={{ marginTop: "var(--s4)" }}>
+                <button className="btn" onClick={run} disabled={running || !model}>
+                  {running ? t("publish.test.running") : t("publish.test.run")}
+                </button>
+                <button className="btn subtle" onClick={onClose} disabled={running}>
+                  {t("common.close")}
+                </button>
+              </div>
+
+              {result && <TestResult result={result} />}
+              <Err>{err}</Err>
+            </>
+          ) : (
+            /* Keyed on the model so switching rows starts a clean panel rather
+               than showing the previous model's verdict under a new name. */
+            <VerifyPanel
+              key={model}
+              provider={account.provider}
+              model={model}
+              verdict={verdicts.find((v) => v.provider === account.provider && v.model === model)}
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The gate in front of the sell switch.
+ *
+ * Turning selling on is the moment a subscription starts serving strangers'
+ * prompts for money. Before that happens the platform buys a few completions
+ * from the lane and checks that it behaves like the model it is about to be
+ * sold as — and this dialog is where the seller watches that happen and then
+ * confirms.
+ *
+ * # The confirm button is not the security control
+ *
+ * It cannot be. The daemon this dialog talks to is the software being verified,
+ * and anyone willing to fake a model is willing to delete a button. What
+ * actually keeps an unverified lane off the market is the gateway refusing to
+ * route to it, which happens whether this dialog was ever opened.
+ *
+ * What the dialog is for is the seller: it is the one moment they are looking,
+ * so it is where the arrangement gets explained — that this check happened,
+ * that it will keep happening unannounced, and that the sampling is paid for
+ * like any other sale.
+ *
+ * # Why it can be dismissed mid-run
+ *
+ * A run is tens of seconds. Trapping somebody behind a modal for that long, on
+ * a check they did not ask for, is a bad trade for a dialog whose whole job is
+ * to make the rule feel reasonable. The run continues on the server; reopening
+ * the dialog picks the result back up.
+ */
+function VerifyGateDialog({
+  account, lanes, verdicts, enforced, onConfirm, onCancel,
+}: {
+  account: AccountStatus;
+  lanes: Lane[];
+  verdicts: LaneVerdict[];
+  /** False while the platform is measuring but not yet refusing. The dialog
+   *  still runs and still explains — it just does not claim the lane cannot
+   *  sell, because it can. */
+  enforced: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const { t } = useTranslation();
+  const models = useMemo(
+    () => [...new Set(lanes.map((l) => l.model))].sort((a, b) => a.localeCompare(b)),
+    [lanes],
+  );
+  const [model, setModel] = useState(() => models[0] ?? "");
+  const [outcome, setOutcome] = useState("");
+
+  const known = verdicts.find((v) => v.provider === account.provider && v.model === model);
+  const standing = outcome || known?.status || "";
+  /* `watch` sells. It means the run could not reach a confident conclusion,
+   * which is not an accusation and does not cost a listing — the platform
+   * simply samples that lane harder. Blocking here on anything short of a
+   * clean pass would put the client's gate somewhere stricter than the
+   * server's, and the seller would be stuck behind a button while their lane
+   * was, in fact, allowed to trade. */
+  const passed = standing === "pass" || standing === "watch";
+
+  return (
+    <div
+      className="modal-backdrop"
+      // Not dismissible by clicking away. The switch is already on, and a
+      // stray click that left it on with nobody verifying is a lane earning
+      // nothing for a reason its owner never saw. Both exits are explicit.
+    >
+      <div className="modal" role="dialog" aria-modal="true">
+        <div className="modal-head">
+          <h3>{t("publish.verify.gateTitle")}</h3>
+          <button type="button" className="modal-x" onClick={onCancel}>
+            <IconX />
+          </button>
+        </div>
+        <div style={{ padding: "0 var(--s5) var(--s5)" }}>
+          <p className="sub">{t("publish.verify.gateBody", { account: account.account_id })}</p>
+
+          {models.length > 1 && (
+            <div className="field">
+              <label>{t("publish.verify.gateModelLabel")}</label>
+              <select
+                className="input"
+                value={model}
+                onChange={(e) => { setModel(e.target.value); setOutcome(""); }}
+              >
+                {models.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+              {/* One model is verified here and the rest are verified as they
+                  first serve. Saying so beats letting a seller believe the
+                  whole account was cleared by one run. */}
+              <div className="hint">{t("publish.verify.gateModelHint")}</div>
+            </div>
+          )}
+
+          <VerifyPanel
+            key={model}
+            provider={account.provider}
+            model={model}
+            verdict={known}
+            onOutcome={setOutcome}
+          />
 
           <div className="btn-row" style={{ marginTop: "var(--s4)" }}>
-            <button className="btn" onClick={run} disabled={running || !model}>
-              {running ? t("publish.test.running") : t("publish.test.run")}
+            <button className="btn" onClick={onConfirm} disabled={enforced && !passed}>
+              {t("publish.verify.confirmSell")}
             </button>
-            <button className="btn subtle" onClick={onClose} disabled={running}>
-              {t("common.close")}
+            <button className="btn subtle" onClick={onCancel}>
+              {t("publish.verify.cancelSell")}
             </button>
           </div>
-
-          {result && <TestResult result={result} />}
-          <Err>{err}</Err>
+          <div className="hint">
+            {t(enforced && !passed ? "publish.verify.confirmBlocked" : "publish.verify.alreadyOn")}
+          </div>
         </div>
       </div>
     </div>
@@ -583,6 +759,12 @@ export function Publish() {
   const [pending, setPending] = useState<Record<string, boolean>>({});
   /** Which account's supply test is open, by the same key; "" = none. */
   const [testing, setTesting] = useState("");
+  /* The account whose verification gate is open, and the terms it will apply
+     once the seller confirms. Held together because the gate interrupts a
+     `setSell` call that was already on its way — confirming has to resume it
+     with exactly the arguments it had, not with defaults. */
+  const [gate, setGate] = useState<{ key: string; terms: SellTerms } | null>(null);
+  const [verification, setVerification] = useState<VerifyOverview | null>(null);
 
   // Per-model lane state. `now` ticks once a second so the countdowns on
   // cooling lanes actually count down between the 4s account polls.
@@ -618,7 +800,7 @@ export function Publish() {
   const [pasteFlow, setPasteFlow] = useState<{ provider: string; flowId: string } | null>(null);
   const [pasteDraft, setPasteDraft] = useState("");
 
-  // Platform endpoints: whether the daemon runs the feature at all, which
+  // Platform endpoints: whether this account may use them at all, which
   // endpoint's form is open, and the terms being typed into it.
   const [endpointsOn, setEndpointsOn] = useState(false);
   const [epProvider, setEpProvider] = useState("");
@@ -647,15 +829,26 @@ export function Publish() {
   const [sellerStatus, setSellerStatus] = useState<SellerStatus | null>(null);
   const [importErr, setImportErr] = useState("");
 
-  // Asked once: it is an env var on the daemon, so it cannot change while the
-  // app is up, and the two tiles must not flicker in and out on a poll.
+  // Two things decide this — a build flag, which cannot change while the app is
+  // up, and whether the signed-in account is a platform operator, which can:
+  // this page is reachable before signing in, and selling through an endpoint
+  // of one's own is an operator capability the gateway enforces on every
+  // declaration. So it is polled rather than asked once. The cost is a local
+  // RPC; the daemon caches the server's verdict for a minute behind it.
+  //
+  // The failure case keeps the last answer instead of hiding the tile: a
+  // momentarily unreachable daemon is not a demotion, and a tile that
+  // disappears mid-edit takes the half-typed form with it.
   useEffect(() => {
     if (!inTauri) return;
     let alive = true;
-    invoke<{ enabled: boolean }>("custom_endpoints_status")
-      .then((r) => { if (alive) setEndpointsOn(r.enabled); })
-      .catch(() => {});
-    return () => { alive = false; };
+    const poll = () =>
+      invoke<{ enabled: boolean }>("custom_endpoints_status")
+        .then((r) => { if (alive) setEndpointsOn(r.enabled); })
+        .catch(() => {});
+    poll();
+    const id = setInterval(poll, 8000);
+    return () => { alive = false; clearInterval(id); };
   }, []);
 
   const loadAccounts = useCallback(() => {
@@ -700,6 +893,28 @@ export function Publish() {
     return () => { clearInterval(id); clearInterval(tick); };
   }, [loadAccounts]);
 
+  /* Lane verification standing.
+   *
+   * Polled rather than fetched once: a shadow sample can change a lane's
+   * standing at any moment without the seller having done anything, and the
+   * badge on this page is the only place they would ever see that happen.
+   * Slowly, though — a verdict is minted by a run that takes a minute and
+   * stands for a week, so there is nothing here that rewards a fast poll.
+   *
+   * A failure is left silent. Verification is not what this page is for, and a
+   * red banner about it would sit on top of the switches and terms somebody
+   * actually came here to change. */
+  useEffect(() => {
+    if (!inTauri) return;
+    const poll = () =>
+      invoke<VerifyOverview>("lane_verification_overview")
+        .then(setVerification)
+        .catch(() => {});
+    poll();
+    const id = setInterval(poll, 60000);
+    return () => clearInterval(id);
+  }, []);
+
   // Reputation standing. The gateway reports it once per supply declaration
   // (every 60s), so polling faster than that would only re-read the same value.
   useEffect(() => {
@@ -717,6 +932,11 @@ export function Publish() {
   // than captured when the button was pressed, so an account removed (or
   // switched off) under a four-second poll closes its own dialog.
   const testAccount = accounts.find((a) => keyOf(a) === testing && a.sell_enabled);
+  // Resolved from the live list for the same reason `testAccount` is: an
+  // account removed under the four-second poll closes its own dialog. Not
+  // filtered on `sell_enabled` — the whole point of this one is that the
+  // account is not selling yet.
+  const gateAccount = accounts.find((a) => keyOf(a) === gate?.key);
 
   /** Put a lane the operator has fixed back on the market. */
   async function resume(lane: Lane) {
@@ -742,7 +962,10 @@ export function Publish() {
   async function setSell(
     a: AccountStatus,
     enabled: boolean,
-    terms: { dailyLimit?: number; minRatio?: number; maxRatio?: number; concurrency?: number } = {},
+    terms: SellTerms = {},
+    /** Set once the verification gate has been confirmed, so the resumed call
+     *  does not re-open the dialog it just came out of. */
+    verified = false,
   ) {
     const k = keyOf(a);
     const { dailyLimit, minRatio, maxRatio, concurrency } = terms;
@@ -752,6 +975,20 @@ export function Publish() {
     // turn itself back off. Only the off → on transition: editing the terms of
     // an account that is already selling, and switching one off, stay local.
     if (enabled && !a.sell_enabled && !(await requireSignIn("errors.session.signInToSell"))) return;
+    // Same transition, one step later: verify before the lane can be bought
+    // from. Deliberately not on the way *off* — being unable to stop selling
+    // because a verification would not run is the worse failure by a distance.
+    //
+    // The switch is written *first* and the dialog opens after, which is the
+    // opposite of how this reads and the only order that works. The platform
+    // verifies a lane by buying from it, and a lane is only declared to the
+    // market while its account's switch is on — so holding the switch until
+    // verification passed meant verifying a lane that did not exist, and every
+    // run failed with `no_supply`. Turning the switch on does not put the lane
+    // on sale: the gateway declares it `unverified` and refuses to route
+    // buyers to it until a verdict says otherwise. Cancelling the dialog turns
+    // the switch back off.
+    const needsGate = enabled && !a.sell_enabled && !verified && verification?.enabled;
     setPending((p) => ({ ...p, [k]: true }));
     // Optimistic: the list refreshes on a 4s poll, too slow for a toggle.
     setAccounts((list) =>
@@ -777,6 +1014,7 @@ export function Publish() {
         ...(concurrency === undefined ? {} : { concurrency }),
       });
       loadAccounts();
+      if (needsGate) setGate({ key: k, terms });
     } catch (e) {
       setAcctErr(errText(e));
       // The session can lapse between the check above and this call.
@@ -1757,7 +1995,31 @@ export function Publish() {
           key={testing}
           account={testAccount}
           lanes={lanes.filter((l) => l.provider === testAccount.provider && l.account_id === testAccount.account_id)}
+          verdicts={verification?.lanes ?? []}
           onClose={() => setTesting("")}
+        />
+      )}
+
+      {gateAccount && (
+        <VerifyGateDialog
+          key={gate?.key}
+          account={gateAccount}
+          lanes={lanes.filter((l) => l.provider === gateAccount.provider && l.account_id === gateAccount.account_id)}
+          verdicts={verification?.lanes ?? []}
+          enforced={verification?.enforced ?? false}
+          onConfirm={() => {
+            setGate(null);
+            loadAccounts();
+          }}
+          // Backing out is a real decision, not a dismissal: the switch is
+          // already on, and leaving it on would mean an account sitting in
+          // `unverified` earning nothing while its owner believes they
+          // declined. Turning it off is local and always allowed.
+          onCancel={() => {
+            const a = gateAccount;
+            setGate(null);
+            void setSell(a, false);
+          }}
         />
       )}
     </div>

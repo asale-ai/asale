@@ -46,7 +46,7 @@ pub async fn register(state: &AppState, email: String, password: String, region:
         }));
     }
     // No gate configured on this server — the old immediate-session contract.
-    finish_auth(&v).await
+    finish_auth(state, &v).await
 }
 
 /// Ask the server to mail a fresh verification link.
@@ -88,7 +88,7 @@ pub async fn login(state: &AppState, email: String, password: String) -> R<Value
         }
         return Err(server_error(&v, "request failed"));
     }
-    finish_auth(&v).await
+    finish_auth(state, &v).await
 }
 
 /// Personal center: profile snapshot (name, avatar, linked providers, …).
@@ -153,5 +153,7 @@ pub async fn logout(state: &AppState) -> R<bool> {
     keychain::delete("access_token").map_err(err)?;
     keychain::delete("refresh_token").map_err(err)?;
     super::wallet::forget_key(state).await?;
+    // Everything else this daemon knows about the account that just left.
+    super::forget_account_cache(state).await;
     Ok(true)
 }

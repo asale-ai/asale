@@ -22,6 +22,14 @@ pub enum FlowStatus {
     Failed(crate::commands::CmdError),
 }
 
+/// `(fetched_at, verdict)` for [`AppState::operator`].
+///
+/// `None` — either as the whole option or as the inner answer — means "not
+/// established": nobody has asked yet, nobody is signed in, or `/me/profile`
+/// did not answer. It is deliberately not the same as `Some(false)`, because
+/// the one thing a non-answer must never do is delete somebody's endpoints.
+pub type OperatorCache = Arc<RwLock<Option<(i64, Option<bool>)>>>;
+
 pub struct AppState {
     pub cfg: ClientConfig,
     pub store: Arc<LocalStore>,
@@ -45,6 +53,10 @@ pub struct AppState {
     /// Limits-page poll; failures are cached too, so an unreachable upstream
     /// costs one timeout per half-minute rather than one per poll.
     pub limits_cache: Arc<RwLock<std::collections::HashMap<String, (i64, Result<serde_json::Value, String>)>>>,
+    /// Whether the signed-in account is a platform operator (`users.role ==
+    /// "admin"` server-side). Gates the custom-endpoint commands; see
+    /// `commands::accounts::platform_operator`.
+    pub operator: OperatorCache,
     /// In-flight browser OAuth flows: flow_id → status. Entries are removed
     /// when the frontend collects a terminal result.
     pub oauth_flows: Arc<RwLock<HashMap<String, FlowStatus>>>,
@@ -111,6 +123,7 @@ impl AppState {
             device_id,
             pool,
             limits_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            operator: Arc::new(RwLock::new(None)),
             oauth_flows: Arc::new(RwLock::new(HashMap::new())),
             oauth_submitters: Arc::new(RwLock::new(HashMap::new())),
             lane_tx,

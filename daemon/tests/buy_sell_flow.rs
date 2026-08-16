@@ -1014,6 +1014,22 @@ async fn models_stub(ids: &[&str]) -> String {
     format!("http://127.0.0.1:{port}/v1")
 }
 
+/// Say what the server would answer about this account's role, without asking
+/// it.
+///
+/// `commands::platform_operator` caches `/me/profile`'s verdict for a minute,
+/// so seeding that cache is the same thing as the server having just replied —
+/// and these tests have no server. `Some(true)` is a platform operator (the
+/// only kind of account that may sell through a custom endpoint), `Some(false)`
+/// an ordinary seller, `None` "nobody answered".
+async fn as_operator(state: &AppState, verdict: Option<bool>) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    *state.operator.write().await = Some((now, verdict));
+}
+
 /// Seed the catalog the pool builds lanes from, as a market pull would have.
 async fn seed_catalog(store: &LocalStore, by_provider: serde_json::Value) {
     let catalog = serde_json::json!({"fetched_at": 1, "by_provider": by_provider});
@@ -1026,6 +1042,7 @@ async fn a_custom_endpoint_sells_the_catalog_it_can_serve_under_market_ids() {
     let _sb = Sandbox::new("custom");
     std::env::set_var("ASALE_CUSTOM_ENDPOINTS", "1");
     let state = signed_in_state().await;
+    as_operator(&state, Some(true)).await;
     // What the platform trades. `claude-haiku-4-5` is the interesting one: the
     // endpoint below spells it `anthropic/claude-haiku-4.5`.
     seed_catalog(
@@ -1138,6 +1155,7 @@ async fn an_endpoint_that_speaks_anthropic_is_found_and_sold_as_such() {
     let _sb = Sandbox::new("custom-wire");
     std::env::remove_var("ASALE_CUSTOM_ENDPOINTS");
     let state = signed_in_state().await;
+    as_operator(&state, Some(true)).await;
     seed_catalog(&state.store, serde_json::json!({"claude": ["claude-haiku-4-5"]})).await;
     // Refuses a bearer, answers `x-api-key` — which is the whole difference
     // between the two dialects at the door.
@@ -1182,6 +1200,7 @@ async fn a_protocol_this_client_cannot_speak_is_refused_rather_than_defaulted() 
     let _sb = Sandbox::new("custom-wire-unknown");
     std::env::remove_var("ASALE_CUSTOM_ENDPOINTS");
     let state = signed_in_state().await;
+    as_operator(&state, Some(true)).await;
 
     // Silently demoting this to the default would connect the account, sell it,
     // and answer every request in a dialect the endpoint never agreed to. The
@@ -1209,6 +1228,8 @@ async fn custom_endpoints_are_refused_on_a_client_built_without_them() {
     // which should not carry it sets.
     std::env::set_var("ASALE_CUSTOM_ENDPOINTS", "0");
     let state = signed_in_state().await;
+    // A platform operator, so the refusal below can only be the build flag.
+    as_operator(&state, Some(true)).await;
 
     // Turned off means unreachable: knowing the RPC name is not enough, and the
     // endpoint is never probed on the way to the refusal.
@@ -1236,6 +1257,7 @@ async fn an_endpoint_can_be_re_read_switched_and_removed() {
     let _sb = Sandbox::new("custom-manage");
     std::env::set_var("ASALE_CUSTOM_ENDPOINTS", "1");
     let state = signed_in_state().await;
+    as_operator(&state, Some(true)).await;
     seed_catalog(&state.store, serde_json::json!({"claude": ["claude-haiku-4-5"]})).await;
     let base = models_stub(&["anthropic/claude-haiku-4.5"]).await;
 
@@ -1307,6 +1329,7 @@ async fn the_status_probe_answers_either_way() {
     // An ordinary install: nothing set, and the feature is on.
     std::env::remove_var("ASALE_CUSTOM_ENDPOINTS");
     let state = signed_in_state().await;
+    as_operator(&state, Some(true)).await;
     let status = commands::custom_endpoints_status(&state).await.expect("always answerable");
     assert_eq!(status["enabled"], true);
 
@@ -1318,6 +1341,118 @@ async fn the_status_probe_answers_either_way() {
     let status = commands::custom_endpoints_status(&state).await.expect("always answerable");
     assert_eq!(status["enabled"], false);
     std::env::remove_var("ASALE_CUSTOM_ENDPOINTS");
+}
+
+/// Selling through an endpoint of one's own is a platform-operator capability.
+///
+/// The gateway is what enforces it — `wsrelay::session::declare_supply` drops a
+/// `custom` lane from anybody else — and this is the client half: the tile is
+/// not offered, and the command behind it refuses whether or not the caller
+/// found the RPC name.
+#[tokio::test(flavor = "current_thread")]
+async fn an_ordinary_seller_is_not_offered_a_custom_endpoint() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let _sb = Sandbox::new("custom-not-admin");
+    std::env::remove_var("ASALE_CUSTOM_ENDPOINTS");
+    let state = signed_in_state().await;
+    as_operator(&state, Some(false)).await;
+
+    let status = commands::custom_endpoints_status(&state).await.expect("always answerable");
+    assert_eq!(status["enabled"], false, "the tile is not rendered");
+
+    // Not probed on the way to the refusal: the URL is unreachable and the
+    // command must still fail on the role rather than on a timeout.
+    let e = commands::connect_custom_endpoint(
+        &state,
+        "https://example.invalid/v1".into(),
+        "sk-x".into(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("must be refused");
+    assert!(e.message.contains("platform operators only"), "got: {}", e.message);
+
+    // An unanswerable question is not a promotion either — the daemon may
+    // simply not have reached the server yet.
+    as_operator(&state, None).await;
+    let status = commands::custom_endpoints_status(&state).await.unwrap();
+    assert_eq!(status["enabled"], false);
+}
+
+/// The capability was open to everyone once, so an ordinary seller may still
+/// have an endpoint connected from then. It is cleared out rather than left to
+/// sit on the sell page declaring supply the gateway refuses every minute.
+#[tokio::test(flavor = "current_thread")]
+async fn an_ordinary_sellers_leftover_endpoint_is_cleared_out() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let _sb = Sandbox::new("custom-purge");
+    std::env::remove_var("ASALE_CUSTOM_ENDPOINTS");
+    let state = signed_in_state().await;
+    seed_catalog(&state.store, serde_json::json!({"claude": ["claude-haiku-4-5"]})).await;
+    let base = models_stub(&["anthropic/claude-haiku-4.5"]).await;
+
+    // Connected back when it was allowed.
+    as_operator(&state, Some(true)).await;
+    commands::connect_custom_endpoint(
+        &state,
+        base,
+        "sk-endpoint-key".into(),
+        None,
+        Some("house".into()),
+        Some(5),
+        Some(4),
+        None,
+    )
+    .await
+    .expect("connect");
+    let items = asale_daemon::publisher::build_supply_items(&state.store, &state.pool).await;
+    assert!(!items.as_array().unwrap().is_empty(), "it was on the market");
+
+    // An unknown verdict is not a demotion — that is what a flight with no wifi
+    // looks like, and the account it would delete holds a key the user pasted in
+    // by hand. Driven through the supervisor's own entry point, because that is
+    // where the guard has to hold.
+    as_operator(&state, None).await;
+    assert_eq!(
+        commands::enforce_custom_endpoint_policy(&state).await,
+        0,
+        "silence is not a demotion"
+    );
+
+    // Neither is a stale answer about whoever was signed in before. The verdict
+    // is cached, nothing keys it to an account, and the one that survived a
+    // sign-out would be deleting the *next* account's endpoints.
+    as_operator(&state, Some(false)).await;
+    commands::logout(&state).await.expect("logout");
+    assert_eq!(
+        commands::enforce_custom_endpoint_policy(&state).await,
+        0,
+        "the previous account's verdict left with it"
+    );
+
+    // The server answering "no" about this one is.
+    as_operator(&state, Some(false)).await;
+    assert_eq!(commands::enforce_custom_endpoint_policy(&state).await, 1);
+
+    // Nothing left to declare, and nothing left for a re-added endpoint of the
+    // same name to inherit.
+    let items = asale_daemon::publisher::build_supply_items(&state.store, &state.pool).await;
+    assert!(items.as_array().unwrap().is_empty(), "off the market");
+    let tools = state.store.list_tools().await.unwrap();
+    assert!(tools.iter().all(|t| t.provider != "custom"), "the account row went with it");
+    assert_eq!(
+        state.store.get_setting("custombase:house").await.unwrap().unwrap_or_default(),
+        "",
+        "the endpoint URL went with it"
+    );
+
+    // And it stays gone: the daemon will not re-offer the form.
+    let status = commands::custom_endpoints_status(&state).await.unwrap();
+    assert_eq!(status["enabled"], false);
 }
 
 /// The declaration carries the floor the market prices against, and when two

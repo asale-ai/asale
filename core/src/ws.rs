@@ -758,6 +758,38 @@ fn handle_control(
             crate::seller_status::record(ctrl.score, ctrl.min_score);
             ControlResult::Continue
         }
+        // Every `custom` lane in the last declaration was dropped: selling
+        // through an endpoint of one's own is a platform-operator capability.
+        // Recorded rather than acted on — the daemon reaches the same verdict
+        // from `/me/profile` and is the one that removes the accounts, and it
+        // must keep that decision to itself: a frame is not proof of who sent
+        // it, and the action it would trigger deletes keys. What this is for is
+        // the log, so "my endpoint stopped selling" has an answer in `asaled`'s
+        // own output instead of only in the gateway's.
+        "custom.forbidden" => {
+            tracing::warn!("gateway refused this device's custom endpoints: {}", ctrl.reason);
+            ControlResult::Continue
+        }
+        // This lane has not passed model verification, so buyers are not being
+        // routed to it. Logged, never acted on — and the difference matters
+        // more here than anywhere else in this match.
+        //
+        // Pausing the lane would be the obvious reaction and it would be a
+        // deadlock: the platform verifies a lane by *buying* from it, so a lane
+        // this client has taken out of service is one that can never clear the
+        // verification keeping it out of service. The gateway keeps it
+        // matchable on purpose and refuses buyers on its own side; the way out
+        // is the seller running a verification from the sell page, which needs
+        // this lane to still answer.
+        //
+        // The desktop window learns the same thing from `/me/lanes/verification`
+        // and draws a badge from it. This exists for the headless install,
+        // where "online, selling, earning nothing" would otherwise have no
+        // explanation anywhere the operator can see.
+        "lane.unverified" => {
+            tracing::warn!(model = %ctrl.model, "lane is not verified, so it is not being sold: {}", ctrl.reason);
+            ControlResult::Continue
+        }
         "kick" => {
             tracing::warn!("server kicked device: {}", ctrl.reason);
             ControlResult::Kick
@@ -1037,6 +1069,55 @@ mod tests {
             handle_control(&stale, &state_tx, None, &in_flight),
             ControlResult::Continue
         ));
+    }
+
+    /// Records whether the gateway's control frames reached the lane board.
+    struct SpyLanes(std::sync::Mutex<Vec<String>>);
+    impl LaneControl for SpyLanes {
+        fn on_lane_pause(&self, model: &str, reason: &str, _requires_user: bool) {
+            self.0.lock().unwrap().push(format!("{model}:{reason}"));
+        }
+    }
+
+    /// An unverified lane must stay servable.
+    ///
+    /// The platform verifies a lane by buying from it, so anything that takes
+    /// the lane out of service here takes away the only way it could ever
+    /// clear. Pausing it is a deadlock, not a precaution: `pick_for_sale`
+    /// refuses a paused lane, and the first request it would refuse is the
+    /// verifier's own probe.
+    ///
+    /// This is a regression test for exactly that. The frame used to be
+    /// `lane.pause`, `PauseReason::parse("unverified")` fell through to
+    /// `Breaker`, and no lane on the platform could ever be verified.
+    #[test]
+    fn an_unverified_lane_is_reported_but_never_paused() {
+        let in_flight: InFlight = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let (state_tx, _rx) = watch::channel(ConnState::Online);
+        let lanes = SpyLanes(std::sync::Mutex::new(Vec::new()));
+        let ctrl = ControlPayload {
+            action: "lane.unverified".into(),
+            reason: "not verified".into(),
+            task_id: String::new(),
+            throttle_ms: 0,
+            model: "claude-opus-4-5".into(),
+            resume_requires_user: false,
+            score: 0,
+            min_score: 0,
+        };
+        assert!(matches!(
+            handle_control(&ctrl, &state_tx, Some(&lanes), &in_flight),
+            ControlResult::Continue
+        ));
+        assert!(
+            lanes.0.lock().unwrap().is_empty(),
+            "the lane board must not be touched — a paused lane can never be verified"
+        );
+
+        // The contrast: a real pause still reaches it.
+        let paused = ControlPayload { action: "lane.pause".into(), ..ctrl };
+        let _ = handle_control(&paused, &state_tx, Some(&lanes), &in_flight);
+        assert_eq!(lanes.0.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

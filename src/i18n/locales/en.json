@@ -212,7 +212,8 @@
       "tookSeconds": "{{s}}s round trip",
       "servedBy": "Served by",
       "tokens": "Tokens in / out",
-      "reply": "Reply"
+      "reply": "Reply",
+      "tab": "Connectivity"
     },
     "sharedBadge": "shared with local CLI",
     "sharedHint": "This credential was imported from a CLI installed on this machine, so both use the same upstream login.",
@@ -293,7 +294,58 @@
     "endpointConnected": "{{account}} connected over {{wire}}: serves {{served}} models, {{selling}} of them tradable here.",
     "rankedLastTitle": "Your listings are last in line",
     "rankedLastBody": "Reputation is {{score}}, below the {{min}} the platform treats as healthy. Your models stay listed and will still be used when nothing better is free, but every healthier seller is served ahead of you — on a busy model that means almost no traffic.",
-    "rankedLastHow": "Reputation is recalculated from the last 24 hours of trades — success rate, latency and metering accuracy. It recovers on its own once the failed calls age out. If failures are ongoing, check the upstream account above."
+    "rankedLastHow": "Reputation is recalculated from the last 24 hours of trades — success rate, latency and metering accuracy. It recovers on its own once the failed calls age out. If failures are ongoing, check the upstream account above.",
+    "verify": {
+      "tab": "Verification",
+      "title": "Model verification",
+      "gateTitle": "Verify before selling",
+      "body": "The platform buys a few short completions from {{account}} along the ordinary buyer path and checks that they behave like the model being sold. It runs entirely on the server; this machine only receives progress and the result.",
+      "gateBody": "Selling means this subscription starts serving strangers' prompts. Before that, the platform checks that the lane really is the model it is about to be sold as.",
+      "gateModelLabel": "Which model to verify first",
+      "gateModelHint": "One model is verified here; the account's other models are each verified before their first sale.",
+      "never": "This lane has not been verified yet.",
+      "run": "Verify",
+      "rerun": "Verify again",
+      "running": "Verifying…",
+      "starting": "Starting the run…",
+      "confirmSell": "Confirm and sell",
+      "confirmBlocked": "Selling opens once verification passes.",
+      "samplingNote": "Sampling continues after this. The platform re-checks the lane at times it does not announce, using requests indistinguishable from a buyer's — and pays you the market price for them, exactly as for any sale.",
+      "costNote": "Verification is a real purchase: it spends a little of the subscription's quota, and the platform pays for it.",
+      "sampleRecord": "Sampled {{samples}} times: {{fails}} failed, {{unclear}} inconclusive.",
+      "expires": "Valid until {{date}}, after which it is re-checked automatically.",
+      "outcome": {
+        "pass": "Verified",
+        "watch": "Inconclusive",
+        "reject": "Did not verify",
+        "pending": "Not verified",
+        "verifying": "Verifying"
+      },
+      "outcomeBody": {
+        "pass": "This lane behaves like the model it is sold as and can sell normally.",
+        "watch": "The run could not reach a confident conclusion. That is not an accusation — the lane keeps selling, and the platform samples it more often, which usually settles the question within days.",
+        "reject": "There is strong evidence this lane is not the model it claims, and it has been taken off the market. If you believe that is wrong, review the evidence and appeal."
+      },
+      "step": {
+        "preflight": "Checking reachability",
+        "identity": "Probing model identity",
+        "capability": "Measuring capability tier",
+        "verbosity": "Measuring reply style",
+        "perf": "Measuring generation speed",
+        "signature_drift": "Cross-request consistency",
+        "cache_replay": "Cache replay check",
+        "max_tokens_truncation": "Length-limit behaviour",
+        "stop_sequence": "Stop-sequence behaviour",
+        "system_adherence": "System-prompt adherence"
+      },
+      "evidence": {
+        "open": "View evidence",
+        "summary": "{{requests}} real requests at {{depth}} depth, seed {{seed}} — the same seed replays this run probe for probe."
+      },
+      "cancelSell": "Cancel and turn selling off",
+      "alreadyOn": "The switch is on, but the platform will not route buyers to this lane until verification passes.",
+      "expired": "The last verification has expired, so this lane is not receiving buyers. Verify again to restore it."
+    }
   },
   "consume": {
     "title": "Buy",
@@ -1088,7 +1140,8 @@
       "notAnApiKeyProvider": "This provider is connected by signing in, not with an API key. Pasted keys are for the metered platform APIs (kimi_api, xai_api).",
       "apiKeyRejected": "{{provider}} rejected this API key — check it was copied in full and has not been revoked.",
       "apiKeyEmpty": "Enter an API key.",
-      "apiKeyHasWhitespace": "The API key contains spaces — paste just the key, not the whole command."
+      "apiKeyHasWhitespace": "The API key contains spaces — paste just the key, not the whole command.",
+      "customEndpointsAdminOnly": "Selling through an endpoint of your own is available to platform operators only."
     },
     "settings": {
       "unknownProxyMode": "Unknown proxy mode: {{value}}.",
