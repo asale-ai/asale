@@ -311,7 +311,7 @@
       "confirmSell": "Confirm and sell",
       "confirmBlocked": "Selling opens once verification passes.",
       "samplingNote": "Sampling continues after this. The platform re-checks the lane at times it does not announce, using requests indistinguishable from a buyer's — and pays you the market price for them, exactly as for any sale.",
-      "costNote": "Verification is a real purchase: it spends a little of the subscription's quota, and the platform pays for it.",
+      "costNote": "Verification costs nothing: the probes are free on both sides — nobody is billed and nothing is paid out. All it uses is a little of this subscription's own quota.",
       "sampleRecord": "Sampled {{samples}} times: {{fails}} failed, {{unclear}} inconclusive.",
       "expires": "Valid until {{date}}, after which it is re-checked automatically.",
       "outcome": {
