@@ -513,7 +513,7 @@ pub async fn execute(
             &provider,
             &lease.account_id,
             &model,
-            TaskOutcome::Success { tokens_used: (usage.input_tokens + usage.output_tokens).max(0) as u64 },
+            TaskOutcome::Success { tokens_used: usage.quota_tokens().max(0) as u64 },
         );
         if let Some(r) = records {
             r.record(&task_id, &provider, &lease.account_id, &model, &usage, "ok").await;
@@ -602,7 +602,7 @@ pub async fn execute(
         &provider,
         &lease.account_id,
         &model,
-        TaskOutcome::Success { tokens_used: (usage.input_tokens + usage.output_tokens).max(0) as u64 },
+        TaskOutcome::Success { tokens_used: usage.quota_tokens().max(0) as u64 },
     );
 
     // Local metering record for reconciliation (spec §5.2 step 5, §8).
@@ -634,7 +634,7 @@ async fn finish_canceled(
         provider,
         account_id,
         model,
-        TaskOutcome::Success { tokens_used: (usage.input_tokens + usage.output_tokens).max(0) as u64 },
+        TaskOutcome::Success { tokens_used: usage.quota_tokens().max(0) as u64 },
     );
     if let Some(r) = records {
         r.record(task_id, provider, account_id, model, usage, "canceled").await;
@@ -906,41 +906,98 @@ pub fn usage_from_body(bytes: &[u8]) -> Usage {
 /// once.
 fn merge_usage(usage: &mut Usage, v: &serde_json::Value) {
     // Claude message_delta.usage / message_start.message.usage, and the same
-    // object at the top level of a buffered response.
+    // object at the top level of a buffered response. The Responses API's
+    // buffered body and OpenAI's chat body land here too — they all hang usage
+    // off the same key — which is why `merge_usage_object` decides the cache
+    // split from the fields it actually finds, not from which call site it was
+    // reached through.
     if let Some(u) = v.get("usage") {
-        if let Some(i) = u.get("input_tokens").and_then(|x| x.as_i64()) {
-            usage.input_tokens = i;
-        }
-        if let Some(o) = u.get("output_tokens").and_then(|x| x.as_i64()) {
-            usage.output_tokens = o;
-        }
+        merge_usage_object(usage, u);
     }
+    // Claude message_start: the only frame that carries the prompt side, cache
+    // counts included. Reading just `input_tokens` here is what left every
+    // Anthropic lane reporting the uncached remainder — tens of tokens — as if
+    // it were the whole prompt.
     if let Some(m) = v.get("message").and_then(|m| m.get("usage")) {
-        if let Some(i) = m.get("input_tokens").and_then(|x| x.as_i64()) {
-            usage.input_tokens = i;
-        }
-    }
-    // OpenAI usage
-    if let Some(u) = v.get("usage").filter(|u| u.get("prompt_tokens").is_some()) {
-        usage.input_tokens = u.get("prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(usage.input_tokens);
-        usage.output_tokens = u.get("completion_tokens").and_then(|x| x.as_i64()).unwrap_or(usage.output_tokens);
+        merge_usage_object(usage, m);
     }
     // Responses API: streaming reports usage only in response.completed, which
     // nests it one level down. Without this, every codex stream would settle as
     // zero tokens.
     if let Some(u) = v.get("response").and_then(|r| r.get("usage")).filter(|u| !u.is_null()) {
-        if let Some(i) = u.get("input_tokens").and_then(|x| x.as_i64()) {
-            usage.input_tokens = i;
-        }
-        if let Some(o) = u.get("output_tokens").and_then(|x| x.as_i64()) {
-            usage.output_tokens = o;
-        }
+        merge_usage_object(usage, u);
     }
-    // Gemini usageMetadata
+    // Gemini usageMetadata, which spells every field its own way but shares the
+    // prompt-total convention below.
     if let Some(u) = v.get("usageMetadata") {
-        usage.input_tokens = u.get("promptTokenCount").and_then(|x| x.as_i64()).unwrap_or(usage.input_tokens);
-        usage.output_tokens = u.get("candidatesTokenCount").and_then(|x| x.as_i64()).unwrap_or(usage.output_tokens);
+        if let Some(o) = u.get("candidatesTokenCount").and_then(|x| x.as_i64()) {
+            usage.output_tokens = o.max(0);
+        }
+        if let Some(p) = u.get("promptTokenCount").and_then(|x| x.as_i64()) {
+            let cached =
+                u.get("cachedContentTokenCount").and_then(|x| x.as_i64()).unwrap_or(0).max(0);
+            usage.input_tokens = (p - cached).max(0);
+            usage.cache_read_tokens = cached;
+        }
     }
+}
+
+/// Fold one dialect's `usage` object into the running total.
+///
+/// **The dialects disagree on whether the prompt count already contains the
+/// cached part, and the disagreement is worth money.** Anthropic reports
+/// `cache_read_input_tokens` / `cache_creation_input_tokens` *beside*
+/// `input_tokens`, which then holds only the uncached remainder — already the
+/// split this crate bills on. OpenAI (chat and Responses alike) and Gemini fold
+/// the cached tokens *into* the prompt total, so the cached share has to come
+/// back out: leaving it in bills the same tokens twice over, once at the full
+/// prompt rate and again as a cache read.
+///
+/// Getting this wrong in either direction moves real money. Reading neither —
+/// which is what this did until now — bills every cached prompt token at the
+/// full input rate on the OpenAI side (the buyer overpays, by up to the ~10×
+/// gap between the two prices) and reports a few dozen tokens instead of tens
+/// of thousands on the Anthropic side (the seller is paid for almost nothing).
+fn merge_usage_object(usage: &mut Usage, u: &serde_json::Value) {
+    let n = |k: &str| u.get(k).and_then(|x| x.as_i64());
+
+    if let Some(o) = n("output_tokens").or_else(|| n("completion_tokens")) {
+        usage.output_tokens = o.max(0);
+    }
+    // Anthropic's counts map across untouched.
+    let anthropic_read = n("cache_read_input_tokens");
+    let anthropic_write = n("cache_creation_input_tokens");
+    if let Some(r) = anthropic_read {
+        usage.cache_read_tokens = r.max(0);
+    }
+    if let Some(w) = anthropic_write {
+        usage.cache_write_tokens = w.max(0);
+    }
+
+    let Some(prompt) = n("input_tokens").or_else(|| n("prompt_tokens")) else {
+        return;
+    };
+    // Whether this object speaks in prompt totals is decided by the detail keys
+    // the OpenAI dialects always emit, not by whether a cached count happened to
+    // be non-zero — a request that cached nothing still has to leave an
+    // Anthropic frame's cache fields alone.
+    let prompt_total_shape = u.get("prompt_tokens").is_some()
+        || u.get("prompt_tokens_details").is_some()
+        || u.get("input_tokens_details").is_some();
+    if !prompt_total_shape {
+        usage.input_tokens = prompt.max(0);
+        return;
+    }
+    // Both halves come out of this one object. Taking the total from one frame
+    // and the cached share from another would bill the cached tokens in full on
+    // whichever frame omits the detail.
+    let cached = ["prompt_tokens_details", "input_tokens_details"]
+        .iter()
+        .find_map(|k| u.get(k).and_then(|d| d.get("cached_tokens")).and_then(|x| x.as_i64()))
+        .unwrap_or(0)
+        .max(0);
+    usage.input_tokens = (prompt - cached).max(0);
+    usage.cache_read_tokens = cached;
 }
 
 fn send_error(out: &mpsc::UnboundedSender<Envelope>, task_id: &str, code: &str, message: &str, retriable: bool) {
@@ -1421,6 +1478,90 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
         execute(&crate::http::plain(), &tok, req(&url, "claude", 0), &tx, None, &test_verifier(), never_canceled()).await;
         let got = outcomes.lock().unwrap().clone();
         assert_eq!(got, vec![TaskOutcome::Success { tokens_used: 18 }]);
+    }
+
+    /// Anthropic keeps the cached counts beside `input_tokens`, so all three
+    /// cross over untouched. Reading only `input_tokens` here is what had every
+    /// Claude lane in production reporting an average of 17 prompt tokens.
+    #[test]
+    fn anthropic_reports_its_cache_counts_alongside_the_prompt() {
+        let mut u = super::Usage::default();
+        super::accumulate_usage(&mut u, b"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":17,\"cache_read_input_tokens\":30000,\"cache_creation_input_tokens\":1024}}}\n");
+        super::accumulate_usage(
+            &mut u,
+            b"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":700}}\n",
+        );
+        assert_eq!(u.input_tokens, 17, "the uncached remainder, as Anthropic means it");
+        assert_eq!(u.cache_read_tokens, 30000);
+        assert_eq!(u.cache_write_tokens, 1024);
+        assert_eq!(u.output_tokens, 700);
+        // The window this call really spent, which is what quota decay wants.
+        assert_eq!(u.quota_tokens(), 31741);
+    }
+
+    /// A `message_delta` that carries no prompt side at all must not reset the
+    /// cache counts `message_start` established.
+    #[test]
+    fn a_later_frame_without_cache_fields_leaves_them_alone() {
+        let mut u = super::Usage::default();
+        super::accumulate_usage(&mut u, b"data: {\"message\":{\"usage\":{\"input_tokens\":17,\"cache_read_input_tokens\":30000}}}\n");
+        super::accumulate_usage(&mut u, b"data: {\"usage\":{\"output_tokens\":700}}\n");
+        assert_eq!(u.cache_read_tokens, 30000);
+        assert_eq!(u.input_tokens, 17);
+    }
+
+    /// The Responses dialect folds the cached tokens into `input_tokens`, so
+    /// they have to come back out — billing the full prompt *and* the cache read
+    /// charges the buyer twice for the same tokens, at the dearer of the two
+    /// rates.
+    #[test]
+    fn the_responses_dialect_splits_its_cached_tokens_back_out() {
+        let mut u = super::Usage::default();
+        super::accumulate_usage(&mut u, b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":33000,\"input_tokens_details\":{\"cached_tokens\":30000},\"output_tokens\":129}}}\n");
+        assert_eq!(u.input_tokens, 3000, "only the uncached remainder is billed as input");
+        assert_eq!(u.cache_read_tokens, 30000);
+        assert_eq!(u.output_tokens, 129);
+        // The prompt is accounted for exactly once.
+        assert_eq!(u.input_tokens + u.cache_read_tokens, 33000);
+    }
+
+    /// Same convention in OpenAI's chat dialect, spelled differently.
+    #[test]
+    fn the_chat_dialect_splits_its_cached_tokens_back_out() {
+        let mut u = super::Usage::default();
+        super::accumulate_usage(&mut u, b"data: {\"usage\":{\"prompt_tokens\":33000,\"prompt_tokens_details\":{\"cached_tokens\":30000},\"completion_tokens\":129}}\n");
+        assert_eq!(u.input_tokens, 3000);
+        assert_eq!(u.cache_read_tokens, 30000);
+        assert_eq!(u.output_tokens, 129);
+    }
+
+    /// A prompt-total dialect that cached nothing still reports its detail
+    /// object, and must bill the whole prompt as input.
+    #[test]
+    fn an_uncached_prompt_total_bills_in_full() {
+        let mut u = super::Usage::default();
+        super::accumulate_usage(&mut u, b"data: {\"response\":{\"usage\":{\"input_tokens\":900,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":12}}}\n");
+        assert_eq!(u.input_tokens, 900);
+        assert_eq!(u.cache_read_tokens, 0);
+    }
+
+    #[test]
+    fn gemini_splits_its_cached_content_back_out() {
+        let mut u = super::Usage::default();
+        super::accumulate_usage(&mut u, b"data: {\"usageMetadata\":{\"promptTokenCount\":36393,\"cachedContentTokenCount\":30000,\"candidatesTokenCount\":348}}\n");
+        assert_eq!(u.input_tokens, 6393);
+        assert_eq!(u.cache_read_tokens, 30000);
+        assert_eq!(u.output_tokens, 348);
+    }
+
+    /// The buffered path reads the same shapes without the SSE framing.
+    #[test]
+    fn a_buffered_body_splits_the_same_way() {
+        let u = super::usage_from_body(
+            br#"{"usage":{"input_tokens":33000,"input_tokens_details":{"cached_tokens":30000},"output_tokens":129}}"#,
+        );
+        assert_eq!(u.input_tokens, 3000);
+        assert_eq!(u.cache_read_tokens, 30000);
     }
 
     #[test]

@@ -217,6 +217,20 @@ impl Usage {
         self.input_tokens + self.output_tokens
     }
 
+    /// Everything the upstream account really spent on this call.
+    ///
+    /// Distinct from [`total`](Self::total), which answers "was anything
+    /// served" and deliberately counts only the two sides a consumer receives.
+    /// Quota decay is a different question: a cached prompt token still came
+    /// out of the publisher's subscription window, and `input_tokens` holds
+    /// only the *uncached* remainder once the cache fields are populated. Left
+    /// as `input + output`, an OpenAI-dialect lane serving a 33k prompt with 30k
+    /// of it cached would report ~3k against its window instead of ~33k, and
+    /// oversell itself by an order of magnitude.
+    pub fn quota_tokens(&self) -> i64 {
+        self.input_tokens + self.output_tokens + self.cache_read_tokens + self.cache_write_tokens
+    }
+
     pub fn by_type(&self, tt: TokenType) -> i64 {
         match tt {
             TokenType::Input => self.input_tokens,
