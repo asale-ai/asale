@@ -177,17 +177,13 @@ CREATE TABLE IF NOT EXISTS provider_records (
   provider TEXT NOT NULL DEFAULT '',
   account_id TEXT NOT NULL DEFAULT ''
 );
-CREATE TABLE IF NOT EXISTS consume_records (
-  task_id TEXT PRIMARY KEY, ts INTEGER, model TEXT,
-  in_tokens INTEGER, out_tokens INTEGER, amount_usdt INTEGER, status TEXT
-);
 CREATE TABLE IF NOT EXISTS wallet_txns (
   id INTEGER PRIMARY KEY, ts INTEGER, type TEXT,
   amount_usdt INTEGER, tx_hash TEXT, status TEXT
 );
 CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS usage_daily (
-  source TEXT NOT NULL,          -- 'used' (local CLI logs) | 'sold' | 'bought'
+  source TEXT NOT NULL,          -- 'used' (this machine's own calls) | 'sold'
   day TEXT NOT NULL,             -- 'YYYY-MM-DD' (UTC)
   model TEXT NOT NULL,
   in_tokens INTEGER NOT NULL DEFAULT 0,
@@ -274,6 +270,20 @@ const MIGRATIONS: &[&str] = &[
     // the operator can no longer see or lift, so raise every one to list price.
     // Idempotent — after this there is nothing left to update.
     "UPDATE tools SET sell_max_ratio = 100 WHERE sell_max_ratio < 100",
+    // `consume_records` and everything folded from it are gone. It mirrored two
+    // unrelated things and got both wrong: market purchases (recorded with an
+    // amount of zero, because the price is struck at settlement after the
+    // consumer's stream has closed, and with token counts read off the relayed
+    // response rather than off the bill) and direct-route calls, which are this
+    // machine's own subscription answering its own tool and now fold straight
+    // into `usage_daily` as `used`. The buy side reads the server's ledger.
+    //
+    // The snapshot rows have to go with the table: they are the wrong numbers,
+    // already summed, and nothing recomputes them. The cursor too, so a
+    // reinstall over an old data directory does not start mid-file.
+    "DELETE FROM usage_daily WHERE source = 'bought'",
+    "DELETE FROM settings WHERE k = 'usage_agg_rowid:consume_records'",
+    "DROP TABLE IF EXISTS consume_records",
 ];
 
 async fn migrate(pool: &SqlitePool) {
@@ -717,33 +727,32 @@ impl LocalStore {
         Ok(res.rows_affected() > 0)
     }
 
-    /// Insert (or replace) a consumer-side task record (spec §8). Written by the
-    /// local proxy when it forwards to the market (or serves direct).
-    pub async fn insert_consume_record(
+    /// Fold one call this machine served for itself into the `used` snapshot —
+    /// the same bucket the CLI log scanner writes to, under today's UTC day.
+    ///
+    /// This is the direct route: the local proxy answering a tool from an
+    /// imported subscription, with no trade and so no price. It is counted here
+    /// rather than kept as its own row because "我使用的" is exactly the question
+    /// it answers — whose subscription was spent, not what anything cost — and a
+    /// separate table for it was a category nobody was shown.
+    ///
+    /// The caller decides *whether* to fold: a tool whose own session logs the
+    /// scanner already reads would otherwise be counted twice. See
+    /// `usage_scan::scanner_covers`.
+    pub async fn record_local_usage(
         &self,
-        task_id: &str,
         model: &str,
         in_tokens: i64,
         out_tokens: i64,
-        amount_usdt: i64,
-        status: &str,
+        cache: i64,
     ) -> anyhow::Result<()> {
-        sqlx::query(
-            "INSERT INTO consume_records(task_id, ts, model, in_tokens, out_tokens, amount_usdt, status)
-             VALUES(?, strftime('%s','now'), ?, ?, ?, ?, ?)
-             ON CONFLICT(task_id) DO UPDATE SET
-               in_tokens=excluded.in_tokens, out_tokens=excluded.out_tokens,
-               amount_usdt=excluded.amount_usdt, status=excluded.status",
-        )
-        .bind(task_id)
-        .bind(model)
-        .bind(in_tokens)
-        .bind(out_tokens)
-        .bind(amount_usdt)
-        .bind(status)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        // `now`, not the response's own timestamp: a direct call is metered as
+        // its stream ends, which is the same instant either way.
+        let day: (String,) = sqlx::query_as("SELECT strftime('%Y-%m-%d','now')")
+            .fetch_one(&self.pool)
+            .await?;
+        self.add_usage("used", &day.0, model, in_tokens.max(0), out_tokens.max(0), cache.max(0), 1, 0)
+            .await
     }
 
     /// Paged read of provider (publisher-side) records, newest first.
@@ -774,33 +783,6 @@ impl LocalStore {
         Ok((out, total.0))
     }
 
-    /// Paged read of consumer-side records, newest first.
-    pub async fn list_consume_records(&self, limit: i64, offset: i64) -> anyhow::Result<(Vec<RecordRow>, i64)> {
-        let rows: Vec<(String, i64, String, i64, i64, i64, String)> = sqlx::query_as(
-            "SELECT task_id, ts, model, in_tokens, out_tokens, amount_usdt, status
-             FROM consume_records ORDER BY ts DESC, task_id DESC LIMIT ? OFFSET ?",
-        )
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pool)
-        .await?;
-        let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM consume_records").fetch_one(&self.pool).await?;
-        let out = rows
-            .into_iter()
-            .map(|(task_id, ts, model, in_tokens, out_tokens, amount_usdt, status)| RecordRow {
-                task_id,
-                ts,
-                model,
-                in_tokens,
-                out_tokens,
-                cache_read: 0,
-                cache_write: 0,
-                amount_usdt,
-                status,
-            })
-            .collect();
-        Ok((out, total.0))
-    }
 
     /// Update a provider record's settled amount from the server ledger
     /// (reconcile, spec §8.1 — server is authoritative).
@@ -837,21 +819,18 @@ impl LocalStore {
         Ok(row.0)
     }
 
-    /// Aggregate consumer-side (bought) usage since `since_ts` (unix seconds;
-    /// None = all-time): `(tokens = in+out, amount_usdt = spend, count)`. Drives
-    /// the "我买的" category on the usage page.
-    pub async fn bought_summary(&self, since_ts: Option<i64>) -> anyhow::Result<(i64, i64, i64)> {
-        summary_over(&self.pool, "consume_records", since_ts).await
-    }
 }
 
 /// A normalized `SELECT` over one records table exposing a common column set
-/// (`ts, model, in_tokens, out_tokens, cache, amount_usdt`). `consume_records`
-/// has no cache columns, so it projects `0`. Table names are trusted constants.
+/// (`ts, model, in_tokens, out_tokens, cache, amount_usdt`). Table names are
+/// trusted constants.
+///
+/// One table, for now. The shape is kept because it is what lets a caller ask
+/// one question of several ledgers, and `provider_records` stopped being the
+/// only one once before.
 fn norm_select(table: &str) -> Option<&'static str> {
     match table {
         "provider_records" => Some("SELECT ts, model, in_tokens, out_tokens, (cache_read + cache_write) AS cache, amount_usdt FROM provider_records"),
-        "consume_records" => Some("SELECT ts, model, in_tokens, out_tokens, 0 AS cache, amount_usdt FROM consume_records"),
         _ => None,
     }
 }
@@ -923,10 +902,11 @@ impl LocalStore {
     /// on a timer and on demand. Returns the number of rows folded in.
     pub async fn aggregate_usage(&self) -> anyhow::Result<u64> {
         let mut folded = 0u64;
-        for (table, source, cache_expr) in [
-            ("provider_records", "sold", "(cache_read + cache_write)"),
-            ("consume_records", "bought", "0"),
-        ] {
+        // Sell side only. Market purchases are the server's to report
+        // (`/me/usage`) — the client never learns what one cost — and direct
+        // calls fold themselves in as `used` when they happen, via
+        // `record_local_usage`, since there is no table left to sweep.
+        for (table, source, cache_expr) in [("provider_records", "sold", "(cache_read + cache_write)")] {
             let cursor_key = format!("usage_agg_rowid:{table}");
             let cursor: i64 = self
                 .get_setting(&cursor_key)
@@ -1250,18 +1230,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A direct call folds into the same `used` bucket the CLI log scanner
+    /// writes to, so the two are one number rather than two sources the page
+    /// has to choose between.
     #[tokio::test]
-    async fn consume_records_paging_and_tool_delete() {
+    async fn a_direct_call_lands_in_the_used_bucket() {
         let s = LocalStore::open_memory().await.unwrap();
-        for i in 0..3 {
-            s.insert_consume_record(&format!("c{i}"), "claude-sonnet", 10, 5, 0, "ok").await.unwrap();
-        }
-        let (rows, total) = s.list_consume_records(2, 0).await.unwrap();
-        assert_eq!(total, 3);
-        assert_eq!(rows.len(), 2);
-        let (rows2, _) = s.list_consume_records(2, 2).await.unwrap();
-        assert_eq!(rows2.len(), 1);
+        s.record_local_usage("claude-sonnet", 10, 5, 3).await.unwrap();
+        s.record_local_usage("claude-sonnet", 20, 6, 0).await.unwrap();
+        // Same day and model: the two calls add up rather than replacing.
+        let (tokens, amount, count) = s.agg_totals(&["used"], None).await.unwrap();
+        assert_eq!(tokens, 41, "10+5 then 20+6, cache counted beside the total");
+        assert_eq!(amount, 0, "a direct call is the operator's own subscription — no trade, no price");
+        assert_eq!(count, 2);
 
+        let daily = s.agg_by_day(&["used"], None).await.unwrap();
+        assert_eq!(daily.len(), 1);
+        let (_day, total, input, output, cache, cnt) = &daily[0];
+        assert_eq!((*total, *input, *output, *cache, *cnt), (41, 30, 11, 3, 2));
+
+        // It is not the sell side, and `aggregate_usage` has nothing to sweep
+        // for it: the fold already happened when the call did.
+        assert_eq!(s.agg_totals(&["sold"], None).await.unwrap().0, 0);
+        assert_eq!(s.aggregate_usage().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn provider_records_paging_and_tool_delete() {
+        let s = LocalStore::open_memory().await.unwrap();
         // Provider record amount sync (reconcile).
         s.insert_provider_record("p1", "claude", "a@b.io", "claude-sonnet", 100, 50, 0, 0, "ok").await.unwrap();
         s.set_provider_record_amount("p1", 777).await.unwrap();
@@ -1293,23 +1289,26 @@ mod tests {
     #[tokio::test]
     async fn usage_snapshot_aggregates_incrementally() {
         let s = LocalStore::open_memory().await.unwrap();
-        // Two sold + one bought record.
+        // Two sold records plus a direct call. Only the sold ones are swept
+        // from a table; the direct one folded itself in as `used` when it
+        // happened, and market purchases have no local row at all — only the
+        // server knows what one cost.
         s.insert_provider_record("p1", "claude", "a@b.io", "claude-opus-4-8", 100, 40, 5, 5, "ok").await.unwrap(); // sold: 140 tok, 10 cache
         s.insert_provider_record("p2", "claude", "a@b.io", "claude-sonnet-5", 20, 10, 0, 0, "ok").await.unwrap();   // sold: 30 tok
-        s.insert_consume_record("c1", "claude-opus-4-8", 60, 30, 1_000, "ok").await.unwrap();   // bought: 90 tok, 1000 amount
+        s.record_local_usage("claude-opus-4-8", 60, 30, 0).await.unwrap();                                          // used: 90 tok
 
-        // First fold: all three rows.
-        assert_eq!(s.aggregate_usage().await.unwrap(), 3);
+        // First fold: the two sold rows. The direct call is already in.
+        assert_eq!(s.aggregate_usage().await.unwrap(), 2);
         // A second fold with no new rows folds nothing (cursor advanced).
         assert_eq!(s.aggregate_usage().await.unwrap(), 0);
 
         // Totals per scope from the snapshot.
-        assert_eq!(s.agg_totals(&["sold"], None).await.unwrap().0, 170);           // 140 + 30
-        assert_eq!(s.agg_totals(&["bought"], None).await.unwrap(), (90, 1_000, 1)); // tokens, amount, count
-        assert_eq!(s.agg_totals(&["sold", "bought"], None).await.unwrap().0, 260);  // 170 + 90
+        assert_eq!(s.agg_totals(&["sold"], None).await.unwrap().0, 170);      // 140 + 30
+        assert_eq!(s.agg_totals(&["used"], None).await.unwrap(), (90, 0, 1)); // tokens, amount, count
+        assert_eq!(s.agg_totals(&["sold", "used"], None).await.unwrap().0, 260); // 170 + 90
 
-        // Model breakdown (sold+bought): opus = 140 + 90 = 230, sonnet = 30.
-        let models = s.agg_by_model(&["sold", "bought"], None, 10).await.unwrap();
+        // Model breakdown (sold+used): opus = 140 + 90 = 230, sonnet = 30.
+        let models = s.agg_by_model(&["sold", "used"], None, 10).await.unwrap();
         assert_eq!(models[0], ("claude-opus-4-8".into(), 230, 2));
         assert_eq!(models[1], ("claude-sonnet-5".into(), 30, 1));
 

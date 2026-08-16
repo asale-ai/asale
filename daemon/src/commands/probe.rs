@@ -393,22 +393,11 @@ pub async fn test_supply(
         Verdict::Served => {}
     }
 
+    // A real purchase, and it is recorded like every other one: by the server,
+    // which settled it. This used to also write a local `c_` row so the test
+    // would not look like a gap between the local total and the server's —
+    // there is no local total to keep in step with any more.
     let (in_tokens, out_tokens) = usage_of(wire.id, &payload);
-    // A real purchase belongs in this machine's own ledger like any other. The
-    // `c_` id is the proxy's convention for a locally-minted consume row, so a
-    // test looks like what it is — something this account bought — rather than
-    // like a gap between the local total and the server's.
-    let _ = state
-        .store
-        .insert_consume_record(
-            &format!("c_{}", uuid::Uuid::new_v4().simple()),
-            &model,
-            in_tokens,
-            out_tokens,
-            0,
-            "ok",
-        )
-        .await;
 
     tracing::info!(
         %model, wire = wire.id, elapsed_ms,

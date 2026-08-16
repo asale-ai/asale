@@ -7,6 +7,7 @@ use asale_client_core::store::{LocalStore, ToolRow};
 use asale_client_core::{discovery, Provider};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use super::server_client::authed;
 use super::{R, day_start_ts, day_str, err, now_secs};
 use crate::cmd_err;
 
@@ -14,9 +15,16 @@ use crate::cmd_err;
 /// `publisher::WINDOW_SECS`).
 pub(crate) const WINDOW_SECS: i64 = 5 * 3600;
 
-/// Three-category token usage summary over a period (day / week / month / all):
-///   - `bought` — tokens consumed from the market (`consume_records`).
-///   - `sold`   — tokens served as a provider (`provider_records`).
+/// What this device *sold* over a period (day / week / month / all), from its
+/// own first-hand record of the calls it served.
+///
+/// Sell-side only, and cheap by design: the tray polls this every few seconds
+/// for the earnings figure, so it must not reach the network. The buy side used
+/// to ride along here and no caller ever read it — which is just as well, since
+/// the local rows behind it carried an amount of zero for every purchase. That
+/// question is [`usage_overview`] with `scope = "bought"`, one round trip to the
+/// ledger that actually settled the trades.
+///
 /// The subscription category is derived by the UI from `publish_limits` +
 /// `list_accounts` (capacity vs. window usage), so it is not repeated here.
 pub async fn usage_summary(state: &AppState, period: String) -> R<Value> {
@@ -28,20 +36,42 @@ pub async fn usage_summary(state: &AppState, period: String) -> R<Value> {
         _ => None, // "all"
     };
     let sold = state.store.sold_summary(since).await.map_err(err)?;
-    let bought = state.store.bought_summary(since).await.map_err(err)?;
     Ok(json!({
         "period": period,
-        "sold":   { "tokens": sold.0,   "amount_usdt": sold.1,   "count": sold.2 },
-        "bought": { "tokens": bought.0, "amount_usdt": bought.1, "count": bought.2 },
+        "sold": { "tokens": sold.0, "amount_usdt": sold.1, "count": sold.2 },
     }))
+}
+
+/// The buy-side usage dashboard, straight from the server's ledger.
+///
+/// There is no local copy to fall back to, and that is the point: the client's
+/// own mirror of the calls it relayed recorded an amount of zero for every one
+/// of them (it never learns the price) and took its token counts off the relayed
+/// response rather than off what was billed, so on a cached turn it disagreed
+/// with the invoice by most of the prompt. A page that cannot be right is worse
+/// than a page that says it is offline.
+async fn bought_overview(state: &AppState, period: &str) -> R<Value> {
+    authed(
+        state,
+        reqwest::Method::GET,
+        &format!("/api/v1/me/usage?role=consumer&period={period}"),
+        None,
+    )
+    .await
 }
 
 /// Full usage dashboard for the Usage page (mirrors TokenTracker's overview):
 /// headline totals, per-model breakdown, a per-day table, a heatmap series and
-/// rolling stats. `scope` picks the record source — `bought` (consume_records),
-/// `sold` (provider_records) or `used` (local CLI logs). `period` bounds the
-/// headline / table / model breakdown; the heatmap spans the last ~150 days.
+/// rolling stats. `scope` picks the record source — `sold` (provider_records) or
+/// `used` (local CLI logs); `bought` is answered by the server, which is the
+/// only side that knows what a call cost. `period` bounds the headline / table /
+/// model breakdown; the heatmap spans the last ~150 days.
 pub async fn usage_overview(state: &AppState, period: String, scope: String) -> R<Value> {
+    // The server already returns this page's exact shape, so it is handed
+    // through rather than re-derived.
+    if scope == "bought" {
+        return bought_overview(state, &period).await;
+    }
     // Fold any newly-inserted ledger rows into the snapshot first (incremental —
     // only rows added since the last run are scanned), then read the snapshot.
     state.store.aggregate_usage().await.map_err(err)?;
@@ -49,7 +79,6 @@ pub async fn usage_overview(state: &AppState, period: String, scope: String) -> 
     let _ = crate::usage_scan::scan_claude_logs(&state.store).await;
 
     let sources: &[&str] = match scope.as_str() {
-        "bought" => &["bought"],
         "sold" => &["sold"],
         _ => &["used"], // "used" (default) = local CLI usage
     };

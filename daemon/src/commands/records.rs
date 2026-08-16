@@ -6,8 +6,15 @@ use serde_json::{json, Value};
 use super::server_client::{authed};
 use super::{R, err, now_secs};
 
-/// Task records: the server's authoritative page plus the matching local page
-/// (provider_records / consume_records) for offline display and reconcile.
+/// Task records: the server's authoritative page, plus — on the provider side —
+/// the matching local page for offline display and reconcile.
+///
+/// There is no consumer-side local page. This device serves the calls it sells,
+/// so `provider_records` is a first-hand account with real settled amounts in
+/// it; the calls it buys are priced at settlement, after its stream has closed,
+/// so the rows it used to keep for those carried a zero amount and token counts
+/// taken off the relayed response rather than off the bill. An offline consumer
+/// gets `server_error` and no table, which is the honest answer.
 pub async fn records_query(state: &AppState, role: String, page: i64) -> R<Value> {
     let role = if role == "provider" { "provider" } else { "consumer" };
     let page = page.max(1);
@@ -17,7 +24,7 @@ pub async fn records_query(state: &AppState, role: String, page: i64) -> R<Value
     let (local_rows, local_total) = if role == "provider" {
         state.store.list_provider_records(per_page, offset).await.map_err(err)?
     } else {
-        state.store.list_consume_records(per_page, offset).await.map_err(err)?
+        (Vec::new(), 0)
     };
 
     let server = authed(state, reqwest::Method::GET, &format!("/api/v1/me/records?role={role}&page={page}"), None).await;
@@ -39,8 +46,12 @@ pub async fn records_query(state: &AppState, role: String, page: i64) -> R<Value
 /// Manual reconciliation (spec §8.1): pull the server's provider-side records,
 /// diff against local `provider_records` by task_id, sync settled amounts
 /// locally (server is authoritative) and return the difference summary.
-/// Consumer-side task ids are minted locally (the gateway does not expose its
-/// task id to the consumer), so that side reconciles by count.
+///
+/// Only the provider side has two copies to reconcile. The consumer side used to
+/// compare counts — the one thing it could compare, since its task ids were
+/// minted locally and never matched the gateway's — which made it a check that
+/// could fail for reasons nobody could act on. It now has a single copy, the
+/// server's, so there is nothing to diff.
 pub async fn reconcile_now(state: &AppState) -> R<Value> {
     // Server truth: up to 3 pages (150 newest provider-side records).
     let mut server_entries: Vec<reconcile::RecEntry> = Vec::new();
@@ -78,19 +89,9 @@ pub async fn reconcile_now(state: &AppState) -> R<Value> {
         state.store.set_provider_record_amount(&fix.task_id, fix.server_amount).await.map_err(err)?;
     }
 
-    // Consumer side: count comparison (local ids are client-minted).
-    let consumer_server = authed(state, reqwest::Method::GET, "/api/v1/me/records?role=consumer&page=1", None).await;
-    let server_count = consumer_server
-        .as_ref()
-        .ok()
-        .and_then(|v| v["records"].as_array().map(|a| a.len()))
-        .unwrap_or(0);
-    let (_, local_consume_total) = state.store.list_consume_records(1, 0).await.map_err(err)?;
-
     Ok(json!({
         "provider": summary,
         "synced_amounts": synced,
-        "consumer": {"server_page_count": server_count, "local_total": local_consume_total},
         "reconciled_at": now_secs(),
     }))
 }

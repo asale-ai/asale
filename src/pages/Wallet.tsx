@@ -17,7 +17,7 @@ import { sitePage } from "../links";
 import { openExternal } from "../shell";
 import {
   IconWallet, IconRefresh, IconDownload, IconArrowRight,
-  IconShield, IconCheck, IconRecords, IconShare, IconExternal, IconChevronDown,
+  IconShield, IconCheck, IconRecords, IconShare, IconExternal,
 } from "../icons";
 
 type HistTab = "all" | "deposit" | "withdraw";
@@ -57,22 +57,6 @@ export function WalletPage() {
   const [sharing, setSharing] = useState(false);
   /* The card sheet is its own door, not a tab on the one above. */
   const [cardOpen, setCardOpen] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
-  /* A menu that only closes by picking something is a menu you cannot back out
-     of — the two ways everyone already tries are clicking away and Escape. */
-  useEffect(() => {
-    if (!menuOpen) return;
-    const away = (e: MouseEvent) => {
-      if (!(e.target as Element | null)?.closest(".split-btn")) setMenuOpen(false);
-    };
-    const key = (e: KeyboardEvent) => { if (e.key === "Escape") setMenuOpen(false); };
-    document.addEventListener("mousedown", away);
-    document.addEventListener("keydown", key);
-    return () => {
-      document.removeEventListener("mousedown", away);
-      document.removeEventListener("keydown", key);
-    };
-  }, [menuOpen]);
   const [histTab, setHistTab] = useState<HistTab>("all");
 
   const refresh = useCallback((manual = false) => {
@@ -144,37 +128,26 @@ export function WalletPage() {
             )}
           </div>
           <div className="wh-actions">
-            {/* Two doors behind one button. The card is the default because it
-                is the only one someone can finish without already holding USDT
-                somewhere; buying crypto sits in the menu beside it. Where no
-                processor is configured there is no menu and the button opens
-                the crypto sheet directly — the old behaviour. */}
+            {/* Two rails, two buttons. The crypto one used to live in a dropdown
+                behind a chevron on the card button, which is the wrong shape for
+                this audience: the people who already hold USDT are the ones who
+                can pay in one step, and they were the ones being asked to go
+                looking. Neither rail is a sub-case of the other, so neither is
+                hidden inside the other.
+
+                The card stays the primary because it is the only rail someone
+                can finish without already holding USDT. Where no processor is
+                configured, the crypto button is the only one and takes the
+                primary styling itself. Kept in step with asale-web's wallet. */}
             {hist?.card ? (
-              <div className="split-btn">
-                <button className="btn split-btn-main" onClick={() => setCardOpen(true)} disabled={!inTauri}>
-                  <IconDownload />{t("wallet.tabDeposit")}
+              <>
+                <button className="btn" onClick={() => setCardOpen(true)} disabled={!inTauri}>
+                  <IconDownload />{t("wallet.depositCard")}
                 </button>
-                <button
-                  className="btn split-btn-more"
-                  aria-haspopup="menu"
-                  aria-expanded={menuOpen}
-                  aria-label={t("wallet.depositMore")}
-                  onClick={() => setMenuOpen((v) => !v)}
-                  disabled={!inTauri}
-                >
-                  <IconChevronDown />
+                <button className="btn ghost" onClick={() => setPane("deposit")} disabled={!inTauri}>
+                  <IconWallet />{t("wallet.depositCrypto")}
                 </button>
-                {menuOpen && (
-                  <div className="split-menu" role="menu">
-                    <button
-                      role="menuitem"
-                      onClick={() => { setMenuOpen(false); setPane("deposit"); }}
-                    >
-                      <IconWallet />{t("wallet.depositCrypto")}
-                    </button>
-                  </div>
-                )}
-              </div>
+              </>
             ) : (
               <button className="btn" onClick={() => setPane("deposit")} disabled={!inTauri}>
                 <IconDownload />{t("wallet.tabDeposit")}

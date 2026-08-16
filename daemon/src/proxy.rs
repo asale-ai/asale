@@ -9,8 +9,12 @@
 //!   auto   → direct when a local account with remaining quota can serve the
 //!            request's dialect natively; market otherwise.
 //!
-//! Market forwards write a local `consume_records` row (spec §8) with the
-//! usage parsed from the streamed response, for reconciliation.
+//! Direct forwards fold what they served into the local `used` usage snapshot
+//! (spec §8) — the operator's own subscription being spent — skipping tools
+//! whose session logs the scanner already reads. Market forwards record nothing
+//! locally: the server settles them and is the only party that knows what one
+//! cost, so the buy side reads `/me/usage` and `/me/records` rather than a
+//! second copy that can only disagree.
 
 use asale_client_core::executor::UsageScanner;
 use asale_client_core::protocol::Usage;
@@ -307,16 +311,22 @@ async fn forward(
         if provider.is_empty() {
             return (StatusCode::SERVICE_UNAVAILABLE, "consume mode is 'direct' but no local subscription can serve this endpoint").into_response();
         }
-        return forward_direct(st, provider, &path, &path_and_query, method, bytes, meter).await;
+        return forward_direct(st, provider, tool, &path, &path_and_query, method, bytes, meter).await;
     }
-    forward_market(st, &path_and_query, method, bytes, meter).await
+    forward_market(st, &path_and_query, method, bytes).await
 }
 
 /// Direct route: inject the pool-selected local subscription token and call the
 /// official upstream. No trade, no asale server involvement (spec §6.1).
+///
+/// What it serves is folded into the `used` usage snapshot — this is the
+/// operator's own subscription being spent, which is exactly what "我使用的"
+/// counts — unless the tool keeps session logs the scanner already reads, in
+/// which case the same turns would be counted twice.
 async fn forward_direct(
     st: ProxyState,
     provider: &'static str,
+    tool: Option<&'static str>,
     path: &str,
     path_and_query: &str,
     method: axum::http::Method,
@@ -397,13 +407,8 @@ async fn forward_direct(
                 None => pool.on_success(provider, &picked.account_id, &model, 0),
             }
         }
-        if meter {
-            let task_id = format!("d_{}", uuid::Uuid::new_v4().simple());
-            let _ = st
-                .store
-                .insert_consume_record(&task_id, &model, 0, 0, 0, &format!("direct_upstream_{}", status.as_u16()))
-                .await;
-        }
+        // Nothing was served, so there is no subscription usage to count. The
+        // failure itself is the account pool's to remember, and it just did.
         return tag_direct(passthrough(resp), provider, &model);
     }
 
@@ -414,7 +419,8 @@ async fn forward_direct(
     let store = st.store.clone();
     let lane = model.clone();
     let tag = model.clone();
-    let record = meter.then(|| (format!("d_{}", uuid::Uuid::new_v4().simple()), model, "direct".to_string()));
+    // Only fold what nothing else already counts — see `usage_scan::scanner_covers`.
+    let record = (meter && !crate::usage_scan::scanner_covers(tool)).then(|| model);
     let served = meter_response(resp, move |usage, had_error| {
         let tokens = (usage.input_tokens + usage.output_tokens).max(0) as u64;
         if let Ok(mut p) = pool.lock() {
@@ -427,10 +433,13 @@ async fn forward_direct(
         let store = store.clone();
         let record = record.clone();
         async move {
-            if let Some((task_id, model, status)) = record {
-                let status = if had_error { "stream_error".to_string() } else { status };
+            // A stream that died still spent whatever it produced before it
+            // did; the tokens are the subscription's either way.
+            let _ = had_error;
+            if let Some(model) = record {
+                let cache = usage.cache_read_tokens + usage.cache_write_tokens;
                 let _ = store
-                    .insert_consume_record(&task_id, &model, usage.input_tokens, usage.output_tokens, 0, &status)
+                    .record_local_usage(&model, usage.input_tokens, usage.output_tokens, cache)
                     .await;
             }
         }
@@ -515,14 +524,14 @@ async fn remint_key(st: &ProxyState, used: &str) -> Result<String, String> {
     crate::commands::mint_consumer_key(app).await.map_err(|e| e.message)
 }
 
-/// Market route: forward to the asale server gateway with the asale API key,
-/// recording a consume row from the streamed usage (spec §6.2/§8).
+/// Market route: forward to the asale server gateway with the asale API key
+/// (spec §6.2). What the trade cost is the server's to record — see the note by
+/// the return.
 async fn forward_market(
     st: ProxyState,
     path_and_query: &str,
     method: axum::http::Method,
     bytes: axum::body::Bytes,
-    meter: bool,
 ) -> Response {
     let mut key = match st.asale_key.read().await.clone() {
         Some(k) => k,
@@ -532,7 +541,6 @@ async fn forward_market(
     };
     let target = format!("{}{}", st.server_api_base.trim_end_matches('/'), path_and_query);
     let reqwest_method = reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::POST);
-    let model = extract_model_from_bytes(&bytes);
 
     let mut resp = match send_market(&st, &target, &reqwest_method, &bytes, &key).await {
         Ok(r) => r,
@@ -578,31 +586,21 @@ async fn forward_market(
         asale_client_core::upgrade::clear();
     }
     if !status.is_success() {
-        if meter {
-            let task_id = format!("c_{}", uuid::Uuid::new_v4().simple());
-            let _ = st
-                .store
-                .insert_consume_record(&task_id, &model, 0, 0, 0, &format!("upstream_{}", status.as_u16()))
-                .await;
-        }
         return passthrough(resp);
     }
 
-    let store = st.store.clone();
-    let record = meter.then(|| (format!("c_{}", uuid::Uuid::new_v4().simple()), model));
-    meter_response(resp, move |usage, had_error| {
-        let store = store.clone();
-        let record = record.clone();
-        async move {
-            if let Some((task_id, model)) = record {
-                let status = if had_error { "stream_error" } else { "ok" };
-                let _ = store
-                    .insert_consume_record(&task_id, &model, usage.input_tokens, usage.output_tokens, 0, status)
-                    .await;
-            }
-        }
-    })
-    .await
+    // A market forward is deliberately *not* mirrored into the local ledger, so
+    // the answer streams straight through rather than being metered on its way.
+    //
+    // The consumer never learns what its call cost: the price is struck at
+    // settlement, after this stream has closed, so every row this used to write
+    // carried an amount of zero. Worse, its token counts came off the relayed
+    // response rather than off what was billed, so a turn served mostly from
+    // cache disagreed with the invoice by most of the prompt — two numbers for
+    // one trade, and the local one unfixable in principle. The buy side reads
+    // `/me/usage` and `/me/records`, which is the ledger the bill was drawn
+    // from. The direct route keeps its local rows: nothing else records those.
+    passthrough(resp)
 }
 
 /// Rewrite a request body's `model`, so the forward — and the metering row that
@@ -848,8 +846,11 @@ mod tests {
 
         let resp = post_message(port, "claude-sonnet-4-5").await;
         assert_eq!(resp.status(), 403, "buying off for claude -> refused");
-        let (_, total) = store.list_consume_records(10, 0).await.unwrap();
-        assert_eq!(total, 0, "a refused request is never metered");
+        assert_eq!(
+            store.agg_totals(&["used"], None).await.unwrap(),
+            (0, 0, 0),
+            "a refused request is never metered"
+        );
     }
 
     #[tokio::test]
@@ -1260,11 +1261,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn market_failure_writes_consume_record() {
-        // The market target is unreachable → 502, but a failed forward with a
-        // reachable-but-erroring server records an upstream_<code> row. Here we
-        // exercise the unreachable branch: no row (send() failed before any
-        // upstream status). Then simulate an error status via a local stub.
+    async fn a_market_failure_passes_through_and_leaves_no_local_row() {
+        // A gateway error reaches the caller as itself rather than as a local
+        // 502 — and records nothing locally. The buy side has one ledger, the
+        // server's; a local row for a trade the client cannot price could only
+        // ever be a second, wrong answer.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -1289,10 +1290,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 402, "server error status passes through");
-        let (rows, total) = store.list_consume_records(10, 0).await.unwrap();
-        assert_eq!(total, 1);
-        assert_eq!(rows[0].status, "upstream_402");
-        assert_eq!(rows[0].model, "claude-sonnet-4-5");
+        assert_eq!(
+            store.agg_totals(&["used"], None).await.unwrap(),
+            (0, 0, 0),
+            "a market forward is the server's to record, not ours"
+        );
     }
 
     #[tokio::test]
@@ -1323,9 +1325,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200, "count_tokens forwarded to the gateway");
-        // No consume record: count_tokens is not a billable completion.
-        let (_, total) = store.list_consume_records(10, 0).await.unwrap();
-        assert_eq!(total, 0, "count_tokens must not be metered");
+        // The preflight reaches the gateway and is not billable, so it leaves
+        // no usage behind — and a market call would not either. What the direct
+        // route folds in is guarded by its own tests below.
+        assert_eq!(store.agg_totals(&["used"], None).await.unwrap(), (0, 0, 0));
     }
 
     #[tokio::test]

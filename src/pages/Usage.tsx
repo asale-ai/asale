@@ -5,8 +5,9 @@ import {
   type UsageOverview as Overview, type UsageScope, type UsagePeriod,
   type UsageDailyRow, type UsageHeatCell, type UsageModelRow,
 } from "../lib";
-import { Card, Skeleton, PageHead, IconAction } from "../ui";
+import { Card, Skeleton, PageHead, IconAction, Err } from "../ui";
 import { IconUsage, IconRefresh, IconInfo } from "../icons";
+import { errText } from "../errors";
 
 const PERIODS: UsagePeriod[] = ["day", "week", "month", "total"];
 const SCOPES: UsageScope[] = ["used", "bought", "sold"];
@@ -59,6 +60,7 @@ export function Usage() {
   const [refreshing, setRefreshing] = useState(false);
   const [fullFmt, setFullFmt] = useState(false);
   const [expandProv, setExpandProv] = useState<string | null>(null);
+  const [err, setErr] = useState("");
 
   const load = useCallback((p: UsagePeriod, s: UsageScope, silent = false) => {
     if (!inTauri) {
@@ -69,8 +71,12 @@ export function Usage() {
     }
     if (!silent) setRefreshing(true);
     invoke<Overview>("usage_overview", { period: p, scope: s })
-      .then(setData)
-      .catch(() => {})
+      .then((d) => { setData(d); setErr(""); })
+      // "我买的" is served by the asale server — it is the only party that knows
+      // what a call cost — so signed out or offline it genuinely has no answer.
+      // Swallowing that left the previous scope's numbers on screen under the
+      // new label, which reads as data rather than as a failure.
+      .catch((e) => { setData(null); setErr(errText(e)); })
       .finally(() => { setLoading(false); setRefreshing(false); });
   }, []);
 
@@ -120,6 +126,8 @@ export function Usage() {
           </>
         }
       />
+
+      {err && <Err>{err}</Err>}
 
       <div className="usage-grid">
         {/* ── Side column ── */}

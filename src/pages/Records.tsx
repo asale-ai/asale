@@ -47,7 +47,12 @@ export function Records() {
     return <span className={`pill ${cls}`}>{t(`records.${key}`)}</span>;
   };
 
-  const useLocal = !!data?.server_error || (data?.records?.length ?? 0) === 0;
+  // The local mirror is a provider-side thing only. This device serves what it
+  // sells, so it has a first-hand record with real settled amounts; what it
+  // buys is priced after its stream closes, so there is nothing local worth
+  // falling back to — an offline buyer sees `server_error` and no table.
+  const useLocal =
+    role === "provider" && (!!data?.server_error || (data?.records?.length ?? 0) === 0);
   const serverRows: ServerRecord[] = data?.records ?? [];
   const localRows: LocalRecord[] = data?.local.records ?? [];
   const rowsShown = useLocal ? localRows.length : serverRows.length;

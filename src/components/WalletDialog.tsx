@@ -24,6 +24,7 @@ import {
   type CardLimits, type CardSession, type DepositSession, type WalletHistory, type WithdrawLimits,
 } from "../lib";
 import { qrPayload, walletsFor, type WalletBrand } from "../lib/wallets";
+import { openExternal } from "../shell";
 import { PayQr } from "./PayQr";
 import { CopyChip, Err, FactGrid, Skeleton } from "../ui";
 import { errText } from "../errors";
@@ -193,6 +194,15 @@ const AMOUNT_PRESETS = [10, 20, 50, 100];
  *  waiting for a decision. Tapping the lit chip still gets you back to "any
  *  amount". */
 const DEFAULT_AMOUNT = 20;
+
+/** The card rail's own chips. They start lower than the chain's, because this
+ *  is the rail a first-time buyer reaches for and the first question they are
+ *  asking is "how little can I risk to find out whether this works". */
+const CARD_AMOUNT_PRESETS = [5, 10, 20, 50];
+
+/** Lit on open: the smallest top-up the processor accepts. A default of 10
+ *  reads as a suggestion to spend more than necessary on a first try. */
+const CARD_DEFAULT_AMOUNT = 5;
 
 function RailDeposit({
   method, limits, onDone,
@@ -508,19 +518,28 @@ function PayReceipt({
 /* ── Card, as its own door ───────────────────────────────────────────────── */
 
 /**
- * The card rail opened straight from the wallet's primary button, with the
- * amount typed on the processor's page rather than this one.
+ * The card rail: pick an amount here, see exactly what the card is charged and
+ * what lands in the wallet, *then* go to the processor.
  *
- * There is no step in between: opening this starts the checkout and hands the
- * user over. What is left behind is a waiting room — a way back to the payment
- * page if it was closed, and the receipt once the webhook lands.
+ * It used to skip all of that. Opening the sheet started a checkout and threw a
+ * browser window at the user — no amount, no total, no mention of a fee —
+ * landing them on an unfamiliar foreign domain asking for a full billing
+ * address. Almost nobody who started that flow finished it.
  *
- * The surcharge is not stated here, deliberately. On this flow it comes out of
- * what the user types rather than riding on top of it ($20 typed → $18.60
- * credited), and the honest place to say so is the page where the number is
- * being typed. It lives in the product description on the processor's
- * checkout, which means the wording there and `ASALE_DODO_FEE_*` have to be
- * changed together — nothing enforces that, so it is written down here.
+ * The surcharge used to be deliberately unstated, on the reasoning that it came
+ * out of whatever the user typed on the processor's page and so belonged on
+ * that page. Two things were wrong with it. The processor's copy of the terms is
+ * a hand-written product blurb that nothing keeps in step with
+ * `ASALE_DODO_FEE_*`, and it meant paying $5 and being credited $4.35 with no
+ * warning: correct arithmetic that reads, from the other side of the screen, as
+ * being short-changed.
+ *
+ * Naming the amount here also flips which way the fee runs. `create_card_session`
+ * takes an amount, quotes `charge = amount + fee`, and credits exactly the
+ * amount — so the promise this sheet makes ("pay $5.65, receive $5.00") is the
+ * arithmetic the server does, not a second copy of it. `limits` only powers the
+ * live preview while the user is typing; the confirmed figures come back on the
+ * session.
  *
  * Kept in sync with asale-web's `CardTopUpDialog`.
  */
@@ -561,25 +580,55 @@ function CardTopUpSheet({
   const { t } = useTranslation();
   const [session, setSession] = useState<CardSession | null>(null);
   const [err, setErr] = useState("");
+  const [opening, setOpening] = useState(false);
 
-  /* Opening the sheet *is* the action — there is no button to press first.
-     Guarded with a ref rather than by the session state: React runs effects
-     twice in development, and two runs here would be two checkouts. */
-  const started = useRef(false);
-  useEffect(() => {
-    if (started.current) return;
-    started.current = true;
-    (async () => {
-      try {
-        // No amount: this is what makes Dodo show its own amount box.
-        const s = await invoke<CardSession>("wallet_card_session", { amount: null, openLocal: realTauri });
-        setSession(s);
-        if (!realTauri) window.open(s.checkout_url, "_blank", "noopener");
-      } catch (e) {
-        setErr(errText(e));
-      }
-    })();
-  }, []);
+  /* The amount, as chips plus a free-text box — the same control the chain rail
+     uses, so the two rails do not ask the same question two different ways.
+     Unlike that one there is no "any amount" state here: the whole point of
+     this step is that a number exists before the user leaves the app. */
+  const [preset, setPreset] = useState<number | null>(CARD_DEFAULT_AMOUNT);
+  const [custom, setCustom] = useState("");
+  const amountInput = preset != null ? String(preset) : custom;
+  const micros = useMemo(() => {
+    const n = parseFloat(amountInput);
+    return amountInput.trim() && Number.isFinite(n) && n > 0 ? Math.round(n * 1_000_000) : null;
+  }, [amountInput]);
+
+  /* The quote, live, while they type. Mirrors `DodoConfig::charge_for`: the
+     surcharge rides on top of the amount and the total is rounded up to whole
+     cents, because that is the granularity a card can actually be charged at.
+     The server re-derives all of this — this copy exists so the number is on
+     screen *before* the request, which is the entire point of the step. */
+  const quote = useMemo(() => {
+    if (micros == null || !limits) return null;
+    const fee = Math.round((micros * limits.fee_bps) / 10_000) + limits.fee_flat;
+    const charge = Math.ceil((micros + fee) / 10_000) * 10_000;
+    return { fee: charge - micros, charge, credited: micros };
+  }, [micros, limits]);
+
+  const belowMin = limits != null && micros != null && micros < limits.deposit_min;
+  const aboveMax = limits != null && micros != null && micros > limits.deposit_max;
+  const canPay = inTauri && micros != null && !belowMin && !aboveMax && !opening;
+
+  /* Guarded against a double submit: two clicks would be two checkouts and two
+     browser windows. */
+  const start = async () => {
+    if (!canPay || micros == null) return;
+    setOpening(true);
+    setErr("");
+    try {
+      // The daemon opens the checkout in the real browser on the desktop build
+      // (the webview cannot host a third party's card form); in a browser this
+      // window does it.
+      const s = await invoke<CardSession>("wallet_card_session", { amount: micros, openLocal: realTauri });
+      setSession(s);
+      if (!realTauri) window.open(s.checkout_url, "_blank", "noopener,noreferrer");
+    } catch (e) {
+      setErr(errText(e));
+    } finally {
+      setOpening(false);
+    }
+  };
 
   const watching = session != null && (session.status === "pending" || session.status === "matched");
   const onDoneRef = useRef(onDone);
@@ -605,20 +654,22 @@ function CardTopUpSheet({
     return () => { stop = true; clearInterval(id); };
   }, [watching, sessionRef]);
 
-  /* On this rail the fee *is* a carve-out — it comes out of what arrived — so
-     the receipt gets it and shows the split. Computed from what was received
-     the same way the server computes it. */
+  /* The receipt's split. Prefer the server's own figure from the session — it
+     is what was actually applied — and fall back to recomputing it only for a
+     session opened before the amount step existed, where the fee was carved out
+     of whatever arrived instead of riding on top. */
   const received = session?.deposit?.amount ?? null;
   const receiptFee =
-    received != null && limits
+    session?.fee ??
+    (received != null && limits
       ? Math.round((received * limits.fee_bps) / 10_000) + limits.fee_flat
-      : null;
+      : null);
 
   return (
     <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="modal wdlg" role="dialog" aria-modal="true" aria-label={t("wallet.tabDeposit")}>
+      <div className="modal wdlg" role="dialog" aria-modal="true" aria-label={t("wallet.depositCard")}>
         <div className="modal-head">
-          <h3>{t("wallet.tabDeposit")}</h3>
+          <h3>{t("wallet.depositCard")}</h3>
           <button type="button" className="modal-x" onClick={onClose} title={t("wallet.dlgClose")}>
             <IconX />
           </button>
@@ -631,7 +682,7 @@ function CardTopUpSheet({
               fee={receiptFee}
               onRestart={() => { setSession(null); setErr(""); }}
             />
-          ) : (
+          ) : session ? (
             /* A waiting room, not a form. The payment is happening in the page
                that just opened; all this has to do is stay honest about what
                it is waiting for and offer a way back if that page was closed. */
@@ -641,14 +692,77 @@ function CardTopUpSheet({
               ) : (
                 <div className="card-waiting">
                   <IconRefresh className="spin" />
-                  <span>{t(session ? "wallet.cardWaiting" : "wallet.cardOpening")}</span>
-                  {session && (
-                    <a href={session.checkout_url} target="_blank" rel="noopener noreferrer">
-                      {t("wallet.cardReopen")}
-                    </a>
+                  <span>{t("wallet.cardWaiting")}</span>
+                  {session.charge != null && (
+                    <span className="cq-note">
+                      {t("wallet.cardWaitingFor", { charge: fmtUsdt(session.charge) })}
+                    </span>
                   )}
+                  <button type="button" className="linkish" onClick={() => openExternal(session.checkout_url)}>
+                    {t("wallet.cardReopen")}
+                  </button>
                 </div>
               )}
+            </div>
+          ) : (
+            /* The step that did not exist: name the amount, and see the whole
+               of what it costs, before being handed to the processor. */
+            <div className="card-pay">
+              <div className="field amt-field">
+                <label>{t("wallet.cardAmountLabel")}</label>
+                <div className="amt-picker">
+                  {CARD_AMOUNT_PRESETS.map((v) => (
+                    <button key={v} type="button" className={`amt-chip${preset === v ? " active" : ""}`}
+                      onClick={() => { setPreset(v); setCustom(""); }}>
+                      {v} <span className="amt-chip-unit">USDT</span>
+                    </button>
+                  ))}
+                  <div className="amt-custom">
+                    <input className="input mono" value={custom} inputMode="decimal"
+                      placeholder={t("wallet.payAmountCustom")}
+                      onChange={(e) => { setCustom(e.target.value); setPreset(null); }} />
+                    <span className="amt-unit">USDT</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* The disclosure. Three lines, all concrete: what lands in the
+                  balance, what the processor takes, and — set apart — what the
+                  card is actually billed. */}
+              {quote && !belowMin && !aboveMax && (
+                <div className="card-quote">
+                  <div className="cq-row">
+                    <span>{t("wallet.cardQuoteCredited")}</span>
+                    <span className="mono tabular">{fmtUsdt(quote.credited)} USDT</span>
+                  </div>
+                  <div className="cq-row">
+                    <span>{t("wallet.cardQuoteFee")}</span>
+                    <span className="mono tabular">{fmtUsdt(quote.fee)} USDT</span>
+                  </div>
+                  <div className="cq-row total">
+                    <span>{t("wallet.cardQuoteCharge")}</span>
+                    <span className="mono tabular">{fmtUsdt(quote.charge)} USDT</span>
+                  </div>
+                </div>
+              )}
+
+              <p className="cq-note">
+                {belowMin && limits
+                  ? t("wallet.cardBelowMin", { amount: fmtUsdt(limits.deposit_min) })
+                  : aboveMax && limits
+                    ? t("wallet.cardAboveMax", { amount: fmtUsdt(limits.deposit_max) })
+                    : t("wallet.cardHandoffHint")}
+              </p>
+
+              <Err>{err}</Err>
+
+              <button type="button" className="btn lg card-pay-btn" disabled={!canPay} onClick={start}>
+                {opening
+                  ? t("wallet.cardOpening")
+                  : quote
+                    ? t("wallet.cardGoPay", { charge: fmtUsdt(quote.charge) })
+                    : t("wallet.cardGoPayBare")}
+              </button>
             </div>
           )}
         </div>

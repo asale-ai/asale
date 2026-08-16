@@ -803,10 +803,11 @@ export interface UsageBucket {
   amount_usdt: number;
   count: number;
 }
+/** Sell side only — see `usage_summary`. The buy side is `usage_overview`
+ *  with `scope: "bought"`, which asks the server. */
 export interface UsageSummary {
   period: "day" | "week" | "month" | "all";
   sold: UsageBucket;
-  bought: UsageBucket;
 }
 
 // ── Usage overview (full dashboard, Usage page) ──

@@ -14,6 +14,21 @@
 
 use asale_client_core::store::LocalStore;
 use std::collections::{HashMap, HashSet};
+
+/// Whether this scanner already accounts for a tool's usage on its own.
+///
+/// It reads Claude Code's session logs and nothing else, so Claude Code is the
+/// one tool whose calls arrive here twice when the local proxy also folds what
+/// it served: once from the log, once from the proxy. The log wins — it dedups
+/// retries and sub-agent turns by `message.id`, which the proxy cannot see —
+/// so the proxy asks this before recording, rather than the two racing.
+///
+/// Keyed on the tool (`tool_config::for_request_path`), not the provider: the
+/// question is whose log file exists, and several tools speak Anthropic's wire
+/// format without writing anything to `~/.claude/projects`.
+pub fn scanner_covers(tool: Option<&str>) -> bool {
+    tool == Some("claude")
+}
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -150,5 +165,40 @@ fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>) {
         } else if p.extension().is_some_and(|x| x == "jsonl") {
             out.push(p);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tool_config::{for_request_path, TOOLS};
+
+    /// The double-count guard, stated against the routing that produces its
+    /// input. Claude Code is covered here because this scanner reads its logs;
+    /// every other tool has to be folded by the proxy or it is counted nowhere.
+    ///
+    /// Pinned over all of `TOOLS` rather than over a hand-written list, so
+    /// adding a tool cannot quietly land it on the wrong side: a new tool
+    /// defaults to "the proxy counts it", which is the safe direction — visible
+    /// but attributable, rather than silently doubled.
+    #[test]
+    fn only_claude_code_is_already_counted_by_this_scanner() {
+        assert!(scanner_covers(Some("claude")));
+        for tool in TOOLS.iter().filter(|t| **t != "claude") {
+            assert!(!scanner_covers(Some(tool)), "{tool} keeps no log this scanner reads");
+        }
+        // A request on a path that names no tool is nobody's log either.
+        assert!(!scanner_covers(None));
+    }
+
+    /// …and the tool ids it is keyed on are the ones the proxy actually derives,
+    /// including the bare dialect paths that predate `/{tool}/` addressing.
+    #[test]
+    fn the_paths_claude_code_arrives_on_are_the_covered_ones() {
+        assert!(scanner_covers(for_request_path("/v1/messages")));
+        assert!(scanner_covers(for_request_path("/claude/v1/messages")));
+        // Same wire format, different tool, no log of its own.
+        assert!(!scanner_covers(for_request_path("/openclaw/v1/messages")));
+        assert!(!scanner_covers(for_request_path("/v1/responses")));
     }
 }
