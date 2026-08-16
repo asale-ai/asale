@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 # The wsrelay wire contract, shared verbatim with asale-server.
 asale-protocol.workspace = true
+token-meter.workspace = true
 
 anyhow.workspace = true
 async-trait.workspace = true

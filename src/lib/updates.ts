@@ -26,7 +26,7 @@
 
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { realTauri } from "../lib";
-import { shell } from "../shell";
+import { onUpdateProgress, shell } from "../shell";
 import { errText } from "../errors";
 
 export type CheckPhase = "idle" | "checking" | "none" | "available" | "error";
@@ -192,18 +192,64 @@ export function startUpdateWatcher(): void {
 
 // ── applying it ─────────────────────────────────────────────────────────────
 
+/**
+ * Where the update has got to.
+ *
+ * `downloading` and `installing` are two states rather than one "busy" because
+ * they cost the user completely different things: the first is a progress bar
+ * they can watch and cancel by walking away, the second closes the app and asks
+ * for a password. Showing one label for both is how "update" became a button
+ * that made the window disappear.
+ */
+export type InstallPhase = "idle" | "confirming" | "downloading" | "installing";
+
 /** What "restart to update" needs from a component that renders it. */
 export interface Installer {
   /** The exact command that will run. Empty until the shell has answered. */
   command: string;
+  phase: InstallPhase;
   /** Has the user been shown what this costs and not yet agreed? */
   confirming: boolean;
+  /** Downloading or installing — nothing else should be pressable. */
   running: boolean;
-  /** Only ever the failure to *start* the installer — see `run`. */
+  /** 0–1, or `null` while no total is known (before the first event, or when
+   *  the manifest carried no sizes). */
+  progress: number | null;
+  /** Bytes so far and expected, for the "12.4 / 33.6 MB" under the bar. */
+  received: number;
+  total: number;
   error: string;
   ask(): void;
   cancel(): void;
   run(): void;
+}
+
+/**
+ * One update in flight for the whole app, not one per component.
+ *
+ * The forced-upgrade dialog and the Settings card are both mounted at once, and
+ * a user who starts the download from one and then opens the other must see the
+ * same bar rather than a second idle button offering to start it again. Same
+ * reasoning as the release check above, and it is why this state lives in the
+ * module and the hook only subscribes.
+ */
+interface InstallState {
+  phase: InstallPhase;
+  received: number;
+  total: number;
+  error: string;
+}
+
+let install: InstallState = { phase: "idle", received: 0, total: 0, error: "" };
+const installListeners = new Set<() => void>();
+
+function setInstall(patch: Partial<InstallState>) {
+  install = { ...install, ...patch };
+  for (const l of installListeners) l();
+}
+
+function getInstall(): InstallState {
+  return install;
 }
 
 /**
@@ -215,18 +261,29 @@ export interface Installer {
  * that silently fixed the window while leaving the terminal on last month's
  * build is the failure mode worth a password prompt.
  *
- * Two steps, because it is not a small thing: it closes the app, asks for an
- * administrator password, and opens the app again when it is done. `ask()`
- * shows that; `run()` is what the user agreed to.
+ * Three steps, because it is not a small thing. `ask()` says what it costs;
+ * `run()` downloads the release with the window still open and a bar the user
+ * can watch; only when that has finished does the app close and hand over to the
+ * installer, which reopens it when it is done.
  *
- * A hook rather than a component so the banner and the Settings card can lay it
+ * The download failing does *not* go on to the install. It is the one failure
+ * the user can do something about, and quitting the app into an installer that
+ * is about to fail for the same reason would take away the window that could
+ * have said so.
+ *
+ * A hook rather than a component so the dialog and the Settings card can lay it
  * out however each of them needs to, without either owning the sequence.
  */
 export function useInstaller(): Installer {
   const [command, setCommand] = useState("");
-  const [confirming, setConfirming] = useState(false);
-  const [running, setRunning] = useState(false);
-  const [error, setError] = useState("");
+  const state = useSyncExternalStore(
+    (cb) => {
+      installListeners.add(cb);
+      return () => installListeners.delete(cb);
+    },
+    getInstall,
+    getInstall,
+  );
 
   useEffect(() => {
     // Asked, not assembled here: the shell builds it from the same constants
@@ -240,22 +297,54 @@ export function useInstaller(): Installer {
 
   return {
     command,
-    confirming,
-    running,
-    error,
-    ask: () => { setConfirming(true); setError(""); },
-    cancel: () => setConfirming(false),
-    // No success branch to render: if this works, the window is gone within the
-    // second and a new one opens when the install finishes. Only the failure to
-    // hand off to the helper ever comes back here.
-    run: () => {
-      setRunning(true);
-      setError("");
-      shell.runInstaller().catch((e) => {
-        setError(errText(e));
-        setRunning(false);
-        setConfirming(false);
-      });
-    },
+    phase: state.phase,
+    confirming: state.phase === "confirming",
+    running: state.phase === "downloading" || state.phase === "installing",
+    progress: state.total > 0 ? Math.min(1, state.received / state.total) : null,
+    received: state.received,
+    total: state.total,
+    error: state.error,
+    ask: () => setInstall({ phase: "confirming", error: "" }),
+    cancel: () => setInstall({ phase: "idle" }),
+    run: () => void startUpdate(),
   };
+}
+
+/**
+ * Download, then hand over. Safe to call twice — the second call joins the first
+ * rather than starting a parallel download of the same file.
+ */
+let updating: Promise<void> | null = null;
+
+export function startUpdate(): Promise<void> {
+  // Nothing to install onto this machine from a browser, and the shell calls
+  // below would resolve to `null` — leaving the UI stuck on "installing…" for a
+  // handover that never happened.
+  if (!realTauri) return Promise.resolve();
+  if (updating) return updating;
+  updating = (async () => {
+    setInstall({ phase: "downloading", received: 0, total: 0, error: "" });
+    const off = onUpdateProgress((p) => setInstall({ received: p.received, total: p.total }));
+    try {
+      await shell.downloadUpdate();
+    } catch (e) {
+      // Stop here, with the window still up to say why.
+      setInstall({ phase: "idle", error: errText(e) });
+      return;
+    } finally {
+      off();
+    }
+    // No success branch to render past this point: if it works, the window is
+    // gone within the second and a new one opens when the install finishes.
+    // Only the failure to hand off to the helper ever comes back here.
+    setInstall({ phase: "installing" });
+    try {
+      await shell.runInstaller();
+    } catch (e) {
+      setInstall({ phase: "idle", error: errText(e) });
+    }
+  })().finally(() => {
+    updating = null;
+  });
+  return updating;
 }

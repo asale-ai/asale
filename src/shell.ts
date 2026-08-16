@@ -57,6 +57,11 @@ export const shell = {
   /** The installer command "restart to update" runs, for showing it first. */
   installerCommand: () => call<string>("installer_command"),
 
+  /** Download this platform's half of the current release, so the installer
+   *  that runs after the app closes has nothing left to fetch. Resolves with
+   *  the directory it landed in; progress arrives on `onUpdateProgress`. */
+  downloadUpdate: () => call<string>("download_update"),
+
   /** Re-run the published installer to upgrade the app *and* the `asale`
    *  command line, then reopen the app. Quits this process as a side effect —
    *  the installer replaces the binary it is running from — so nothing after
@@ -68,6 +73,37 @@ export const shell = {
    *  clamps, so a broken measurement cannot produce a full-screen popup. */
   resizePanel: (height: number) => call<void>("resize_panel", { height }),
 };
+
+/** How far the update download has got. `total` is 0 when nobody knows. */
+export interface UpdateProgress {
+  file: string;
+  received: number;
+  total: number;
+}
+
+/**
+ * Subscribe to download progress. Returns an unsubscribe function — a no-op in
+ * a browser, where there is no download to watch.
+ *
+ * Events rather than a polled command: the download runs in the shell and the
+ * bar is drawn in the webview, and polling a byte counter is how a progress bar
+ * ends up either stuttering or costing more than the download.
+ */
+export function onUpdateProgress(cb: (p: UpdateProgress) => void): () => void {
+  if (!realTauri) return () => {};
+  let off: (() => void) | null = null;
+  let cancelled = false;
+  void (async () => {
+    const { listen } = await import("@tauri-apps/api/event");
+    const unlisten = await listen<UpdateProgress>("update://progress", (e) => cb(e.payload));
+    if (cancelled) unlisten();
+    else off = unlisten;
+  })();
+  return () => {
+    cancelled = true;
+    off?.();
+  };
+}
 
 /**
  * Open `url` outside the app.

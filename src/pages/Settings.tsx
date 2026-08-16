@@ -5,6 +5,7 @@ import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { apiBase, daemonToken, invoke, realTauri } from "../lib";
 import { openExternal, shell } from "../shell";
 import { checkForUpdate, useInstaller, useUpdateState } from "../lib/updates";
+import { UpdateProgress } from "../components/UpdateProgress";
 import { Card, CopyChip, Err, Ok, PageHead, FactGrid } from "../ui";
 import { IconPower, IconDownload, IconRefresh, IconCheck, IconServer, IconGlobe, IconInfo, IconExternal, IconAlert } from "../icons";
 import { errText } from "../errors";
@@ -371,7 +372,20 @@ export function Settings() {
               <div className="hint">{t("settings.reinstallDesc")}</div>
               {installer.command && <pre className="codeblock notes">{installer.command}</pre>}
 
-              {!installer.confirming ? (
+              {/* Three states, one sequence — the same one the forced-upgrade
+                  dialog runs, from the same shared state, so an update started
+                  in either place is watched from both. */}
+              {installer.running ? (
+                <>
+                  <div className="btn-row">
+                    <button className="btn" disabled>
+                      <IconRefresh className="spin" />
+                      {t("settings.reinstallRunning")}
+                    </button>
+                  </div>
+                  <UpdateProgress installer={installer} />
+                </>
+              ) : !installer.confirming ? (
                 <div className="btn-row">
                   {/* Primary only when there is something to install; the rest
                       of the time this is a repair tool, not the thing to press. */}
@@ -387,11 +401,11 @@ export function Settings() {
                     <span>{t("settings.reinstallConfirm")}</span>
                   </div>
                   <div className="btn-row">
-                    <button className="btn" onClick={installer.run} disabled={installer.running}>
-                      {installer.running ? <IconRefresh className="spin" /> : <IconDownload />}
-                      {installer.running ? t("settings.reinstallRunning") : t("settings.reinstallGo")}
+                    <button className="btn" onClick={installer.run}>
+                      <IconDownload />
+                      {t("settings.reinstallGo")}
                     </button>
-                    <button className="btn ghost" onClick={installer.cancel} disabled={installer.running}>
+                    <button className="btn ghost" onClick={installer.cancel}>
                       {t("settings.reinstallCancel")}
                     </button>
                   </div>

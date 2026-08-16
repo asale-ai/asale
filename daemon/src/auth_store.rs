@@ -252,6 +252,37 @@ mod tests {
         crate::testenv::with_temp_data_dir("auths-test", f)
     }
 
+    /// A `$HOME` with no vendor CLI in it.
+    ///
+    /// `with_temp_dir` moves `ASALE_DATA_DIR`, which is where the manifests go —
+    /// but not `$HOME`, which is where [`crate::tool_config::points_at_proxy`]
+    /// looks. Anything exercising [`resync`] therefore read the *developer's*
+    /// real `~/.codex/config.toml`, and on any machine set up to buy through the
+    /// market (the normal state for anyone testing the buy side) that file names
+    /// our proxy — so an imported account was correctly excluded from the
+    /// directory and the assertion below failed for a reason that had nothing to
+    /// do with the code under test. Green on CI, red on the machine of everyone
+    /// who had actually used the feature.
+    ///
+    /// Locked, and locked *before* `with_temp_dir`: `$HOME` is process-global.
+    /// The order matters — no test takes the data-dir lock first and this one
+    /// second, and that is what keeps the two from deadlocking.
+    fn with_temp_home<T>(f: impl FnOnce() -> T) -> T {
+        let _g = crate::codex_catalog::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("HOME").ok();
+        let tmp = std::env::temp_dir().join(format!("asale-auths-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("HOME", &tmp);
+        let out = f();
+        match prev {
+            Some(p) => std::env::set_var("HOME", p),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+        out
+    }
+
     fn manifest(account: &str, plan: Option<&str>) -> AuthManifest {
         AuthManifest {
             provider: "claude".into(),
@@ -296,7 +327,7 @@ mod tests {
     /// caller does to the `tools` table, the directory matches it afterwards.
     #[test]
     fn resync_makes_the_directory_match_the_table() {
-        with_temp_dir(|| {
+        with_temp_home(|| with_temp_dir(|| {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             rt.block_on(async {
                 let store = LocalStore::open_memory().await.unwrap();
@@ -326,7 +357,7 @@ mod tests {
                 assert_eq!(left.len(), 1, "stale manifest not cleaned up: {left:?}");
                 assert_eq!(left[0].provider, "claude");
             });
-        });
+        }))
     }
 
     #[test]

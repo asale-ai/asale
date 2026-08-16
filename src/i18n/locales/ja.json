@@ -1123,6 +1123,8 @@
     "bodyNoVersion": "このビルド（{{current}}）はプラットフォームの要求より前のものです。",
     "reasonSell": "アップデートするまで販売は停止されます。",
     "reasonBuy": "アップデートするまで購入は停止されます。",
+    "reasonPlatform": "アップデートするまで、このマシンでは購入も販売もできません。",
+    "latest": "最新リリースは {{version}} です。",
     "now": "今すぐ更新",
     "download": "ダウンロード",
     "manual": "手動でダウンロード"
@@ -1153,6 +1155,10 @@
     "fixing": "処理中…"
   },
   "update": {
-    "navHint": "新しいバージョン {{version}} があります。設定から更新できます"
+    "navHint": "新しいバージョン {{version}} があります。設定から更新できます",
+    "downloading": "アップデートをダウンロード中",
+    "downloadedOf": "{{done}} / {{total}} MB",
+    "downloaded": "{{done}} MB",
+    "installing": "ダウンロードが完了しました。Asale を終了してアップデートを適用し、再度起動します。"
   }
 }

@@ -9,7 +9,7 @@ import {
 import { openExternal } from "./shell";
 import { SITE_URL, REPO_URL } from "./links";
 import { StatusWidget } from "./components/StatusWidget";
-import { UpgradeBanner, useUpgradeNotice } from "./components/UpgradeBanner";
+import { UpgradeRequiredDialog, useUpgradeNotice } from "./components/UpgradeGate";
 import { hasPendingUpdate, startUpdateWatcher, useUpdateState } from "./lib/updates";
 import { Skeleton, PageSkeleton } from "./ui";
 import type { JSX } from "react";
@@ -177,6 +177,10 @@ export function App() {
 
   return (
     <div className="app">
+      {/* Outside the page container and above everything: what it blocks is
+          driven from several pages, and from the user's terminal besides — so
+          there is no page this could sensibly belong to. */}
+      {upgrade && <UpgradeRequiredDialog notice={upgrade} />}
       <aside className="sidebar">
         <div className="logo">
           <img className="logo-mark" src="/logo.svg" alt="Asale" />
@@ -249,9 +253,6 @@ export function App() {
           </Suspense>
         )}
         <div className="main-inner fade-in" key={booted ? tab : "boot"}>
-          {/* Above the page, and on every page: what it blocks is driven from
-              several of them, and from the user's terminal besides. */}
-          {upgrade && <UpgradeBanner notice={upgrade} />}
           {!booted ? <PageSkeleton /> : (
             <Suspense fallback={<PageSkeleton />}>
               {/* The overview map calls out the reader's own country, and the

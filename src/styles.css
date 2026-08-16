@@ -835,6 +835,13 @@ select.input {
   display: block; height: 100%; border-radius: 999px; background: var(--accent);
   transition: width var(--t-slow) var(--ease);
 }
+/* No total to divide by — a download whose size the manifest did not carry. A
+   sliding sliver says "still working" without claiming to know how far. */
+.bar.indeterminate > span { width: 34%; animation: bar-slide 1.4s var(--ease) infinite; }
+@keyframes bar-slide {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(295%); }
+}
 .bar > span.warn { background: var(--warning); }
 .bar > span.danger { background: var(--danger); }
 .bar > span.success { background: var(--success); }
@@ -2048,6 +2055,27 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 }
 .modal-spacer { flex: 1; }
 .modal-count { font-size: var(--fs-meta); color: var(--fg-2); }
+
+/* ── Forced-upgrade gate ─────────────────────────────────────────────────
+   Above every other overlay, because it is the one that means the app cannot
+   be used: a wallet sheet or a model picker left open underneath must not be
+   able to sit on top of the reason none of it will work. Shorter than the
+   shared modal too — it holds three sentences and two buttons, and the default
+   min-height would leave it mostly empty. */
+.modal-backdrop.upgrade-gate { z-index: 200; }
+.modal.upgrade-modal { width: min(460px, 100%); }
+.upgrade-body { display: flex; flex-direction: column; gap: var(--s2); padding: 0 var(--s5) var(--s4); }
+.upgrade-body p { margin: 0; line-height: 1.65; }
+.upgrade-body .text-sm { color: var(--fg-2); }
+
+/* Shared by the gate and the Settings card, so one download looks like one
+   download wherever it is watched from. */
+.update-progress { display: flex; flex-direction: column; gap: 6px; }
+.update-progress-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: var(--s2);
+  font-size: var(--fs-meta); color: var(--fg-2);
+}
+.update-progress-head b { font-weight: 500; font-variant-numeric: tabular-nums; }
 
 /* Search input with a leading magnifier and a clear button. */
 .search-field { position: relative; display: flex; align-items: center; }

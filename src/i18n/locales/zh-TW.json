@@ -1123,6 +1123,8 @@
     "bodyNoVersion": "目前版本 {{current}} 低於平台要求。",
     "reasonSell": "升級前無法賣出。",
     "reasonBuy": "升級前無法買入。",
+    "reasonPlatform": "升級前這台機器無法買入，也無法賣出。",
+    "latest": "最新版本是 {{version}}。",
     "now": "立即升級",
     "download": "下載",
     "manual": "手動下載"
@@ -1153,6 +1155,10 @@
     "fixing": "處理中…"
   },
   "update": {
-    "navHint": "發現新版本 {{version}}，開啟設定即可更新"
+    "navHint": "發現新版本 {{version}}，開啟設定即可更新",
+    "downloading": "正在下載更新",
+    "downloadedOf": "{{done}} / {{total}} MB",
+    "downloaded": "{{done}} MB",
+    "installing": "下載完成，Asale 將關閉、安裝更新，然後自動重新開啟。"
   }
 }

@@ -900,104 +900,37 @@ pub fn usage_from_body(bytes: &[u8]) -> Usage {
     usage
 }
 
-/// Read whichever dialect's usage shape this JSON object carries. Shared by the
-/// SSE scanner and the non-streaming body reader — a `message_delta` frame and a
-/// buffered Claude response report usage identically, so the shapes are listed
-/// once.
+/// Read whichever dialect's usage shape this JSON object carries, folding it
+/// into the running total.
+///
+/// The parsing itself is `token_meter::Usage` — the same code asale-server bills
+/// from, so a lane's local record and its settled invoice cannot disagree about
+/// what the provider said. Two things it gets right that a per-dialect reader
+/// here kept getting wrong:
+///
+///   * **Whether the prompt count already contains the cached part.** Anthropic
+///     reports the cache counts *beside* `input_tokens`, which then holds only
+///     the uncached remainder. OpenAI (chat and Responses alike) and Gemini fold
+///     them *into* the prompt total, so the cached share has to come back out or
+///     the same tokens are billed twice — once at the full prompt rate and again
+///     as a cache read, a ~10x gap.
+///   * **That Gemini bills its thinking outside `candidatesTokenCount`.**
+///     `thoughtsTokenCount` is a sibling field charged at the output rate, and
+///     reading only candidates under-reported every reasoning turn — sometimes
+///     by most of it.
 fn merge_usage(usage: &mut Usage, v: &serde_json::Value) {
-    // Claude message_delta.usage / message_start.message.usage, and the same
-    // object at the top level of a buffered response. The Responses API's
-    // buffered body and OpenAI's chat body land here too — they all hang usage
-    // off the same key — which is why `merge_usage_object` decides the cache
-    // split from the fields it actually finds, not from which call site it was
-    // reached through.
-    if let Some(u) = v.get("usage") {
-        merge_usage_object(usage, u);
-    }
-    // Claude message_start: the only frame that carries the prompt side, cache
-    // counts included. Reading just `input_tokens` here is what left every
-    // Anthropic lane reporting the uncached remainder — tens of tokens — as if
-    // it were the whole prompt.
-    if let Some(m) = v.get("message").and_then(|m| m.get("usage")) {
-        merge_usage_object(usage, m);
-    }
-    // Responses API: streaming reports usage only in response.completed, which
-    // nests it one level down. Without this, every codex stream would settle as
-    // zero tokens.
-    if let Some(u) = v.get("response").and_then(|r| r.get("usage")).filter(|u| !u.is_null()) {
-        merge_usage_object(usage, u);
-    }
-    // Gemini usageMetadata, which spells every field its own way but shares the
-    // prompt-total convention below.
-    if let Some(u) = v.get("usageMetadata") {
-        if let Some(o) = u.get("candidatesTokenCount").and_then(|x| x.as_i64()) {
-            usage.output_tokens = o.max(0);
-        }
-        if let Some(p) = u.get("promptTokenCount").and_then(|x| x.as_i64()) {
-            let cached =
-                u.get("cachedContentTokenCount").and_then(|x| x.as_i64()).unwrap_or(0).max(0);
-            usage.input_tokens = (p - cached).max(0);
-            usage.cache_read_tokens = cached;
-        }
-    }
-}
-
-/// Fold one dialect's `usage` object into the running total.
-///
-/// **The dialects disagree on whether the prompt count already contains the
-/// cached part, and the disagreement is worth money.** Anthropic reports
-/// `cache_read_input_tokens` / `cache_creation_input_tokens` *beside*
-/// `input_tokens`, which then holds only the uncached remainder — already the
-/// split this crate bills on. OpenAI (chat and Responses alike) and Gemini fold
-/// the cached tokens *into* the prompt total, so the cached share has to come
-/// back out: leaving it in bills the same tokens twice over, once at the full
-/// prompt rate and again as a cache read.
-///
-/// Getting this wrong in either direction moves real money. Reading neither —
-/// which is what this did until now — bills every cached prompt token at the
-/// full input rate on the OpenAI side (the buyer overpays, by up to the ~10×
-/// gap between the two prices) and reports a few dozen tokens instead of tens
-/// of thousands on the Anthropic side (the seller is paid for almost nothing).
-fn merge_usage_object(usage: &mut Usage, u: &serde_json::Value) {
-    let n = |k: &str| u.get(k).and_then(|x| x.as_i64());
-
-    if let Some(o) = n("output_tokens").or_else(|| n("completion_tokens")) {
-        usage.output_tokens = o.max(0);
-    }
-    // Anthropic's counts map across untouched.
-    let anthropic_read = n("cache_read_input_tokens");
-    let anthropic_write = n("cache_creation_input_tokens");
-    if let Some(r) = anthropic_read {
-        usage.cache_read_tokens = r.max(0);
-    }
-    if let Some(w) = anthropic_write {
-        usage.cache_write_tokens = w.max(0);
-    }
-
-    let Some(prompt) = n("input_tokens").or_else(|| n("prompt_tokens")) else {
-        return;
+    let mut m = token_meter::Usage {
+        input: usage.input_tokens,
+        output: usage.output_tokens,
+        cache_read: usage.cache_read_tokens,
+        cache_write: usage.cache_write_tokens,
+        reasoning: 0,
     };
-    // Whether this object speaks in prompt totals is decided by the detail keys
-    // the OpenAI dialects always emit, not by whether a cached count happened to
-    // be non-zero — a request that cached nothing still has to leave an
-    // Anthropic frame's cache fields alone.
-    let prompt_total_shape = u.get("prompt_tokens").is_some()
-        || u.get("prompt_tokens_details").is_some()
-        || u.get("input_tokens_details").is_some();
-    if !prompt_total_shape {
-        usage.input_tokens = prompt.max(0);
-        return;
-    }
-    // Both halves come out of this one object. Taking the total from one frame
-    // and the cached share from another would bill the cached tokens in full on
-    // whichever frame omits the detail.
-    let cached = ["prompt_tokens_details", "input_tokens_details"]
-        .iter()
-        .find_map(|k| u.get(k).and_then(|d| d.get("cached_tokens")).and_then(|x| x.as_i64()))
-        .unwrap_or(0)
-        .max(0);
-    usage.input_tokens = (prompt - cached).max(0);
-    usage.cache_read_tokens = cached;
+    m.merge_response(v);
+    usage.input_tokens = m.input;
+    usage.output_tokens = m.output;
+    usage.cache_read_tokens = m.cache_read;
+    usage.cache_write_tokens = m.cache_write;
 }
 
 fn send_error(out: &mpsc::UnboundedSender<Envelope>, task_id: &str, code: &str, message: &str, retriable: bool) {
@@ -1552,6 +1485,23 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
         assert_eq!(u.input_tokens, 6393);
         assert_eq!(u.cache_read_tokens, 30000);
         assert_eq!(u.output_tokens, 348);
+    }
+
+    /// Gemini bills thinking at the output rate and reports it *outside*
+    /// `candidatesTokenCount`. Reading only candidates left this client's own
+    /// records short by most of a reasoning turn while the gateway — which had
+    /// always read the field — billed the full amount, so the two disagreed
+    /// about every Gemini sale.
+    #[test]
+    fn gemini_thinking_reaches_the_local_record() {
+        let mut u = super::Usage::default();
+        super::accumulate_usage(
+            &mut u,
+            br#"data: {"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":200,"thoughtsTokenCount":1500,"totalTokenCount":2700}}
+"#,
+        );
+        assert_eq!(u.output_tokens, 1700, "200 visible + 1500 thinking");
+        assert_eq!(u.input_tokens, 1000);
     }
 
     /// The buffered path reads the same shapes without the SSE framing.

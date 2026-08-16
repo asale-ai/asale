@@ -15,7 +15,7 @@ resolver = "2"
 members = ["protocol", "core", "daemon", "cli", "src-tauri"]
 
 [workspace.package]
-version = "0.3.8"
+version = "0.3.9"
 edition = "2021"
 
 [workspace.dependencies]
@@ -23,6 +23,14 @@ edition = "2021"
 # public half of the protocol, so anyone writing their own publisher has it,
 # and this repo stays buildable on its own. asale-server depends on this path.
 asale-protocol = { path = "protocol" }
+# Provider usage parsing, shared with asale-server so the two read a vendor's
+# report identically. Default features only: no tokenizer tables in the client.
+#
+# From crates.io, not from a path: this repository is built on its own by CI,
+# with nothing beside it, so anything outside these directories is simply not
+# there. asale-protocol above can be a path because it lives *inside* this repo,
+# which is the whole reason it was put there.
+token-meter = "0.1"
 
 anyhow = "1"
 async-trait = "0.1"

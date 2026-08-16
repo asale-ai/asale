@@ -8,14 +8,23 @@
 //! itself while the CLI never does — and the app has no way to fix that from
 //! the inside.
 //!
-//! None of it can run *inside* the app, because the file being replaced is the
-//! one this process is executing: on Windows the copy is refused outright, and
-//! on macOS the bundle would be swapped underneath a live webview. So the work
-//! is handed to a small helper script that is written out, launched detached
-//! from this process, and left to it:
+//! It happens in two halves, and which half is which is the whole design.
+//!
+//! **Downloading** is done here, in the app, while the window is still up — see
+//! [`download`]. It is the slow part (up to ninety megabytes), it is the part
+//! that can fail in ways the user can act on (offline, a captive portal), and it
+//! is the only part that has anything to show. Doing it first means the progress
+//! bar is real, and the app does not close until the bytes are on disk.
+//!
+//! **Installing** cannot run inside the app, because the file being replaced is
+//! the one this process is executing: on Windows the copy is refused outright,
+//! and on macOS the bundle would be swapped underneath a live webview. So that
+//! half is handed to a small helper script that is written out, launched
+//! detached from this process, and left to it:
 //!
 //!   1. wait for this pid to disappear (the app quits itself right after),
-//!   2. run the installer, elevated,
+//!   2. run the installer, elevated — pointed at the already-downloaded files
+//!      through `ASALE_DL_CACHE`, so it copies rather than fetching them again,
 //!   3. open the app again — whether or not step 2 worked, because an update
 //!      the user cancelled must not leave them with no application.
 //!
@@ -59,6 +68,41 @@ pub struct Release {
     pub page: String,
 }
 
+/// One downloadable file in a release.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct Asset {
+    id: String,
+    name: String,
+    url: String,
+    /// The other address for the same bytes. The manifest hands both over
+    /// already sorted for whoever is asking, so this is simply "the one to try
+    /// second" rather than a named host.
+    #[serde(default)]
+    mirror: String,
+    /// Bytes, per the manifest. `0` when it does not say.
+    #[serde(default)]
+    size: u64,
+}
+
+/// How far along the download is, as the window renders it.
+///
+/// Cumulative across the whole set rather than per file: the user pressed one
+/// button and is watching one bar, and "83% of the second of two files" is a
+/// progress report that goes backwards.
+#[derive(Clone, serde::Serialize)]
+pub struct Progress {
+    /// The file being fetched right now, for the label under the bar.
+    pub file: String,
+    pub received: u64,
+    /// `0` when the manifest carried no sizes — the bar has to fall back to a
+    /// byte count, because a percentage of an unknown total is a lie.
+    pub total: u64,
+}
+
+/// Event name the window listens on. One channel for the whole download; the
+/// payload says which file.
+pub const PROGRESS_EVENT: &str = "update://progress";
+
 /// Ask asale.ai what the current release is.
 ///
 /// From Rust rather than from the webview: the manifest sends no CORS header,
@@ -84,6 +128,240 @@ pub async fn latest_release() -> Result<Release, String> {
         version,
         page: body.get("page").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
     })
+}
+
+/// The assets in the manifest, or an empty list when it does not carry any.
+async fn assets() -> Result<(String, Vec<Asset>), String> {
+    let resp = asale_client_core::http::plain()
+        .get(MANIFEST)
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|e| format!("could not reach {MANIFEST}: {e}"))?;
+    let body: serde_json::Value = resp.json().await.map_err(|e| format!("{MANIFEST} is not JSON: {e}"))?;
+    let version = body.get("version").and_then(|v| v.as_str()).unwrap_or_default().trim().to_string();
+    let builds = body.get("builds").cloned().unwrap_or_default();
+    let builds: Vec<Asset> = serde_json::from_value(builds).unwrap_or_default();
+    Ok((version, builds))
+}
+
+/// Which of them this machine needs, in the order they should be fetched.
+///
+/// The command line first, deliberately: it is the smaller half everywhere, so
+/// the bar moves early — and if the user cancels by quitting the window
+/// mid-download, the half that was completed is the cheap one to have kept.
+///
+/// The desktop asset is the installer's own choice mirrored back: on Linux it
+/// takes the `.deb` where `dpkg` exists and the AppImage otherwise. Guessing
+/// wrong is not a failure, only a miss — the installer downloads what it wanted
+/// and the cached file goes unused.
+fn wanted_ids() -> [&'static str; 2] {
+    if cfg!(target_os = "macos") {
+        ["cli-mac", "mac"]
+    } else if cfg!(windows) {
+        ["cli-windows", "windows"]
+    } else if std::path::Path::new("/usr/bin/dpkg").exists() {
+        ["cli-linux", "linux-deb"]
+    } else {
+        ["cli-linux", "linux-appimage"]
+    }
+}
+
+/// Where a downloaded release waits for the installer.
+///
+/// Under the release's own version, so a half-finished download of one version
+/// can never be handed to an installer fetching another — and so the whole thing
+/// is one directory to delete.
+fn cache_dir(version: &str) -> PathBuf {
+    work_dir().join("updates").join(version)
+}
+
+/// Fetch this platform's half of `version` into [`cache_dir`], reporting
+/// progress to the window as it goes. Returns the directory.
+///
+/// This is the part that used to be invisible. The installer downloaded
+/// everything itself, elevated, after the app had already quit — so "update"
+/// meant the window vanishing for a minute or two with nothing to look at, on a
+/// connection whose speed nobody had told the user about. Doing it here, first,
+/// costs nothing (the installer copies from the cache instead of fetching) and
+/// buys the one thing that was missing: the user can see it working, and the app
+/// only closes once the bytes are safely on disk.
+pub async fn download(app: &AppHandle) -> Result<PathBuf, String> {
+    use tauri::Emitter;
+    let (version, assets) = assets().await?;
+    let app = app.clone();
+    fetch_release(&version, &assets, move |p| {
+        let _ = app.emit(PROGRESS_EVENT, p);
+    })
+    .await
+}
+
+/// The download itself, with reporting left to the caller.
+///
+/// Split from [`download`] so it can be tested: emitting needs a running Tauri
+/// application, and the parts worth checking — that the second address is tried,
+/// that a short file is rejected, that progress adds up across both files — have
+/// nothing to do with Tauri.
+async fn fetch_release(
+    version: &str,
+    assets: &[Asset],
+    report: impl Fn(Progress) + Send + Sync,
+) -> Result<PathBuf, String> {
+    if version.is_empty() {
+        return Err(format!("{MANIFEST} carries no version"));
+    }
+    let wanted: Vec<Asset> = wanted_ids()
+        .iter()
+        .filter_map(|id| assets.iter().find(|a| a.id == *id).cloned())
+        .collect();
+    if wanted.is_empty() {
+        return Err(format!("release {version} publishes nothing for this platform"));
+    }
+
+    let dir = cache_dir(version);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    // Anything cached for another version is now dead weight — an app that
+    // updated three times would otherwise be sitting on three releases.
+    sweep_old_caches(version);
+
+    let total: u64 = wanted.iter().map(|a| a.size).sum();
+    let mut done: u64 = 0;
+    for asset in &wanted {
+        let dest = dir.join(&asset.name);
+        // Already here and the right size: a retry after a failed install, or
+        // the user pressing update twice. Re-fetching 90 MB to learn that would
+        // be the slowest possible way to do nothing.
+        if asset.size > 0 && std::fs::metadata(&dest).map(|m| m.len()).ok() == Some(asset.size) {
+            done += asset.size;
+            report(Progress { file: asset.name.clone(), received: done, total });
+            continue;
+        }
+        fetch(&report, asset, &dest, done, total).await?;
+        done += match asset.size {
+            0 => std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0),
+            n => n,
+        };
+    }
+    tracing::info!("update {version} downloaded to {}", dir.display());
+    Ok(dir)
+}
+
+/// One file, streamed to disk, with the second address tried when the first
+/// does not answer — the same two-addresses-for-the-same-bytes rule the
+/// installer follows, for the same reason (one of them is unreachable from some
+/// networks, and which one that is depends on where the user is).
+async fn fetch(
+    report: &(impl Fn(Progress) + Send + Sync),
+    asset: &Asset,
+    dest: &std::path::Path,
+    done: u64,
+    total: u64,
+) -> Result<(), String> {
+    let mut last = String::new();
+    for url in [asset.url.as_str(), asset.mirror.as_str()] {
+        if url.is_empty() {
+            continue;
+        }
+        match stream_to_file(report, asset, url, dest, done, total).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                tracing::warn!("{url} did not deliver {}: {e}", asset.name);
+                last = e;
+                let _ = std::fs::remove_file(dest);
+            }
+        }
+    }
+    Err(format!("could not download {}: {last}", asset.name))
+}
+
+async fn stream_to_file(
+    report: &(impl Fn(Progress) + Send + Sync),
+    asset: &Asset,
+    url: &str,
+    dest: &std::path::Path,
+    done: u64,
+    total: u64,
+) -> Result<(), String> {
+    use std::io::Write;
+
+    let mut resp = asale_client_core::http::plain()
+        .get(url)
+        // No overall deadline: this is up to ninety megabytes on whatever
+        // connection the user has. The read timeout below is what catches a
+        // download that has actually stalled, which a total timeout cannot tell
+        // apart from one that is merely slow.
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{} answered {}", url, resp.status()));
+    }
+    // Written next to the real name and renamed at the end: a half-file left by
+    // a crash must never be picked up as a complete download by the size check
+    // in `download`.
+    let part = dest.with_extension("part");
+    let mut file = std::fs::File::create(&part).map_err(|e| format!("could not write {}: {e}", part.display()))?;
+    let mut received = 0u64;
+    let mut last_emit = std::time::Instant::now();
+    loop {
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(45), resp.chunk())
+            .await
+            .map_err(|_| "the download stalled".to_string())?
+            .map_err(|e| e.to_string())?;
+        let Some(chunk) = chunk else { break };
+        file.write_all(&chunk).map_err(|e| format!("could not write {}: {e}", part.display()))?;
+        received += chunk.len() as u64;
+        // Throttled: a 90 MB file arrives in thousands of chunks, and an event
+        // per chunk is a webview redrawing a progress bar faster than a screen
+        // can show it.
+        if last_emit.elapsed() >= std::time::Duration::from_millis(120) {
+            last_emit = std::time::Instant::now();
+            report(Progress { file: asset.name.clone(), received: done + received, total });
+        }
+    }
+    file.flush().map_err(|e| e.to_string())?;
+    drop(file);
+    if asset.size > 0 && received != asset.size {
+        return Err(format!("got {received} bytes, expected {} — truncated or intercepted", asset.size));
+    }
+    std::fs::rename(&part, dest).map_err(|e| format!("could not finish {}: {e}", dest.display()))?;
+    report(Progress { file: asset.name.clone(), received: done + received, total });
+    Ok(())
+}
+
+/// Delete every cached release except `keep`.
+fn sweep_old_caches(keep: &str) {
+    let root = work_dir().join("updates");
+    let Ok(entries) = std::fs::read_dir(&root) else { return };
+    for e in entries.flatten() {
+        if e.file_name().to_string_lossy() != keep {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
+/// The most recently written cached release, if one is sitting there ready to
+/// install.
+///
+/// Read at helper-writing time rather than remembered from the download, so a
+/// download that finished in a previous run of the app still counts — and so
+/// nothing breaks if the two calls arrive out of order.
+fn ready_cache() -> Option<PathBuf> {
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for e in std::fs::read_dir(work_dir().join("updates")).ok()?.flatten() {
+        let p = e.path();
+        // Non-empty only: an empty directory is a download that never started,
+        // and pointing the installer at one would just make it fetch everything
+        // itself, which is what it does with no cache at all.
+        if !p.is_dir() || !std::fs::read_dir(&p).map(|mut d| d.next().is_some()).unwrap_or(false) {
+            continue;
+        }
+        let at = e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+        if best.as_ref().is_none_or(|(seen, _)| at >= *seen) {
+            best = Some((at, p));
+        }
+    }
+    best.map(|(_, p)| p)
 }
 
 /// The command this would run, for the Settings page to show before it is run.
@@ -193,6 +471,19 @@ fn write_helper() -> Result<PathBuf, String> {
     let log = sq(&dir.join("update.log").to_string_lossy());
     let pid = std::process::id();
     let target = sq(&relaunch_target().to_string_lossy());
+    let cache = ready_cache().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    // The macOS install command is a shell string inside an AppleScript string
+    // inside a single-quoted shell argument, and a `'` anywhere in the path
+    // ends that outermost quoting early — turning the rest of the command into
+    // arguments to nothing. A home directory with an apostrophe in it is rare
+    // and real; when it happens, forgo the cache rather than the update.
+    #[cfg(target_os = "macos")]
+    let cache = if cache.contains('\'') {
+        tracing::warn!("not handing the installer a cache path containing a quote: {cache}");
+        String::new()
+    } else {
+        cache
+    };
 
     // A minute of polling, not a fixed sleep: quitting is usually instant, but
     // a window with an unsaved-state prompt or a wedged webview can take a
@@ -201,13 +492,26 @@ fn write_helper() -> Result<PathBuf, String> {
         "n=0\nwhile kill -0 {pid} 2>/dev/null && [ \"$n\" -lt 120 ]; do\n\tsleep 0.5\n\tn=$((n + 1))\ndone\n"
     );
 
+    // `ASALE_DL_CACHE` is how the download the window just showed reaches the
+    // installer: it copies from there instead of fetching the same bytes again,
+    // elevated, with nothing on screen. An installer that has never heard of it
+    // ignores it and downloads as before, so an app newer than the live script
+    // still updates.
+    //
+    // Quoted for the shell it lands in, and on macOS for the AppleScript string
+    // it is embedded in as well — see `aq`.
+    #[cfg(target_os = "macos")]
+    let cache_env = if cache.is_empty() { String::new() } else { format!("ASALE_DL_CACHE={} ", aq(&cache)) };
+    #[cfg(not(target_os = "macos"))]
+    let cache_env = if cache.is_empty() { String::new() } else { format!("ASALE_DL_CACHE={} ", sq(&cache)) };
+
     #[cfg(target_os = "macos")]
     let install = format!(
         // One authorization for the whole install, raised by macOS itself. The
         // `with prompt` text is the only context the dialog gets: it appears
         // after the app has quit, so nothing else on screen explains it.
         "/usr/bin/osascript \
-         -e 'do shell script \"/usr/bin/curl -fsSL {INSTALL_SH} | /bin/sh\" \
+         -e 'do shell script \"/usr/bin/curl -fsSL {INSTALL_SH} | {cache_env}/bin/sh\" \
          with administrator privileges \
          with prompt \"Asale needs your administrator password to install the update.\"' \
          || echo 'the installer was cancelled or failed'\n"
@@ -240,11 +544,11 @@ fn write_helper() -> Result<PathBuf, String> {
         // `env HOME=…` because pkexec hands root a root environment, and the
         // installer reads $HOME to find an existing AppImage install.
         "if command -v pkexec >/dev/null 2>&1; then\n\
-         \tpkexec /usr/bin/env HOME=\"$HOME\" /bin/sh -c 'curl -fsSL {INSTALL_SH} | sh' \
+         \tpkexec /usr/bin/env HOME=\"$HOME\" {cache_env}/bin/sh -c 'curl -fsSL {INSTALL_SH} | sh' \
          || echo 'the installer was cancelled or failed'\n\
          else\n\
          \techo 'no pkexec — installing into $HOME/.local/bin instead'\n\
-         \tcurl -fsSL {INSTALL_SH} | sh -s -- --prefix \"$HOME/.local/bin\" \
+         \tcurl -fsSL {INSTALL_SH} | {cache_env}sh -s -- --prefix \"$HOME/.local/bin\" \
          || echo 'the installer failed'\n\
          fi\n"
     );
@@ -282,6 +586,12 @@ fn write_helper() -> Result<PathBuf, String> {
     let log = pq(&dir.join("update.log").to_string_lossy());
     let pid = std::process::id();
     let target = pq(&relaunch_target().to_string_lossy());
+    // See the unix helper: this is how the download the window already showed
+    // reaches the installer instead of being fetched a second time.
+    let cache_env = match ready_cache() {
+        Some(p) => format!("$env:ASALE_DL_CACHE = {}\r\n", pq(&p.to_string_lossy())),
+        None => String::new(),
+    };
 
     // Windows PowerShell 5.1 still negotiates SSL3/TLS1.0 by default, which
     // asale.ai refuses — without this the download fails as a protocol error
@@ -297,6 +607,7 @@ fn write_helper() -> Result<PathBuf, String> {
          try {{ Wait-Process -Id {pid} -Timeout 60 -ErrorAction SilentlyContinue }} catch {{}}\r\n\
          \r\n\
          try {{ [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }} catch {{}}\r\n\
+         {cache_env}\
          try {{\r\n\
          \t& ([scriptblock]::Create((Invoke-RestMethod -UseBasicParsing '{INSTALL_PS1}')))\r\n\
          }} catch {{\r\n\
@@ -356,6 +667,19 @@ fn sq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Double-quoting for a path that has to survive *two* layers: the AppleScript
+/// string literal the `do shell script` command is written as, and the shell
+/// that then runs that command.
+///
+/// The backslashes look wrong and are not. `\\\"` is a Rust literal for `\"`,
+/// which reaches osascript as an escaped quote inside its own string and comes
+/// out the other side as a plain `"` around the value — which is what the shell
+/// needs to survive a space in the user's home directory.
+#[cfg(target_os = "macos")]
+fn aq(s: &str) -> String {
+    format!("\\\"{}\\\"", s.replace('\\', "\\\\\\\\").replace('"', "\\\\\\\""))
+}
+
 /// The PowerShell spelling of the same thing: inside single quotes only the
 /// quote itself is special, and it is escaped by doubling.
 #[cfg(windows)]
@@ -367,6 +691,11 @@ fn pq(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// `ASALE_DATA_DIR` is process-global and cargo runs these in threads of one
+    /// process, so the tests that repoint it take this lock rather than deleting
+    /// each other's scratch directory mid-run.
+    static DATA_DIR: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// One test, not two: both halves point `ASALE_DATA_DIR` at a scratch
     /// directory, and cargo runs tests in threads of a single process.
     ///
@@ -376,6 +705,7 @@ mod tests {
     /// actually notices (the app coming back) is in it.
     #[test]
     fn the_helper_reopens_the_app_and_says_so_to_the_next_launch() {
+        let _lock = DATA_DIR.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join("asale-updater-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::env::set_var("ASALE_DATA_DIR", &dir);
@@ -397,6 +727,23 @@ mod tests {
         };
         assert!(reopen > install, "the app is reopened before the installer runs");
 
+        // Nothing downloaded yet, so the helper must not mention a cache at
+        // all: an installer pointed at an empty directory would find nothing
+        // there and fetch everything anyway, having said it would not.
+        assert!(!body.contains("ASALE_DL_CACHE"), "no download, no cache: {body}");
+
+        // With a release sitting in the cache it has to be handed over — that
+        // is the whole point of downloading before quitting.
+        let cached = dir.join("updates").join("9.9.9");
+        std::fs::create_dir_all(&cached).unwrap();
+        std::fs::write(cached.join("Asale_9.9.9_universal.dmg"), b"not really a dmg").unwrap();
+        let path = write_helper().expect("helper written");
+        let body = std::fs::read_to_string(&path).expect("helper readable");
+        assert!(body.contains("ASALE_DL_CACHE"), "the installer is told where the files are: {body}");
+        assert!(body.contains(&cached.to_string_lossy().to_string()), "and it is the right directory");
+        let out = Command::new("/bin/sh").arg("-n").arg(&path).output().expect("sh -n ran");
+        assert!(out.status.success(), "helper is not valid sh: {}", String::from_utf8_lossy(&out.stderr));
+
         // Read once, then gone: a flag stranded by a crash mid-install would
         // otherwise pull the window to the front on every launch from then on.
         assert!(!take_relaunch_flag(), "no update has run, so nothing to raise");
@@ -406,6 +753,123 @@ mod tests {
 
         std::env::remove_var("ASALE_DATA_DIR");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The download half, against a stand-in for asale.ai.
+    ///
+    /// Three things are worth checking and none of them involve Tauri: the
+    /// second address is tried when the first does not answer, a short file is
+    /// refused rather than handed to an installer, and the progress the window
+    /// draws adds up across both files instead of restarting at each one.
+    #[tokio::test]
+    async fn a_release_is_fetched_from_whichever_address_answers_and_checked_on_arrival() {
+        let _lock = DATA_DIR.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join("asale-updater-download-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("ASALE_DATA_DIR", &dir);
+
+        let (addr, hits) = serve().await;
+        let base = format!("http://{addr}");
+        let cli = wanted_ids()[0];
+        let app = wanted_ids()[1];
+        let assets = vec![
+            Asset {
+                id: cli.into(),
+                name: "cli.tar.gz".into(),
+                // Nothing listening on this port, so the mirror is the only way
+                // this file can arrive.
+                url: "http://127.0.0.1:1/cli.tar.gz".into(),
+                mirror: format!("{base}/cli.tar.gz"),
+                size: 8,
+            },
+            Asset {
+                id: app.into(),
+                name: "app.bin".into(),
+                url: format!("{base}/app.bin"),
+                mirror: String::new(),
+                size: 16,
+            },
+        ];
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, u64, u64)>::new()));
+        let sink = seen.clone();
+        let out = fetch_release("9.9.9", &assets, move |p| {
+            sink.lock().unwrap().push((p.file, p.received, p.total));
+        })
+        .await
+        .expect("downloaded");
+
+        assert_eq!(std::fs::read(out.join("cli.tar.gz")).unwrap().len(), 8, "the mirror was used");
+        assert_eq!(std::fs::read(out.join("app.bin")).unwrap().len(), 16);
+        assert!(!out.join("cli.tar.gz.part").exists(), "no half-file left behind");
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.last().map(|s| (s.1, s.2)), Some((24, 24)), "the bar ends full: {seen:?}");
+        assert!(
+            seen.windows(2).all(|w| w[0].1 <= w[1].1),
+            "progress never goes backwards between files: {seen:?}"
+        );
+
+        // Second run: both files are already here at the right size, so nothing
+        // is fetched again.
+        let before = hits.load(std::sync::atomic::Ordering::SeqCst);
+        fetch_release("9.9.9", &assets, |_| {}).await.expect("downloaded");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), before, "a complete cache is reused");
+
+        // A file that arrives short is a truncated or intercepted download, and
+        // must never be handed to an installer as if it were the release.
+        let short = vec![Asset { size: 999, ..assets[1].clone() }];
+        let err = fetch_release("9.9.9", &short, |_| {}).await.expect_err("refused");
+        assert!(err.contains("app.bin"), "says which file: {err}");
+        assert!(!cache_dir("9.9.9").join("app.bin").exists(), "and does not leave it behind");
+
+        std::env::remove_var("ASALE_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two fixed-size files, and a counter of how many times they were asked
+    /// for. Nothing here needs to be a real release — only the sizes matter.
+    async fn serve() -> (std::net::SocketAddr, std::sync::Arc<std::sync::atomic::AtomicU64>) {
+        use axum::routing::get;
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (a, b) = (hits.clone(), hits.clone());
+        let app = axum::Router::new()
+            .route("/cli.tar.gz", get(move || {
+                a.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { vec![0u8; 8] }
+            }))
+            .route("/app.bin", get(move || {
+                b.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { vec![0u8; 16] }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (addr, hits)
+    }
+
+    /// The macOS install command is a shell string inside an AppleScript string
+    /// inside a single-quoted shell argument. Three layers of quoting is not
+    /// something to reason about and hope: run the real interpreter and see what
+    /// comes out the other end.
+    ///
+    /// The path deliberately has a space in it — `/Users/first last/…` is an
+    /// ordinary Mac, and it is exactly what a missing pair of quotes breaks.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_cache_path_survives_applescript_and_the_shell_below_it() {
+        let path = "/tmp/asale cache/updates/9.9.9";
+        let script = format!(
+            "do shell script \"ASALE_DL_CACHE={} /bin/sh -c 'printf %s \\\"$ASALE_DL_CACHE\\\"'\"",
+            aq(path)
+        );
+        let out = Command::new("/usr/bin/osascript").arg("-e").arg(&script).output().expect("osascript ran");
+        assert!(
+            out.status.success(),
+            "osascript rejected {script}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), path);
     }
 }
 

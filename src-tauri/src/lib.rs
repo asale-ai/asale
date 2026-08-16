@@ -123,6 +123,7 @@ pub fn run() {
             set_close_to_tray,
             installer_command,
             latest_release,
+            download_update,
             run_installer,
         ])
         .setup(move |app| {
@@ -411,6 +412,16 @@ fn installer_command() -> String {
 #[tauri::command]
 async fn latest_release() -> Result<updater::Release, String> {
     updater::latest_release().await
+}
+
+/// Fetch the release this machine needs, reporting progress to the window.
+///
+/// Separate from `run_installer` because it is the half that has something to
+/// show and something the user can retry: the app stays open for it, and only
+/// closes once the bytes are on disk.
+#[tauri::command]
+async fn download_update(app: AppHandle) -> Result<String, String> {
+    updater::download(&app).await.map(|p| p.to_string_lossy().to_string())
 }
 
 /// Upgrade in place with the published installer, then reopen the app.

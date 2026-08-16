@@ -1123,6 +1123,8 @@
     "bodyNoVersion": "This build ({{current}}) is older than the platform now requires.",
     "reasonSell": "Selling is paused until you update.",
     "reasonBuy": "Buying is paused until you update.",
+    "reasonPlatform": "Trading is paused on this machine until you update — buying and selling both.",
+    "latest": "The latest release is {{version}}.",
     "now": "Update now",
     "download": "Download",
     "manual": "download it manually"
@@ -1153,6 +1155,10 @@
     "fixing": "Working…"
   },
   "update": {
-    "navHint": "A new version ({{version}}) is available — open Settings to install it"
+    "navHint": "A new version ({{version}}) is available — open Settings to install it",
+    "downloading": "Downloading the update",
+    "downloadedOf": "{{done}} / {{total}} MB",
+    "downloaded": "{{done}} MB",
+    "installing": "Download finished. Asale will close, install the update, and reopen."
   }
 }

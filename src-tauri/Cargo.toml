@@ -34,5 +34,11 @@ tauri-plugin-shell = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-window-state = "2"
 
+[dev-dependencies]
+# A stand-in for asale.ai in the download tests: the interesting behaviour is
+# what happens when an address does not answer or answers short, and that needs
+# a server that can be told to do exactly that.
+axum.workspace = true
+
 [features]
 custom-protocol = ["tauri/custom-protocol"]

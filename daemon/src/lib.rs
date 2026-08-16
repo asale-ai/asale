@@ -26,6 +26,7 @@ pub mod selfcheck;
 pub mod state;
 pub mod tool_config;
 pub mod usage_scan;
+pub mod version_gate;
 
 use state::AppState;
 use std::net::SocketAddr;
@@ -223,6 +224,11 @@ pub async fn start(bind: SocketAddr) -> anyhow::Result<StartedDaemon> {
         tracing::warn!("market price refresh failed at startup: {e}");
     }
     publisher::rebuild_pool(&app_state.store, &app_state.pool).await;
+
+    // Is this build still allowed to trade at all? Asked on its own slow clock
+    // rather than waited for here — the answer gates a dialog, not the daemon,
+    // and a machine that is offline must still start (see `version_gate`).
+    version_gate::spawn_loop(app_state.cfg.server_api_base.clone());
 
     // Token-refresh loop runs for the daemon lifetime so subscription tokens
     // stay fresh even before the first publish (spec §3.4).
