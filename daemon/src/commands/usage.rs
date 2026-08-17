@@ -581,8 +581,47 @@ const CODEX_SNAPSHOT_TTL: i64 = 10 * 60;
 const CODEX_PROBE_FAIL_TTL: i64 = 5 * 60;
 
 /// Settings key for the last quota reading taken off a provider's own headers.
-fn quota_snapshot_key(provider: &str, account_id: &str) -> String {
+pub(crate) fn quota_snapshot_key(provider: &str, account_id: &str) -> String {
     format!("quota_snapshot:{provider}:{account_id}")
+}
+
+/// How old a banked reading may be and still gate what this account sells.
+///
+/// Generous, because the alternative is worse and because the reading does not
+/// go stale the way a cache does: [`quota::serviceable_tokens`] keeps
+/// subtracting what this device has sold since it was taken, so an ageing
+/// snapshot converges on the local estimate instead of drifting away from it.
+/// What ages badly is the *other* direction — usage this device cannot see, the
+/// operator's own Claude Code session — and an hour bounds that.
+pub(crate) const GATE_SNAPSHOT_MAX_AGE: i64 = 3600;
+
+/// The provider's own verdict on what this account may still sell, and when the
+/// reading was taken.
+///
+/// `None` when there is no reading, when it is older than
+/// [`GATE_SNAPSHOT_MAX_AGE`], or when every window in it has already reset —
+/// the caller falls back to the local plan-cap estimate in all three cases,
+/// which is what the client did everywhere before this existed.
+///
+/// Read per account and never shared across a provider's accounts, unlike
+/// [`banked_quota`]: two Claude logins can be two different subscriptions, and
+/// borrowing one's reading for the other would take a healthy account off the
+/// market because a different one is spent.
+pub(crate) async fn account_quota_gate(
+    store: &LocalStore,
+    provider: &str,
+    account_id: &str,
+    now: i64,
+) -> Option<(asale_client_core::quota::QuotaGate, i64)> {
+    let raw = store.get_setting(&quota_snapshot_key(provider, account_id)).await.ok().flatten()?;
+    let snap: Value = serde_json::from_str(&raw).ok()?;
+    let at = snap.get("at").and_then(Value::as_i64)?;
+    if now - at > GATE_SNAPSHOT_MAX_AGE {
+        return None;
+    }
+    let windows = snap.get("windows")?.as_array()?;
+    let gate = asale_client_core::quota::gate_from_windows(windows, now)?;
+    Some((gate, at))
 }
 
 /// Bank the windows carried by a provider's response headers.

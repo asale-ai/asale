@@ -12,6 +12,7 @@ import {
   IconZap, IconX, IconCheck, IconAlert,
 } from "../icons";
 import { errText } from "../errors";
+import { formatAge } from "./Limits";
 import {
   BatchVerifyPanel, ModelChecklist, recordedStatus, type LaneVerdict, type VerifyOverview,
 } from "../components/VerifyPanel";
@@ -113,6 +114,13 @@ const countdown = (until: number, now: number) => {
   const s = left % 60;
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 };
+
+/** "15:19" in the operator's own timezone.
+ *
+ *  A subscription window resets hours out, where `countdown` above would say
+ *  "241m 30s" — technically the same fact and useless for planning a day. */
+const fmtClock = (ts: number) =>
+  new Date(ts * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 
 /** Stable per-account key — a provider can hold several accounts. */
 const keyOf = (a: { provider: string; account_id: string }) => `${a.provider}:${a.account_id}`;
@@ -1629,7 +1637,16 @@ export function Publish() {
               const windowed = !a.key_based && a.window_cap > 0;
               const used = windowed ? a.used_window : a.used_today;
               const denom = windowed ? a.window_cap : limit;
-              const pct = denom > 0 ? (used / denom) * 100 : 0;
+              // The provider's own reading, when there is a recent one. It is
+              // what actually gates the lanes (see `publisher::rebuild_pool`),
+              // so the bar has to be it too: a local count against a guessed
+              // cap reads 100% on a Claude subscription that is 3% spent, and a
+              // page saying "spent" over lanes that are selling is worse than
+              // no page at all.
+              const upstream = windowed && a.window_source === "upstream" && a.window_used_percent != null;
+              const pct = upstream
+                ? (a.window_used_percent as number)
+                : denom > 0 ? (used / denom) * 100 : 0;
               const capPct = a.daily_cap > 0 && limit > 0 && !a.key_based
                 ? Math.round((limit / a.daily_cap) * 100)
                 : 0;
@@ -1725,11 +1742,27 @@ export function Publish() {
                       the operator's daily cap for a key. */}
                   <div className="acct-usage">
                     <div className="au-head">
-                      <span>{windowed ? t("publish.windowUsed") : t("publish.limitUsedToday")}</span>
+                      <span>
+                        {upstream
+                          ? t("publish.windowUpstream", { window: a.window_key ?? "" })
+                          : windowed ? t("publish.windowUsed") : t("publish.limitUsedToday")}
+                        {/* Whose number this is, and how old. A reading from the
+                            vendor is worth saying out loud — it is the one that
+                            decides whether these lanes sell. */}
+                        {upstream && formatAge(a.window_as_of, t) && (
+                          <span className="faint"> · {formatAge(a.window_as_of, t)}</span>
+                        )}
+                      </span>
                       <span className="mono tabular">
-                        {fmtTokens(used)}
-                        {denom > 0 && <span className="faint"> / {fmtTokens(denom)}</span>}
-                        {denom > 0 && <span className="au-pct"> · {Math.round(Math.min(100, pct))}%</span>}
+                        {upstream ? (
+                          <>{Math.round(Math.min(100, pct))}%</>
+                        ) : (
+                          <>
+                            {fmtTokens(used)}
+                            {denom > 0 && <span className="faint"> / {fmtTokens(denom)}</span>}
+                            {denom > 0 && <span className="au-pct"> · {Math.round(Math.min(100, pct))}%</span>}
+                          </>
+                        )}
                       </span>
                     </div>
                     <div className="bar">
@@ -1949,8 +1982,20 @@ export function Publish() {
                       </div>
                       {windowed && (
                         <div className="fact">
-                          <span className="fact-k">{t("publish.quotaLeft")}</span>
+                          <span className="fact-k">
+                            {upstream ? t("publish.quotaLeftLive") : t("publish.quotaLeft")}
+                          </span>
                           <span className="fact-v mono">{fmtTokens(a.quota_remaining)}</span>
+                        </div>
+                      )}
+                      {/* A spent window with a reset the vendor named. Worth its
+                          own row: "exhausted" with no clock is the state an
+                          operator goes looking through logs to explain, and the
+                          rolling local estimate never had an instant to give. */}
+                      {a.quota_reset_at != null && a.quota_reset_at > now && (
+                        <div className="fact">
+                          <span className="fact-k">{t("publish.quotaResetAt")}</span>
+                          <span className="fact-v mono">{fmtClock(a.quota_reset_at)}</span>
                         </div>
                       )}
                     </div>

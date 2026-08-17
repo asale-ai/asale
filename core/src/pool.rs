@@ -360,6 +360,14 @@ pub struct AccountRuntime {
     pub plan: Option<String>,
     /// Estimated serviceable tokens remaining in the account's window.
     pub quota_remaining: u64,
+    /// When the spent window comes back, when the *provider* said so.
+    ///
+    /// Only set while `quota_remaining` is 0 and the number came from the
+    /// upstream's own rate-limit windows (see [`crate::quota`]). The local
+    /// estimate has no such instant to offer — its window is a rolling sum that
+    /// recovers a token at a time rather than resetting — so it leaves this
+    /// `None` and the account waits for the next minute's rebuild to notice.
+    pub quota_reset_at: Option<i64>,
     /// Access-token expiry (unix secs) when known.
     pub expires_at: Option<i64>,
     /// Per-account sell switch. Only sell-enabled accounts are handed to the
@@ -404,6 +412,7 @@ impl AccountRuntime {
             model_aliases: BTreeMap::new(),
             plan: None,
             quota_remaining: 0,
+            quota_reset_at: None,
             expires_at: None,
             sell_enabled: false,
             origin: None,
@@ -499,6 +508,10 @@ pub struct AccountStatusView {
     pub account_id: String,
     pub plan: Option<String>,
     pub quota_remaining: u64,
+    /// When an exhausted account's window resets, when the provider named an
+    /// instant. `None` on a healthy account and on one whose headroom is only
+    /// a local estimate (see `AccountRuntime::quota_reset_at`).
+    pub quota_reset_at: Option<i64>,
     pub status: String,
     pub expires_at: Option<i64>,
     pub cooldown_until: Option<i64>,
@@ -992,11 +1005,18 @@ impl AccountPool {
     /// daemon can wake up exactly then and re-declare instead of waiting out
     /// the periodic tick.
     pub fn next_auto_resume(&self, now: i64) -> Option<i64> {
-        self.accounts
+        let lanes = self.accounts.iter().flat_map(|a| a.lanes.values()).filter_map(|l| l.auto_resume_at(now));
+        // A spent subscription window is an account-wide clock, not a lane's,
+        // and it is the one the operator is actually waiting on. Without it
+        // here the whole account waits for the 60-second periodic rebuild to
+        // stumble over a reset the provider named to the second.
+        let quotas = self
+            .accounts
             .iter()
-            .flat_map(|a| a.lanes.values())
-            .filter_map(|l| l.auto_resume_at(now))
-            .min()
+            .filter(|a| a.quota_remaining == 0)
+            .filter_map(|a| a.quota_reset_at)
+            .filter(|t| *t > now);
+        lanes.chain(quotas).min()
     }
 
     /// Every lane's current state, for the UI and for building the supply
@@ -1037,7 +1057,16 @@ impl AccountPool {
                         _ => None,
                     },
                     requires_user: reason.is_some_and(|r| r.requires_user()),
-                    resume_at: if lane.resume_at > now { lane.resume_at } else { 0 },
+                    // A lane with no clock of its own inherits the account's,
+                    // when the account is the thing holding it back: an
+                    // exhausted subscription knows when it resets, and that is
+                    // the countdown both the sell page and the gateway's
+                    // paused-lane record should carry.
+                    resume_at: match (lane.resume_at > now, status) {
+                        (true, _) => lane.resume_at,
+                        (false, "exhausted") => a.quota_reset_at.filter(|t| *t > now).unwrap_or(0),
+                        _ => 0,
+                    },
                     cooldown_until: lane.cooldown_until.filter(|c| *c > now),
                     fail_streak: lane.fail_streak,
                     last_error: lane.last_error.clone(),
@@ -1098,6 +1127,7 @@ impl AccountPool {
                 account_id: a.account_id.clone(),
                 plan: a.plan.clone(),
                 quota_remaining: a.quota_remaining,
+                quota_reset_at: a.quota_reset_at.filter(|t| *t > now && a.quota_remaining == 0),
                 status: a.status(now).to_string(),
                 expires_at: a.expires_at,
                 cooldown_until: a.cooldown_until.filter(|c| *c > now),

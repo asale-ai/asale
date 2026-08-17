@@ -267,6 +267,109 @@ fn now_secs() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
+// ── Which plan a Claude subscription is on ──────────────────────────────────
+//
+// Anthropic's OAuth token exchange does not say. The response carries
+// `account` (email + uuid) and `organization`, and neither has ever held a
+// `subscription_type` — which is what `account_plan` looks for, and why every
+// Claude login lands on the unknown-plan branch of `plan_window_cap` and sells
+// like the lowest paid tier. A Max 20× subscription was being metered at 220k
+// tokens per five hours instead of 4.4M: a factor of twenty.
+//
+// `oauth/profile` does say, three ways, and this reads all three because they
+// disagree in precision:
+//
+// ```json
+// { "account":      { "has_claude_max": true, "has_claude_pro": false },
+//   "organization": { "organization_type": "claude_max",
+//                     "rate_limit_tier":   "default_claude_max_20x" } }
+// ```
+//
+// `rate_limit_tier` is the only one that separates Max 5× from Max 20×, and it
+// is named after the thing we are trying to size — the rate limit itself.
+
+/// A Claude plan label from an `oauth/profile` body (or any other object
+/// carrying the same `account`/`organization` pair — the token exchange's
+/// response has the same shape, it just usually says less).
+///
+/// The strings returned are the vocabulary [`plan_window_cap`] matches on, not
+/// Anthropic's: `max20`, `max5`, `max`, `team`, `pro`. An unrecognised tier
+/// falls through to the coarser fields rather than being passed along verbatim,
+/// so a tier name we have never seen cannot silently match `contains("pro")`
+/// and mis-size a Max account.
+///
+/// Precision is deliberately lost downward, never upward: `organization_type`
+/// says `claude_max` without saying which multiple, and that resolves to `max`
+/// (2.2M, the 5× estimate) rather than to the 20× one. Over-declaring supply
+/// sends the market work the upstream then refuses, which costs this device its
+/// reputation; under-declaring only costs an offer.
+pub fn claude_plan_from_profile(body: &serde_json::Value) -> Option<String> {
+    let org = &body["organization"];
+    let tier = org["rate_limit_tier"].as_str().unwrap_or("").to_ascii_lowercase();
+    // `default_claude_max_20x`, `default_claude_max_5x`, `default_claude_pro`…
+    let from_tier = if tier.contains("max") && (tier.contains("20x") || tier.contains("_20")) {
+        Some("max20")
+    } else if tier.contains("max") {
+        Some("max5")
+    } else if tier.contains("team") || tier.contains("enterprise") {
+        Some("team")
+    } else if tier.contains("pro") {
+        Some("pro")
+    } else {
+        None
+    };
+    if let Some(p) = from_tier {
+        return Some(p.to_string());
+    }
+    // `claude_max` / `claude_pro` / `claude_team`: the plan without the multiple.
+    let kind = org["organization_type"].as_str().unwrap_or("").to_ascii_lowercase();
+    let from_kind = if kind.contains("max") {
+        Some("max")
+    } else if kind.contains("team") || kind.contains("enterprise") {
+        Some("team")
+    } else if kind.contains("pro") {
+        Some("pro")
+    } else {
+        None
+    };
+    if let Some(p) = from_kind {
+        return Some(p.to_string());
+    }
+    // The booleans on the account itself — the last thing left, and still worth
+    // twice the unknown-plan default.
+    let acct = &body["account"];
+    if acct["has_claude_max"].as_bool() == Some(true) {
+        return Some("max".into());
+    }
+    if acct["has_claude_pro"].as_bool() == Some(true) {
+        return Some("pro".into());
+    }
+    None
+}
+
+/// Read `api.anthropic.com/api/oauth/profile` with a subscription's own bearer.
+///
+/// Free — it spends no subscription quota — and the only place the plan is
+/// stated at all. Region blocks answer it the same way they answer everything
+/// else (403 "Request not allowed"), so the caller treats a failure as "no
+/// answer yet" and keeps whatever plan it already had.
+pub async fn fetch_claude_profile(access_token: &str) -> anyhow::Result<serde_json::Value> {
+    let resp = crate::http::upstream()
+        .get("https://api.anthropic.com/api/oauth/profile")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .header("Accept", "application/json")
+        .timeout(Duration::from_secs(12))
+        .send()
+        .await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("oauth/profile refused the request (HTTP {status}): {}", body.chars().take(200).collect::<String>());
+    }
+    Ok(resp.json().await?)
+}
+
 // ── Claude / Claude Work adapter ────────────────────────────────────────────
 
 /// Claude adapter (also the base for ClaudeWork, which only differs in the UA
@@ -847,5 +950,98 @@ mod tests {
 
         let bad = serde_json::json!({"error":"invalid_grant"});
         assert!(parse_refresh_response(&bad).is_err());
+    }
+
+    /// A real `oauth/profile` body, read off a production account on
+    /// 2026-08-17. This is the account whose Max 20× subscription was being
+    /// metered as an unknown plan — 220k tokens per five hours against a real
+    /// allowance twenty times that — because the token exchange says none of
+    /// this and nothing else was ever asked.
+    fn real_profile() -> serde_json::Value {
+        serde_json::json!({
+            "account": {
+                "uuid": "…", "full_name": "oh", "display_name": "oh",
+                "email": "…", "has_claude_max": true, "has_claude_pro": false,
+                "created_at": "2025-08-02T01:13:56.169093Z"
+            },
+            "organization": {
+                "uuid": "…", "name": "…'s Organization",
+                "organization_type": "claude_max",
+                "billing_type": "stripe_subscription",
+                "rate_limit_tier": "default_claude_max_20x",
+                "seat_tier": null, "has_extra_usage_enabled": true,
+                "subscription_status": "active"
+            },
+            "application": { "name": "Claude Code", "slug": "claude-code" }
+        })
+    }
+
+    #[test]
+    fn the_profile_sizes_the_subscription_the_token_exchange_would_not() {
+        let plan = claude_plan_from_profile(&real_profile()).unwrap();
+        assert_eq!(plan, "max20");
+        assert_eq!(plan_window_cap(Provider::Claude, Some(&plan)), 4_400_000);
+        // What it was doing before anyone asked.
+        assert_eq!(plan_window_cap(Provider::Claude, None), 220_000);
+    }
+
+    #[test]
+    fn every_tier_anthropic_publishes_lands_on_its_own_cap() {
+        let with_tier = |tier: &str| {
+            let body = serde_json::json!({ "organization": { "rate_limit_tier": tier } });
+            claude_plan_from_profile(&body)
+        };
+        assert_eq!(with_tier("default_claude_max_20x").as_deref(), Some("max20"));
+        assert_eq!(with_tier("default_claude_max_5x").as_deref(), Some("max5"));
+        assert_eq!(with_tier("default_claude_pro").as_deref(), Some("pro"));
+        assert_eq!(with_tier("default_claude_team").as_deref(), Some("team"));
+        // Max 5× is the 2.2M estimate, not the 20× one.
+        assert_eq!(plan_window_cap(Provider::Claude, Some("max5")), 2_200_000);
+        assert_eq!(plan_window_cap(Provider::Claude, Some("team")), 1_500_000);
+        assert_eq!(plan_window_cap(Provider::Claude, Some("pro")), 1_100_000);
+    }
+
+    /// The coarser fields are read only when the precise one says nothing, and
+    /// they resolve *downward*: `claude_max` without a multiple is priced as
+    /// the 5× tier. Declaring supply an upstream will refuse costs this device
+    /// its reputation; declaring less than it has costs one offer.
+    #[test]
+    fn a_plan_without_its_multiple_is_sized_conservatively() {
+        let kind_only = serde_json::json!({ "organization": { "organization_type": "claude_max" } });
+        assert_eq!(claude_plan_from_profile(&kind_only).as_deref(), Some("max"));
+        assert_eq!(plan_window_cap(Provider::Claude, Some("max")), 2_200_000);
+
+        let flags_only = serde_json::json!({ "account": { "has_claude_max": true } });
+        assert_eq!(claude_plan_from_profile(&flags_only).as_deref(), Some("max"));
+        let pro_flag = serde_json::json!({ "account": { "has_claude_pro": true, "has_claude_max": false } });
+        assert_eq!(claude_plan_from_profile(&pro_flag).as_deref(), Some("pro"));
+    }
+
+    /// A tier string we have never seen must not be guessed at. Passing it
+    /// through verbatim would let an unrelated substring decide the cap — a
+    /// hypothetical `claude_promo_trial` matching `contains("pro")` and sizing
+    /// a trial like a Pro subscription.
+    #[test]
+    fn an_unknown_tier_falls_through_rather_than_matching_by_accident() {
+        let odd = serde_json::json!({
+            "organization": { "rate_limit_tier": "something_new", "organization_type": "claude_max" }
+        });
+        assert_eq!(claude_plan_from_profile(&odd).as_deref(), Some("max"), "the coarser field decides");
+        let nothing = serde_json::json!({ "organization": { "rate_limit_tier": "something_new" } });
+        assert_eq!(claude_plan_from_profile(&nothing), None);
+        assert_eq!(claude_plan_from_profile(&serde_json::json!({})), None);
+    }
+
+    /// The token exchange's response has the same `account`/`organization`
+    /// shape, so it is worth reading before spending a request on the profile —
+    /// on the accounts where it happens to be populated, that is one fewer call.
+    #[test]
+    fn a_token_response_carrying_the_same_fields_is_read_the_same_way() {
+        let tokens = serde_json::json!({
+            "access_token": "…", "expires_in": 3600,
+            "account": { "email_address": "…", "uuid": "…" },
+            "organization": { "uuid": "…", "rate_limit_tier": "default_claude_max_5x" }
+        });
+        assert_eq!(claude_plan_from_profile(&tokens).as_deref(), Some("max5"));
     }
 }

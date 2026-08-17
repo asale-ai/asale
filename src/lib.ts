@@ -638,12 +638,28 @@ export interface AccountStatus {
    *  the lane's concurrency ceiling, so the gateway stops routing work here
    *  past it rather than this device refusing what it was already sent. */
   sell_concurrency: number;
+  /** When an exhausted account's window resets, unix seconds. Only ever set
+   *  from the provider's own reading — the local estimate's window is a rolling
+   *  sum with no reset instant, so it recovers a token at a time instead. */
+  quota_reset_at: number | null;
   /** Tokens this account served today / in the current 5h window. */
   used_today: number;
   used_window: number;
   /** Its plan's 5h cap and the daily equivalent (×24/5), for "% of plan". */
   window_cap: number;
   daily_cap: number;
+  /** Which answer about this account's headroom is in force:
+   *  - `upstream` — the provider's own rate-limit windows, banked within the
+   *    hour. `window_used_percent` is its number, `window_key` names the
+   *    binding window (`5h`, `7d`) and `window_as_of` when it was measured.
+   *  - `estimate` — `used_window` against the guessed `window_cap`, which is
+   *    all this device had before the providers were asked. On a Claude login
+   *    the plan is never in the token response, so that cap is the lowest paid
+   *    tier and the figure runs far ahead of the real subscription. */
+  window_source: "upstream" | "estimate";
+  window_used_percent: number | null;
+  window_as_of: number | null;
+  window_key: string | null;
   /** A metered platform key rather than a plan subscription: billed against a
    *  balance, so it has no rolling window and the two caps above are guesses
    *  that do not apply to it. The UI hides window figures for these. */

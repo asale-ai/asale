@@ -359,12 +359,27 @@ pub async fn list_accounts(state: &AppState) -> R<Value> {
             .served_tokens_since_for_account(WINDOW_SECS, &s.provider, &s.account_id)
             .await
             .map_err(err)? as i64;
+        // Which of the two answers about this account's headroom is in force.
+        // The page has always shown `used_window / window_cap`, which is a
+        // local count against a guessed cap — and on a Claude login, where the
+        // plan is never known, a cap so low that a live subscription reads as
+        // spent. When the provider's own reading is gating the account instead,
+        // say so and show *its* number, or the page contradicts the lane it is
+        // describing: 100% of a made-up cap, still selling.
+        let gate = super::usage::account_quota_gate(&state.store, &s.provider, &s.account_id, now_secs()).await;
         let mut row = serde_json::to_value(&s).map_err(err)?;
         if let Some(obj) = row.as_object_mut() {
             obj.insert("window_cap".into(), json!(window_cap));
             // Daily equivalent of the 5h rolling cap (24h / 5h = 4.8×).
             obj.insert("daily_cap".into(), json!(window_cap * 24 / 5));
             obj.insert("used_window".into(), json!(used_window));
+            obj.insert(
+                "window_source".into(),
+                json!(if gate.is_some() { "upstream" } else { "estimate" }),
+            );
+            obj.insert("window_used_percent".into(), json!(gate.as_ref().map(|(g, _)| (1.0 - g.headroom) * 100.0)));
+            obj.insert("window_as_of".into(), json!(gate.as_ref().map(|(_, at)| *at)));
+            obj.insert("window_key".into(), json!(gate.as_ref().map(|(g, _)| g.tightest.clone())));
             obj.insert("source".into(), json!(tool.and_then(|t| t.source.clone())));
             // Every store holding this same account. Two entries mean the
             // keychain and the credential file are one subscription, merged

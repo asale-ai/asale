@@ -21,6 +21,7 @@ pub mod oauth;
 pub mod proc_scan;
 pub mod proxy;
 pub mod publisher;
+pub mod quota_poll;
 pub mod rpc;
 pub mod selfcheck;
 pub mod state;
@@ -251,6 +252,12 @@ pub async fn start(bind: SocketAddr) -> anyhow::Result<StartedDaemon> {
             app_state.cfg.server_api_base.clone(),
         );
     }
+
+    // The subscription windows themselves, read from the providers that publish
+    // them. Without this the sell gate only ever sees its own local estimate,
+    // which is blind to the operator's own use of the subscription and pinned
+    // to the lowest paid tier whenever the login carried no plan.
+    quota_poll::spawn_quota_loop(app_state.clone());
 
     // Auto-import local CLI credentials at startup (spec §3.3): the machine's
     // installed Claude Code / Codex / gemini-cli accounts join the sell pool

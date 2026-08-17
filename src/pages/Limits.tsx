@@ -34,8 +34,12 @@ function barTone(displayPct: number, mode: DisplayMode): "ok" | "warn" | "danger
 
 type TFn = ReturnType<typeof useTranslation>["t"];
 
-/** How long ago a banked reading was taken, or null when it was read live. */
-function formatAge(asOf: number | null | undefined, t: TFn): string | null {
+/** How long ago a banked reading was taken, or null when it was read live.
+ *
+ *  Exported because the Sell page shows the same readings: they gate what it is
+ *  offering, so it has to be able to say how old the gate's evidence is, in the
+ *  same words this page uses. */
+export function formatAge(asOf: number | null | undefined, t: TFn): string | null {
   if (!asOf) return null;
   const secs = Math.max(0, Math.floor(Date.now() / 1000) - asOf);
   if (secs < 90) return t("limits.ageJustNow");

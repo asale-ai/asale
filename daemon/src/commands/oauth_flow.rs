@@ -165,12 +165,21 @@ pub(crate) async fn finish_provider_oauth(
         );
         "account".to_string()
     });
-    let plan = account_plan(&tokens);
+    // Anthropic's exchange has never carried a plan, so a Claude login that
+    // stopped here sold like the lowest paid tier — 220k tokens per five hours
+    // against a Max 20×'s 4.4M. `oauth/profile` states it, costs no quota, and
+    // is asked here so the very first declaration is already the right size
+    // rather than waiting for the quota poll's next sweep.
+    let plan = match account_plan(&tokens) {
+        Some(p) => Some(p),
+        None => claude_plan_from_profile_call(provider, access).await,
+    };
     if plan.is_none() {
         tracing::warn!(
             provider,
             account_id,
-            "no plan in the token response — quota will be estimated at the lowest tier. \
+            "no plan in the token response and none from the provider's profile — \
+             quota will be estimated at the lowest tier. \
              response keys = {:?}, account keys = {:?}",
             key_names(&tokens),
             key_names(&tokens["account"])
@@ -265,7 +274,31 @@ fn account_plan(tokens: &Value) -> Option<String> {
         .or_else(|| tokens["plan"].as_str())
         .map(str::to_string)
         .or_else(|| codex_claim_plan(tokens))
+        // Anthropic states the plan under `organization`, not as a
+        // `subscription_type` anywhere. Usually only on the profile — but the
+        // exchange's response has the same shape, and reading it here is one
+        // fewer request on the logins where it is populated.
+        .or_else(|| asale_client_core::discovery::claude_plan_from_profile(tokens))
         .filter(|plan| !plan.is_empty())
+}
+
+/// The plan from `oauth/profile`, for the providers that have one.
+///
+/// A failure is not an error to report: the login itself succeeded, the profile
+/// is a refinement, and the quota poll will try again on its own clock. It is
+/// logged at debug because the usual cause is a region-blocked upstream, which
+/// this device already complains about everywhere else it matters.
+async fn claude_plan_from_profile_call(provider: &str, access: &str) -> Option<String> {
+    if provider != "claude" && provider != "claude_work" {
+        return None;
+    }
+    match asale_client_core::discovery::fetch_claude_profile(access).await {
+        Ok(body) => asale_client_core::discovery::claude_plan_from_profile(&body),
+        Err(e) => {
+            tracing::debug!(provider, "oauth/profile plan lookup failed: {e}");
+            None
+        }
+    }
 }
 
 fn codex_claim_plan(tokens: &Value) -> Option<String> {

@@ -14,6 +14,7 @@ pub mod executor;
 pub mod http;
 pub mod pool;
 pub mod protocol;
+pub mod quota;
 pub mod reconcile;
 pub mod security;
 pub mod seller_status;
@@ -30,6 +31,7 @@ pub use pool::{
     AccountPool, AccountRuntime, LaneState, LaneStatusView, PauseReason, PickedAccount, Strategy,
     UpstreamErrorKind,
 };
+pub use quota::{gate_from_windows, serviceable_tokens, QuotaGate};
 pub use security::DeviceIdentity;
 pub use ws::{
     next_backoff, spawn_publisher, ConfigSource, ConnState, LaneControl, PublisherDeps, PublisherHandle,

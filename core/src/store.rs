@@ -647,6 +647,31 @@ impl LocalStore {
         Ok(total.0.max(0) as u64)
     }
 
+    /// Tokens (in+out) this exact account served *strictly after* `ts`.
+    ///
+    /// The half-open bound is the point: this ages a banked quota reading, and
+    /// a reading taken at `t` already accounts for everything served up to and
+    /// including `t`. Counting the same second twice would charge those tokens
+    /// against the account's headroom on top of the utilisation that already
+    /// contains them.
+    pub async fn served_tokens_after_for_account(
+        &self,
+        after_ts: i64,
+        provider: &str,
+        account_id: &str,
+    ) -> anyhow::Result<u64> {
+        let total: (i64,) = sqlx::query_as(
+            "SELECT COALESCE(SUM(in_tokens + out_tokens), 0) FROM provider_records
+             WHERE ts > ? AND provider=? AND account_id=?",
+        )
+        .bind(after_ts)
+        .bind(provider)
+        .bind(account_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(total.0.max(0) as u64)
+    }
+
     /// Tokens (in+out) this exact account served since the start of the current
     /// UTC day — drives the per-account daily sell cap / auto-stop.
     pub async fn served_tokens_today_for_account(&self, provider: &str, account_id: &str) -> anyhow::Result<u64> {

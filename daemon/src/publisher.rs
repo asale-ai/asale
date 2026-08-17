@@ -1274,6 +1274,10 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
     )
     .await;
     let mut fresh = Vec::new();
+    // Lanes a *model-scoped* upstream window has spent — Opus's own weekly cap
+    // on top of the account-wide ones. Collected here and applied after
+    // `set_accounts`, which is the call that decides which lanes exist.
+    let mut scoped_blocks: Vec<(String, String, String, i64)> = Vec::new();
     for tool in &tools {
         if tool.origin.as_deref() == Some("import") && buying.contains(&tool.provider) {
             continue;
@@ -1295,11 +1299,29 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
             .served_tokens_today_for_account(&tool.provider, &tool.account_id)
             .await
             .unwrap_or(0);
-        let mut quota = match Provider::from_str_opt(&tool.provider) {
-            Some(prov) => {
-                discovery::estimate_quota_window(prov, plan.as_deref(), used_window, None).est_serviceable_tokens
+        // What the provider itself says about this account's windows, if a
+        // recent reading is banked. It replaces the estimate rather than
+        // capping it: the estimate is a guessed plan cap minus this device's
+        // own sales, and it is wrong in both directions — blind to the
+        // operator's own use of the subscription, and pinned to the lowest paid
+        // tier whenever the login carried no plan (which for Claude's OAuth
+        // exchange is every time). Taking the smaller of the two would keep
+        // exactly the failure this reads the upstream to avoid.
+        let gate = crate::commands::usage::account_quota_gate(store, &tool.provider, &tool.account_id, now_secs()).await;
+        let cap = Provider::from_str_opt(&tool.provider)
+            .map(|prov| discovery::plan_window_cap(prov, plan.as_deref()))
+            .unwrap_or(0);
+        let mut quota = match &gate {
+            Some((g, at)) => {
+                // Sales this device has made since the reading was taken are
+                // not in it yet, so they come off the top.
+                let since = store
+                    .served_tokens_after_for_account(*at, &tool.provider, &tool.account_id)
+                    .await
+                    .unwrap_or(0);
+                asale_client_core::quota::serviceable_tokens(g, cap, since)
             }
-            None => 0,
+            None => cap.saturating_sub(used_window),
         };
         // The daily sell cap clamps the estimate, so an account that has hit its
         // cap reports `exhausted` and drops out of selection until UTC midnight.
@@ -1334,6 +1356,10 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
             .filter(|s| !s.is_empty());
         a.plan = plan;
         a.quota_remaining = quota;
+        // Only the upstream knows when a spent window returns. The local
+        // estimate's window is a rolling sum with no reset instant at all — it
+        // recovers a token at a time — so it leaves this unset.
+        a.quota_reset_at = gate.as_ref().and_then(|(g, _)| g.reset_at);
         a.expires_at = expires_at;
         a.sell_enabled = tool.sell_enabled;
         a.origin = tool.origin.clone();
@@ -1360,6 +1386,28 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
         // Empty for every other provider: their model ids are the market's
         // already, so there is nothing to translate on the way out.
         a.model_aliases = listing.map(|l| l.aliases).unwrap_or_default();
+        // A spent model-scoped window takes its own models off the market and
+        // leaves the rest of the subscription selling. Resolved against the
+        // lanes this account actually has, so a scope naming a model it does
+        // not sell costs nothing.
+        if let Some((g, _)) = &gate {
+            for model in a.lanes.keys() {
+                if let Some(b) = g.scope_block(model) {
+                    // A block with no reset instant still gets one: a lane
+                    // paused with `resume_at = 0` waits for an operator, and
+                    // nobody should have to press a button to end a window the
+                    // vendor will roll over on its own. An hour is short enough
+                    // to re-ask soon and long enough not to hammer the upstream.
+                    let resume_at = b.reset_at.unwrap_or_else(|| now_secs() + 3600);
+                    scoped_blocks.push((
+                        tool.provider.clone(),
+                        tool.account_id.clone(),
+                        model.clone(),
+                        resume_at,
+                    ));
+                }
+            }
+        }
         fresh.push(a);
     }
     // Pauses that need a person outlive the process: without this a restart
@@ -1378,6 +1426,12 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
             if let Some(r) = PauseReason::parse(&reason) {
                 p.pause_lane(&provider, &account_id, &model, r, 0);
             }
+        }
+        // Not persisted, unlike the pauses above: this one carries the vendor's
+        // own reset instant, so it clears itself the moment that passes and a
+        // rebuild that no longer sees the block simply stops re-applying it.
+        for (provider, account_id, model, resume_at) in scoped_blocks {
+            p.pause_lane(&provider, &account_id, &model, PauseReason::Quota, resume_at);
         }
         p.apply_prices(&ratios);
     }
@@ -2018,5 +2072,180 @@ mod tests {
             }
         }
         assert!(!fallback_models("kimi").is_empty(), "a fresh Kimi install must have something to sell");
+    }
+
+    // ── The sell gate ───────────────────────────────────────────────────────
+
+    use asale_client_core::store::LocalStore;
+
+    /// A store holding one sell-enabled Claude account that has served
+    /// `sold` tokens, with `claude-opus-5` and `claude-sonnet-5` tradable.
+    async fn gated_store(sold: i64) -> LocalStore {
+        let s = LocalStore::open_memory().await.unwrap();
+        s.upsert_tool("claude", "a@b.io", "asale:claude:a@b.io", &["oauth"], "oauth").await.unwrap();
+        s.set_tool_sell("claude", "a@b.io", true, 0).await.unwrap();
+        let mut by_provider = std::collections::BTreeMap::new();
+        by_provider.insert(
+            "claude".to_string(),
+            vec!["claude-opus-5".to_string(), "claude-sonnet-5".to_string()],
+        );
+        let cat = SellableCatalog { fetched_at: now_secs(), by_provider, ..Default::default() };
+        s.set_setting(CATALOG_KEY, &serde_json::to_string(&cat).unwrap()).await.unwrap();
+        s.insert_provider_record("t1", "claude", "a@b.io", "claude-opus-5", sold, 0, 0, 0, "ok")
+            .await
+            .unwrap();
+        s
+    }
+
+    /// Bank a reading the way `commands::usage` does.
+    async fn bank(s: &LocalStore, at: i64, windows: serde_json::Value) {
+        let snap = serde_json::json!({ "at": at, "windows": windows });
+        s.set_setting("quota_snapshot:claude:a@b.io", &snap.to_string()).await.unwrap();
+    }
+
+    fn quota_of(pool: &StdMutex<AccountPool>) -> u64 {
+        pool.lock().unwrap().statuses(now_secs())[0].quota_remaining
+    }
+
+    fn status_of(pool: &StdMutex<AccountPool>) -> String {
+        pool.lock().unwrap().statuses(now_secs())[0].status.clone()
+    }
+
+    /// The production failure, end to end: a Claude login carries no plan, so
+    /// the cap falls to the lowest paid tier (220k), and a device that has sold
+    /// past it declares itself spent — while Anthropic's own five-hour window
+    /// sits at 3%.
+    #[tokio::test]
+    async fn the_local_estimate_alone_stops_a_subscription_that_is_barely_used() {
+        let store = gated_store(239_000).await;
+        let pool = StdMutex::new(AccountPool::new(asale_client_core::Strategy::FillFirst));
+        rebuild_pool(&store, &pool).await;
+        assert_eq!(quota_of(&pool), 0);
+        assert_eq!(status_of(&pool), "exhausted", "220k guessed cap, 239k sold");
+    }
+
+    /// The same device with the provider's own reading banked: 3% of the five
+    /// hour window spent, so it keeps selling.
+    #[tokio::test]
+    async fn the_upstreams_reading_puts_the_same_account_back_on_the_market() {
+        let store = gated_store(239_000).await;
+        let now = now_secs();
+        bank(
+            &store,
+            now,
+            serde_json::json!([
+                {"key":"5h","used_percent":3.0,"reset_at":now + 9_000,"window_seconds":18_000},
+                {"key":"7d","used_percent":48.0,"reset_at":now + 200_000,"window_seconds":604_800},
+            ]),
+        )
+        .await;
+        let pool = StdMutex::new(AccountPool::new(asale_client_core::Strategy::FillFirst));
+        rebuild_pool(&store, &pool).await;
+        assert_eq!(status_of(&pool), "available");
+        // 52% of the guessed 220k cap, less the 239k... which is more than the
+        // whole cap, so what is left is the reading's own verdict expressed in
+        // the only unit the market takes. The gate is the *status*, not this
+        // number — and the status is "selling".
+        assert!(quota_of(&pool) > 0, "the account has headroom the local estimate cannot see");
+    }
+
+    /// A spent window still stops the sale — and now carries the instant it
+    /// comes back, which the rolling local estimate never had.
+    #[tokio::test]
+    async fn a_genuinely_spent_window_stops_selling_and_says_when_it_returns() {
+        let store = gated_store(1_000).await;
+        let now = now_secs();
+        bank(
+            &store,
+            now,
+            serde_json::json!([{"key":"5h","used_percent":100.0,"reset_at":now + 3_600,"window_seconds":18_000}]),
+        )
+        .await;
+        let pool = StdMutex::new(AccountPool::new(asale_client_core::Strategy::FillFirst));
+        rebuild_pool(&store, &pool).await;
+        assert_eq!(status_of(&pool), "exhausted");
+        let st = pool.lock().unwrap().statuses(now)[0].clone();
+        assert_eq!(st.quota_reset_at, Some(now + 3_600));
+        // And the daemon wakes for it rather than waiting out the next rebuild.
+        assert_eq!(pool.lock().unwrap().next_auto_resume(now), Some(now + 3_600));
+    }
+
+    /// Opus's own weekly window is spent; Sonnet's is not. One lane leaves the
+    /// market, the other keeps selling — which is the whole reason scoped
+    /// windows are kept apart from the account-wide ones.
+    #[tokio::test]
+    async fn a_spent_opus_window_leaves_the_rest_of_the_subscription_selling() {
+        let store = gated_store(1_000).await;
+        let now = now_secs();
+        bank(
+            &store,
+            now,
+            serde_json::json!([
+                {"key":"5h","used_percent":10.0,"reset_at":now + 9_000,"window_seconds":18_000},
+                {"key":"7d_opus","used_percent":100.0,"reset_at":now + 50_000,"window_seconds":604_800},
+            ]),
+        )
+        .await;
+        let pool = StdMutex::new(AccountPool::new(asale_client_core::Strategy::FillFirst));
+        rebuild_pool(&store, &pool).await;
+        assert_eq!(status_of(&pool), "available", "the account itself is fine");
+        let views = pool.lock().unwrap().lane_views(now);
+        let lane = |m: &str| views.iter().find(|v| v.model == m).unwrap().clone();
+        assert_eq!(lane("claude-opus-5").status, "paused");
+        assert_eq!(lane("claude-opus-5").paused_reason.as_deref(), Some("quota"));
+        assert_eq!(lane("claude-opus-5").resume_at, now + 50_000);
+        assert_eq!(lane("claude-sonnet-5").status, "selling");
+    }
+
+    /// Both halves of the fix, on the numbers the production device actually
+    /// had on 2026-08-17: a Max 20× subscription that the client had sized as
+    /// an unknown plan (220k/5h) and sold 239k against, so it declared itself
+    /// spent — while Anthropic's own windows read 7% of the five-hour and 54%
+    /// of the weekly.
+    ///
+    /// With the plan read from `oauth/profile` and the gate read from the
+    /// usage endpoint, the same device offers ~2M tokens instead of nothing.
+    #[tokio::test]
+    async fn the_production_account_that_was_selling_nothing_offers_its_real_capacity() {
+        let store = gated_store(238_734).await;
+        let now = now_secs();
+        // What `quota_poll::refresh_plan` writes after reading the profile.
+        store.set_setting("plan:claude:a@b.io", "max20").await.unwrap();
+        bank(
+            &store,
+            now,
+            serde_json::json!([
+                {"key":"5h","used_percent":7.0,"reset_at":now + 17_000,"window_seconds":18_000},
+                {"key":"7d","used_percent":54.0,"reset_at":now + 240_000,"window_seconds":604_800},
+            ]),
+        )
+        .await;
+        let pool = StdMutex::new(AccountPool::new(asale_client_core::Strategy::FillFirst));
+        rebuild_pool(&store, &pool).await;
+        assert_eq!(status_of(&pool), "available");
+        // 4.4M × (1 − 0.54), the weekly window being the binding one.
+        assert_eq!(quota_of(&pool), 2_024_000);
+        // And every lane of it is on the market, Opus included — nothing in
+        // this reading is scoped to a model.
+        let views = pool.lock().unwrap().lane_views(now);
+        assert!(views.iter().all(|v| v.status == "selling"), "{views:?}");
+    }
+
+    /// A reading older than the gate's horizon is not trusted to keep an
+    /// account selling: the operator's own use of the subscription is invisible
+    /// to this device, and an hour of it can spend a window outright.
+    #[tokio::test]
+    async fn a_stale_reading_falls_back_to_the_local_estimate() {
+        let store = gated_store(239_000).await;
+        let now = now_secs();
+        bank(
+            &store,
+            now - crate::commands::usage::GATE_SNAPSHOT_MAX_AGE - 60,
+            serde_json::json!([{"key":"5h","used_percent":3.0,"reset_at":now + 9_000,"window_seconds":18_000}]),
+        )
+        .await;
+        let pool = StdMutex::new(AccountPool::new(asale_client_core::Strategy::FillFirst));
+        rebuild_pool(&store, &pool).await;
+        assert_eq!(status_of(&pool), "exhausted");
     }
 }
