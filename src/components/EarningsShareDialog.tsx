@@ -101,7 +101,8 @@ export function EarningsShareDialog({ onClose }: { onClose: () => void }) {
         // released later, so "already earned" is the sum. Paid alone reports a
         // week-old invite as zero.
         amount: fmtUsdt((stats?.paid ?? 0) + (stats?.pending ?? 0)),
-        unit: referral?.unit || "USDT",
+        // Wire unit is micro_usdt; `fmtUsdt` already converted to display USDT.
+        unit: "USDT",
         period: t("share.card.periodAll"),
         stats: [
           { label: t("share.card.statInvited"), value: String(stats?.invited ?? 0) },

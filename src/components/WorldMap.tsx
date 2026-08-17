@@ -28,10 +28,14 @@ interface Hover {
   y: number;
 }
 
-/** ISO-3166 alpha-2 → regional-indicator flag emoji. "ZZ"/invalid → globe. */
+/**
+ * ISO-3166 alpha-2 → regional-indicator flag emoji. Mirrors the site's
+ * `lib/brand.tsx`: a flag is the country, and an unknown country draws nothing
+ * rather than a globe pictogram — the name sits beside it either way.
+ */
 function regionFlag(code: string): string {
   const c = code.trim().toUpperCase();
-  if (!/^[A-Z]{2}$/.test(c) || c === "ZZ") return "🌐";
+  if (!/^[A-Z]{2}$/.test(c) || c === "ZZ") return "";
   return String.fromCodePoint(...[...c].map((ch) => 0x1f1e6 + ch.charCodeAt(0) - 65));
 }
 

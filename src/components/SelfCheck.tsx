@@ -17,7 +17,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke, inTauri } from "../lib";
 import { errText } from "../errors";
-import { IconAlert, IconInfo } from "../icons";
+import { IconAlert, IconCheck, IconInfo, IconX } from "../icons";
 
 interface Finding {
   id: string;
@@ -93,10 +93,26 @@ export function SelfCheck() {
               <div className="text-sm" style={{ marginTop: 4 }}>
                 {t(`selfcheck.${f.id}.body`, f.params as Record<string, string>)}
               </div>
+              {/* The outcome mark is an icon on the same 24-grid as every other
+                  icon in the app, rather than a check character the text font
+                  draws at whatever weight and baseline it happens to have. */}
               {out?.text && (
-                <div className="text-sm" style={{ marginTop: 6, opacity: out.ok ? 1 : 0.85 }}>
-                  {out.ok ? "✓ " : "— "}
-                  {out.text}
+                <div
+                  className="text-sm"
+                  style={{
+                    marginTop: 6,
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: 6,
+                    opacity: out.ok ? 1 : 0.85,
+                  }}
+                >
+                  {out.ok ? (
+                    <IconCheck style={{ color: "var(--success)" }} />
+                  ) : (
+                    <IconX style={{ color: "var(--fg-3)" }} />
+                  )}
+                  <span>{out.text}</span>
                 </div>
               )}
             </div>
