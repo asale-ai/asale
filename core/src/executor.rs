@@ -332,13 +332,27 @@ pub trait RecordSink: Send + Sync {
 
 /// The quota headers on an upstream response, as `name -> value`.
 ///
-/// Empty for every provider that does not report its rate-limit state this way
-/// — which today is all of them but Codex, whose `x-codex-*` block is the only
-/// reading a ChatGPT bearer can get at all (`/backend-api/codex/usage` answers
-/// that credential 403).
+/// Two families, for two reasons:
+///
+///   * `x-codex-` — the only reading a ChatGPT bearer can get at all
+///     (`/backend-api/codex/usage` answers that credential 403), so serving is
+///     where Codex's numbers come from.
+///   * `x-ratelimit-` — the conventional OpenAI-style block. xAI is the one
+///     provider here whose subscription publishes no usage endpoint of its own
+///     (the `rest/rate-limits` call the Grok web app makes is authorised by a
+///     web session, not by the CLI's bearer), so whatever it volunteers on a
+///     response is the only reading available. Collected opportunistically: an
+///     upstream that sends nothing simply yields nothing, and
+///     `usage::normalize_ratelimit_headers` throws away the per-minute burst
+///     limits that would otherwise be mistaken for a spent subscription.
+///
+/// Empty for every other provider — Claude, Gemini and Kimi each answer a
+/// dedicated endpoint that costs no quota, which is a better reading than a
+/// header because it can be taken while the account is idle.
 pub fn quota_headers(provider: &str, headers: &reqwest::header::HeaderMap) -> BTreeMap<String, String> {
     let prefix = match provider {
         "codex" => "x-codex-",
+        "xai" | "xai_api" => "x-ratelimit-",
         _ => return BTreeMap::new(),
     };
     headers

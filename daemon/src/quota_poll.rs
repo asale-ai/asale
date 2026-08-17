@@ -11,14 +11,33 @@
 //!
 //! # What is polled, and what is not
 //!
-//! Claude publishes `oauth/usage`, a read that costs no subscription quota, so
-//! its accounts are asked here on a slow clock. Codex publishes nothing a
-//! ChatGPT bearer may read — its numbers only ride back on the headers of an
-//! accepted API call — so its readings keep coming from the serving path
-//! (`RecordSink::observe_quota`), which banks one per sale, per account. An
-//! idle Codex account gets no fresh reading and needs none: a window nobody is
-//! spending does not move. Buying one with a probe is what the Limits page does
-//! when a person is actually looking.
+//! Three routes, chosen by what the vendor is willing to answer — see
+//! [`usage::has_usage_endpoint`] and [`usage::live_windows`] for the shapes:
+//!
+//!   * **Read for free** — Claude (`oauth/usage`), Gemini (Code Assist's
+//!     `retrieveUserQuota`) and Kimi (`coding/v1/usages`) each answer a request
+//!     that spends no subscription quota, so their accounts are asked here on a
+//!     slow clock whether or not they are busy.
+//!   * **Bought** — Codex publishes nothing a ChatGPT bearer may read; its
+//!     numbers only ride back on the headers of an accepted API call, so its
+//!     readings come from the serving path (`RecordSink::observe_quota`), which
+//!     banks one per sale per account, and from a probe bought here when that
+//!     has gone quiet.
+//!   * **Whatever turns up** — xAI has neither: what it volunteers is an
+//!     `x-ratelimit-*` block on responses it is already serving. Those are
+//!     banked as they arrive and nothing is polled, because there is nothing to
+//!     poll. An xAI account that has never sold anything has no reading, and
+//!     the gate falls back to the local estimate exactly as it did before.
+//!
+//! An idle Codex window does not move on its own, but the account behind it is
+//! not this device's alone: the operator's own Codex CLI spends the same
+//! subscription, and nothing tells us when it does. So a reading that has gone
+//! [`usage::CODEX_SNAPSHOT_TTL`] without being refreshed by a sale is bought
+//! rather than left to expire — otherwise the gate falls off the provider's own
+//! number back onto the local estimate (this device's sales against a guessed
+//! plan cap), which is the reading that was wrong in the first place. The cost
+//! is one near-empty request per ten minutes per idle selling account, and a
+//! busy one never pays it.
 //!
 //! # Per account, never per family
 //!
@@ -28,7 +47,7 @@
 //! decide another's would take a healthy subscription off the market because a
 //! different one is spent. So every sell-enabled account is asked for itself.
 
-use crate::commands::usage::{account_quota_gate, fetch_claude_windows, record_quota_windows};
+use crate::commands::usage::{self, account_quota_gate, record_quota_windows};
 use crate::keychain;
 use crate::publisher;
 use crate::state::AppState;
@@ -59,6 +78,12 @@ const RESET_SLACK_SECS: i64 = 10;
 /// until it is answered.
 const PLAN_TTL_SECS: i64 = 6 * 3600;
 
+/// Floor on how often one Codex account may be probed, whatever the sweep is
+/// doing. The sweep drops to 30 seconds when a window is due back, and a probe
+/// costs subscription quota — this keeps a reset (or a probe that keeps
+/// failing) from turning that into a request every half minute.
+const CODEX_PROBE_MIN_GAP: i64 = 120;
+
 /// Settings key recording when the plan above was last read.
 fn plan_at_key(provider: &str, account_id: &str) -> String {
     format!("plan_at:{provider}:{account_id}")
@@ -66,7 +91,13 @@ fn plan_at_key(provider: &str, account_id: &str) -> String {
 
 /// Providers with a usage endpoint that can be read without spending quota.
 fn pollable(provider: &str) -> bool {
-    matches!(provider, "claude" | "claude_work")
+    usage::has_usage_endpoint(provider)
+}
+
+/// Providers whose reading has to be bought with a request the subscription
+/// pays for, so it is taken only once the banked one has aged out.
+fn probeable(provider: &str) -> bool {
+    provider == "codex"
 }
 
 /// When to wake next: the ordinary tick, or sooner if a spent window is due
@@ -84,7 +115,13 @@ fn next_delay(now: i64, resets: &[i64]) -> Duration {
     Duration::from_secs(soonest.clamp(30, POLL_SECS) as u64)
 }
 
-/// Re-read which plan this account is on, if it is time to.
+/// Re-read which plan this Claude account is on, if it is time to.
+///
+/// Claude-only because `oauth/profile` is Anthropic's endpoint and nobody
+/// else's. The other providers name their plan on the way past a call that is
+/// already being made — Codex's `x-codex-plan-type` header, the tier
+/// `loadCodeAssist` answers with before it names Gemini's project — so none of
+/// them needs a request of its own.
 ///
 /// Separate from the quota reading because the two age at completely different
 /// rates — utilisation moves every minute, a plan moves when somebody upgrades
@@ -156,7 +193,9 @@ async fn refresh_account(
         .ok()
         .flatten()
         .ok_or_else(|| "no OAuth token in the local secret store".to_string())?;
-    let windows = fetch_claude_windows(&token).await.map_err(|e| e.to_string())?;
+    let windows = usage::fetch_provider_windows(state, provider, account_id, &token)
+        .await
+        .map_err(|e| e.to_string())?;
     let windows = serde_json::Value::Array(windows);
     record_quota_windows(&state.store, provider, account_id, &windows).await;
     if share_with_page {
@@ -169,6 +208,12 @@ async fn refresh_account(
 /// Poll the readings, re-gate the pool, and push the result to the market.
 pub fn spawn_quota_loop(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        // When each Codex account was last asked. In memory rather than in the
+        // store because it bounds spend within one run of the daemon and a
+        // restart is welcome to buy one reading; the sweep itself can run every
+        // 30 seconds when a window is due back, and this is what keeps a probe
+        // that keeps failing from riding that clock.
+        let mut last_probe: std::collections::HashMap<String, i64> = Default::default();
         loop {
             let now = crate::commands::now_secs();
             let tools = state.store.list_tools().await.unwrap_or_default();
@@ -180,7 +225,7 @@ pub fn spawn_quota_loop(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
             // page sizes a switched-off subscription too, and this is a free
             // endpoint asked twice a day.
             let mut replan = false;
-            for tool in tools.iter().filter(|t| pollable(&t.provider)) {
+            for tool in tools.iter().filter(|t| matches!(t.provider.as_str(), "claude" | "claude_work")) {
                 replan |= refresh_plan(&state, &tool.provider, &tool.account_id, now).await;
             }
 
@@ -200,6 +245,37 @@ pub fn spawn_quota_loop(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
                         provider = %tool.provider, account = %tool.account_id,
                         "quota poll: {e}"
                     ),
+                }
+            }
+
+            // Codex: the same refresh, bought rather than read, and only for an
+            // account whose banked reading no longer gates it. A device serving
+            // Codex traffic banks one per sale for nothing and rarely gets here;
+            // an idle one pays a near-empty request every ten minutes.
+            //
+            // `account_quota_gate` rather than the timestamp alone, because a
+            // reading whose windows have all reset stops gating the moment they
+            // do — and that is exactly when a fresh one is worth buying, a
+            // minute after the reset rather than nine minutes into the next
+            // window.
+            for tool in tools.iter().filter(|t| t.sell_enabled && probeable(&t.provider)) {
+                let key = format!("{}:{}", tool.provider, tool.account_id);
+                if last_probe.get(&key).is_some_and(|t| now - t < CODEX_PROBE_MIN_GAP) {
+                    continue;
+                }
+                let banked_at = usage::quota_snapshot_at(&state.store, &tool.provider, &tool.account_id).await;
+                let current = banked_at.is_some_and(|at| now - at < usage::CODEX_SNAPSHOT_TTL)
+                    && account_quota_gate(&state.store, &tool.provider, &tool.account_id, now).await.is_some();
+                if current {
+                    continue;
+                }
+                last_probe.insert(key, now);
+                asked += 1;
+                if let Err(e) = usage::probe_codex_account(&state, &tool.provider, &tool.account_id).await {
+                    tracing::debug!(
+                        provider = %tool.provider, account = %tool.account_id,
+                        "quota probe: {e}"
+                    );
                 }
             }
 
@@ -294,5 +370,27 @@ mod tests {
         // Codex's numbers ride on the serving path; probing costs quota.
         assert!(!pollable("codex"));
         assert!(!pollable("custom"));
+    }
+
+    /// The two refresh routes are disjoint: a provider is either read for free
+    /// or bought from, never both, and a provider that reports nothing is left
+    /// alone rather than probed at a URL it does not have.
+    #[test]
+    fn codex_is_bought_from_rather_than_read() {
+        assert!(probeable("codex"));
+        assert!(!probeable("claude"));
+        assert!(!probeable("custom"));
+        for p in ["claude", "claude_work", "codex", "custom", "gemini"] {
+            assert!(!(pollable(p) && probeable(p)), "{p} would be refreshed twice a sweep");
+        }
+    }
+
+    /// The probe floor has to survive the sweep's own fast path: a window due
+    /// back in 40 seconds wakes the loop in 50, and that must not become a paid
+    /// request every 50 seconds.
+    #[test]
+    fn the_probe_floor_outlasts_the_fastest_sweep() {
+        let fastest = next_delay(NOW, &[NOW + 1]).as_secs() as i64;
+        assert!(CODEX_PROBE_MIN_GAP > fastest, "a reset would drive a probe every {fastest}s");
     }
 }

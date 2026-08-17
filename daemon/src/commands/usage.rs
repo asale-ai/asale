@@ -313,15 +313,32 @@ pub async fn usage_limits(state: &AppState, force: Option<bool>) -> R<Value> {
     Ok(json!({ "providers": providers }))
 }
 
-/// The real rate-limit windows for a provider, however that provider can be
-/// asked. Two mechanisms exist and they are not interchangeable:
+/// Whether this provider answers a usage endpoint that costs no subscription
+/// quota to read — the mechanism that can be asked while the account is idle.
 ///
-///   - Claude answers a dedicated endpoint (`oauth/usage`) on demand, so it is
-///     fetched live and cached briefly.
+/// Each is a different URL answering a different shape, normalised by its own
+/// `fetch_*_windows` below; what they have in common is the only thing this
+/// predicate is asked about: the reading is free, so it can be taken on a
+/// timer rather than bought with a request.
+pub(crate) fn has_usage_endpoint(provider: &str) -> bool {
+    matches!(provider, "claude" | "claude_work" | "gemini" | "kimi")
+}
+
+/// The real rate-limit windows for a provider, however that provider can be
+/// asked. Three mechanisms exist and they are not interchangeable:
+///
+///   - Claude, Gemini and Kimi answer a dedicated endpoint that spends no
+///     quota (`oauth/usage`, `cloudcode-pa:retrieveUserQuota`,
+///     `coding/v1/usages`), so they are fetched live and cached briefly.
 ///   - Codex has no endpoint a ChatGPT bearer may read; its numbers only ride
 ///     back on `x-codex-*` headers attached to an accepted API call. Those are
 ///     banked whenever this device serves a Codex task, and topped up by a
 ///     minimal probe when the bank is stale.
+///   - xAI has neither an endpoint nor a probe worth buying: what it
+///     volunteers is an `x-ratelimit-*` block on the responses it already
+///     serves, so its readings are banked from the serving path and never
+///     refreshed while idle. An account that has not sold anything yet reports
+///     nothing, which is the honest answer.
 ///
 /// Everything else reports nothing at all, and says so rather than quietly
 /// becoming an estimate.
@@ -334,8 +351,15 @@ pub async fn usage_limits(state: &AppState, force: Option<bool>) -> R<Value> {
 /// age, is worth more than a fresh guess.
 pub(crate) async fn live_windows(state: &AppState, provider: &str, tools: &[ToolRow], force: bool) -> LiveWindows {
     let outcome = match provider {
-        "claude" | "claude_work" => claude_windows_cached(state, provider, tools, force).await,
+        p if has_usage_endpoint(p) => endpoint_windows_cached(state, provider, tools, force).await,
         "codex" => codex_windows(state, provider, tools, force).await,
+        // xAI volunteers `x-ratelimit-*` on the responses it serves and answers
+        // nothing that could be asked while idle, so the bank is the whole
+        // mechanism — there is no probe to fall back on.
+        "xai" | "xai_api" => match banked_quota(state, provider, tools).await {
+            Some((at, windows)) => LiveWindows::Ok { windows, as_of: Some(at), stale_reason: None },
+            None => LiveWindows::Unsupported,
+        },
         _ => return LiveWindows::Unsupported,
     };
     if let LiveWindows::Failed(reason) = &outcome {
@@ -382,23 +406,23 @@ pub(crate) enum LiveWindows {
     Failed(String),
 }
 
-/// Live Claude rate-limit windows via `api.anthropic.com/api/oauth/usage`,
-/// cached per provider (60s on success — the upstream endpoint shares Claude
-/// Code's budget and 429s easily; on failure long enough that a page poll every
-/// 30s does not queue up 12-second timeouts). `force` bypasses the cache.
+/// Live rate-limit windows from a provider's own usage endpoint, cached per
+/// provider (60s on success — Claude's endpoint shares Claude Code's budget and
+/// 429s easily; on failure long enough that a page poll every 30s does not
+/// queue up 12-second timeouts). `force` bypasses the cache.
 ///
 /// A 429 waits considerably longer than other failures. It is not a transient
 /// glitch worth retrying at once — it means this account has spent the budget
-/// the endpoint shares with Claude Code, and it clears in minutes, not seconds.
-/// Re-asking every half minute could not succeed and only deepens the hole the
-/// account is already in.
-pub(crate) async fn claude_windows_cached(
+/// the endpoint shares with the vendor's own CLI, and it clears in minutes, not
+/// seconds. Re-asking every half minute could not succeed and only deepens the
+/// hole the account is already in.
+pub(crate) async fn endpoint_windows_cached(
     state: &AppState,
     provider: &str,
     tools: &[ToolRow],
     force: bool,
 ) -> LiveWindows {
-    if provider != "claude" && provider != "claude_work" {
+    if !has_usage_endpoint(provider) {
         return LiveWindows::Unsupported;
     }
     const TTL: i64 = 60;
@@ -431,7 +455,7 @@ pub(crate) async fn claude_windows_cached(
             last_err = Some(format!("{}: no OAuth token in the local secret store", account.account_id));
             continue;
         };
-        match fetch_claude_windows(&token).await {
+        match fetch_provider_windows(state, provider, &account.account_id, &token).await {
             Ok(w) => {
                 let v = Value::Array(w);
                 // Bank it: the next 429 — and on a busy account there will be
@@ -449,6 +473,27 @@ pub(crate) async fn claude_windows_cached(
             LiveWindows::Failed(reason)
         }
         None => LiveWindows::Unsupported, // no accounts in this family at all
+    }
+}
+
+/// Ask one account's provider for its own rate-limit windows, whichever
+/// endpoint that provider keeps them behind.
+///
+/// The account id is passed because Gemini's read needs somewhere per-account
+/// to remember the Code Assist project it resolved, and because the plan a
+/// provider volunteers on the way past is worth banking under the account it
+/// describes.
+pub(crate) async fn fetch_provider_windows(
+    state: &AppState,
+    provider: &str,
+    account_id: &str,
+    token: &str,
+) -> R<Vec<Value>> {
+    match provider {
+        "claude" | "claude_work" => fetch_claude_windows(token).await,
+        "gemini" => fetch_gemini_windows(state, account_id, token).await,
+        "kimi" => fetch_kimi_windows(token).await,
+        _ => Err(cmd_err!("errors.usage.noWindows", format!("{provider} publishes no usage endpoint"))),
     }
 }
 
@@ -575,7 +620,7 @@ pub fn normalize_claude_windows(body: &Value) -> Vec<Value> {
 /// How long a banked reading counts as current. Long, because refreshing it
 /// costs subscription quota and the windows it describes are hours to days
 /// wide; the Limits page reports the age either way.
-const CODEX_SNAPSHOT_TTL: i64 = 10 * 60;
+pub(crate) const CODEX_SNAPSHOT_TTL: i64 = 10 * 60;
 /// Backoff after a failed probe, so a broken upstream is not re-asked on every
 /// 30-second page poll.
 const CODEX_PROBE_FAIL_TTL: i64 = 5 * 60;
@@ -636,6 +681,7 @@ pub(crate) async fn record_quota_headers(
 ) {
     let windows = match provider {
         "codex" => normalize_codex_headers(headers, now_secs()),
+        "xai" | "xai_api" => normalize_ratelimit_headers(headers, now_secs()),
         _ => return,
     };
     record_quota_windows(store, provider, account_id, &Value::Array(windows)).await;
@@ -723,41 +769,55 @@ async fn codex_windows(state: &AppState, provider: &str, tools: &[ToolRow], forc
 async fn probe_codex_windows(state: &AppState, provider: &str, tools: &[ToolRow]) -> Result<Value, String> {
     let mut last_err: Option<String> = None;
     for tool in tools.iter().filter(|t| t.provider == provider) {
-        let key = keychain::token_ref(provider, &tool.account_id);
-        let Some(token) = keychain::get(&key).ok().flatten() else {
-            last_err = Some(format!("{}: no OAuth token in the local secret store", tool.account_id));
-            continue;
-        };
-        let account_id = asale_client_core::executor::chatgpt_account_id(&token).unwrap_or_default();
-        let model = match codex_probe_model(state, &token, &account_id).await {
-            Ok(m) => m,
-            Err(e) => {
-                last_err = Some(format!("{}: {e}", tool.account_id));
-                continue;
-            }
-        };
-        match fetch_codex_headers(&token, &account_id, &model).await {
-            Ok(headers) => {
-                let windows = normalize_codex_headers(&headers, now_secs());
-                if windows.is_empty() {
-                    last_err = Some(format!("{}: response carried no x-codex-* rate-limit headers", tool.account_id));
-                    continue;
-                }
-                record_quota_headers(&state.store, provider, &tool.account_id, &headers).await;
-                return Ok(Value::Array(windows));
-            }
-            Err(e) => {
-                // The entitled model set moves with each Codex release, so a
-                // rejected slug means the cached pick has aged out, not that the
-                // account is broken. Drop it and let the next attempt re-ask.
-                if e.contains("not supported when using Codex") {
-                    let _ = state.store.set_setting(CODEX_PROBE_MODEL_KEY, "").await;
-                }
-                last_err = Some(format!("{}: {e}", tool.account_id));
-            }
+        match probe_codex_account(state, provider, &tool.account_id).await {
+            Ok(windows) => return Ok(windows),
+            Err(e) => last_err = Some(format!("{}: {e}", tool.account_id)),
         }
     }
     Err(last_err.unwrap_or_else(|| "no codex account to ask".into()))
+}
+
+/// The same purchase, for one named account, banked under that account's key.
+///
+/// Split out from the loop above because the two callers want different things
+/// from a family of Codex logins: the Limits page shows one row per provider and
+/// stops at the first account that answers, while the sell-side gate needs each
+/// selling account's own reading — two ChatGPT logins can be two different
+/// subscriptions, and one's headroom says nothing about the other's.
+pub(crate) async fn probe_codex_account(state: &AppState, provider: &str, account_id: &str) -> Result<Value, String> {
+    let token = keychain::get(&keychain::token_ref(provider, account_id))
+        .ok()
+        .flatten()
+        .ok_or_else(|| "no OAuth token in the local secret store".to_string())?;
+    let chatgpt_id = asale_client_core::executor::chatgpt_account_id(&token).unwrap_or_default();
+    let model = codex_probe_model(state, &token, &chatgpt_id).await?;
+    let headers = match fetch_codex_headers(&token, &chatgpt_id, &model).await {
+        Ok(h) => h,
+        Err(e) => {
+            // The entitled model set moves with each Codex release, so a
+            // rejected slug means the cached pick has aged out, not that the
+            // account is broken. Drop it and let the next attempt re-ask.
+            if e.contains("not supported when using Codex") {
+                let _ = state.store.set_setting(CODEX_PROBE_MODEL_KEY, "").await;
+            }
+            return Err(e);
+        }
+    };
+    let windows = normalize_codex_headers(&headers, now_secs());
+    if windows.is_empty() {
+        return Err("response carried no x-codex-* rate-limit headers".into());
+    }
+    record_quota_headers(&state.store, provider, account_id, &headers).await;
+    Ok(Value::Array(windows))
+}
+
+/// When this account's banked reading was taken, if it has one at all.
+///
+/// Cheaper than [`account_quota_gate`] and answers a different question: not
+/// "what may this account still sell" but "is it time to buy a fresh reading".
+pub(crate) async fn quota_snapshot_at(store: &LocalStore, provider: &str, account_id: &str) -> Option<i64> {
+    let raw = store.get_setting(&quota_snapshot_key(provider, account_id)).await.ok().flatten()?;
+    serde_json::from_str::<Value>(&raw).ok()?.get("at").and_then(Value::as_i64)
 }
 
 /// Cached slug for the probe request.
@@ -808,6 +868,15 @@ async fn fetch_codex_headers(
     let status = resp.status();
     let headers = asale_client_core::executor::quota_headers("codex", resp.headers());
     if !status.is_success() {
+        // A 429 *is* a reading. The refusal carries the same `x-codex-*`
+        // headers an accepted call would, and "spent, back at 14:20" is exactly
+        // what was being asked for — treating it as a failed probe would leave
+        // the one account that most needs a fresh number stuck on the local
+        // estimate, which thinks the window is free. Any other status is just a
+        // failure.
+        if status.as_u16() == 429 && headers.contains_key("x-codex-primary-used-percent") {
+            return Ok(headers);
+        }
         let body = resp.text().await.unwrap_or_default();
         let detail: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
         let msg = detail
@@ -873,6 +942,486 @@ fn window_label(seconds: i64) -> String {
     }
 }
 
+// ── Gemini (Code Assist) ────────────────────────────────────────────────────
+//
+// The Gemini login this client performs is gemini-cli's own installed-app
+// OAuth, which means the subscription behind it is Code Assist — and Code
+// Assist answers `:retrieveUserQuota` with the very buckets gemini-cli's quota
+// display reads. It spends no model quota, so it is polled on a timer like
+// Claude's rather than bought like Codex's.
+//
+// The call is addressed to a project, which `:loadCodeAssist` is what answers
+// with: a Google-managed one on the free tier, the operator's own on a paid
+// one. That value is stable for months, so it is resolved once per account and
+// remembered — re-asking every poll would double the request count for a string
+// that only changes when somebody moves projects.
+
+/// Code Assist's private API, the surface gemini-cli itself calls.
+const CODE_ASSIST: &str = "https://cloudcode-pa.googleapis.com/v1internal";
+
+/// Settings key holding the resolved Code Assist project for an account.
+fn gemini_project_key(account_id: &str) -> String {
+    format!("gemini_project:{account_id}")
+}
+
+/// One Code Assist call. The methods are `:`-suffixed RPC names, not paths.
+async fn code_assist_post(token: &str, method: &str, body: Value) -> R<Value> {
+    let resp = asale_client_core::http::upstream()
+        .post(format!("{CODE_ASSIST}:{method}"))
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .header("user-agent", "gemini-cli/1.0")
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(12))
+        .send()
+        .await
+        .map_err(|e| {
+            cmd_err!(
+                "errors.usage.upstreamUnreachable",
+                format!("request to cloudcode-pa.googleapis.com failed: {e}"),
+                detail = e.to_string()
+            )
+        })?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        let msg = body
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .chars()
+            .take(200)
+            .collect::<String>();
+        return Err(cmd_err!(
+            "errors.usage.upstreamStatus",
+            format!("HTTP {status} {msg}"),
+            status = status.as_u16(),
+            detail = msg
+        ));
+    }
+    resp.json().await.map_err(|e| {
+        cmd_err!("errors.usage.unreadable", format!("unreadable {method} response: {e}"), detail = e.to_string())
+    })
+}
+
+/// The Code Assist project this account is onboarded onto, resolved once.
+///
+/// Banks the tier on the way past. Gemini's OAuth exchange carries no plan
+/// either — the same gap that sized every Claude login as the lowest paid tier
+/// — and `loadCodeAssist` is the one call that names it, so reading it here
+/// costs nothing and re-sizes the account's declared capacity.
+async fn gemini_project(state: &AppState, account_id: &str, token: &str) -> R<String> {
+    let key = gemini_project_key(account_id);
+    if let Some(p) = state.store.get_setting(&key).await.ok().flatten().filter(|s| !s.is_empty()) {
+        return Ok(p);
+    }
+    let body = code_assist_post(
+        token,
+        "loadCodeAssist",
+        json!({ "metadata": { "ideType": "IDE_UNSPECIFIED", "platform": "PLATFORM_UNSPECIFIED", "pluginType": "GEMINI" } }),
+    )
+    .await?;
+    // The paid tier's name is the one that says "Pro" or "Ultra"; the current
+    // tier's id (`free-tier`, `standard-tier`) is the fallback that at least
+    // separates a free login from a paid one.
+    let plan = body
+        .pointer("/paidTier/name")
+        .or_else(|| body.pointer("/currentTier/name"))
+        .or_else(|| body.pointer("/currentTier/id"))
+        .and_then(Value::as_str);
+    if let Some(plan) = plan.filter(|s| !s.is_empty()) {
+        let _ = state.store.set_setting(&format!("plan:gemini:{account_id}"), plan).await;
+    }
+    let project = body
+        .get("cloudaicompanionProject")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            cmd_err!("errors.usage.noWindows", "loadCodeAssist named no Code Assist project for this account")
+        })?
+        .to_string();
+    let _ = state.store.set_setting(&key, &project).await;
+    Ok(project)
+}
+
+/// Fetch + normalize Gemini's Code Assist quota buckets.
+///
+/// A project that has gone stale (the account moved, the managed project was
+/// re-issued) surfaces as a failure on the second call rather than the first,
+/// so the cached value is dropped on any failure there and the next poll
+/// re-resolves it. Cheaper than validating it every time, and self-healing.
+pub(crate) async fn fetch_gemini_windows(state: &AppState, account_id: &str, token: &str) -> R<Vec<Value>> {
+    let project = gemini_project(state, account_id, token).await?;
+    let body = match code_assist_post(token, "retrieveUserQuota", json!({ "project": project })).await {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = state.store.set_setting(&gemini_project_key(account_id), "").await;
+            return Err(e);
+        }
+    };
+    let windows = normalize_gemini_buckets(&body);
+    if windows.is_empty() {
+        Err(cmd_err!("errors.usage.noWindows", "retrieveUserQuota returned no quota buckets"))
+    } else {
+        Ok(windows)
+    }
+}
+
+/// Map `retrieveUserQuota`'s buckets onto our LimitWindow shape.
+///
+/// Code Assist reports headroom as a *remaining* fraction, and per model: one
+/// bucket for Pro, one for Flash, and so on. That maps onto the scoped windows
+/// Anthropic uses for Opus — a spent Pro bucket must take Pro off the market
+/// and leave Flash selling — so a bucket naming a model becomes `ws_<model>`.
+///
+/// A synthetic account-wide window is added when every bucket is model-scoped,
+/// which is the usual answer. Without one the gate has nothing that applies to
+/// the whole subscription and falls back to the local estimate, which is the
+/// reading this whole path exists to replace. It takes the *most generous*
+/// bucket: an account whose Pro quota is gone still has Flash to sell, and only
+/// when the last bucket empties is the subscription really spent.
+pub fn normalize_gemini_buckets(body: &Value) -> Vec<Value> {
+    let Some(buckets) = body.get("buckets").and_then(Value::as_array) else { return Vec::new() };
+    let mut out = Vec::new();
+    let mut account_wide = false;
+    let mut freest: Option<(f64, Option<Value>)> = None;
+    for b in buckets {
+        // `remainingFraction` is the field gemini-cli's own display reads; the
+        // amount beside it is a count whose denominator is not published, so it
+        // cannot be turned into a percentage on its own.
+        let Some(free) = b.get("remainingFraction").and_then(Value::as_f64) else { continue };
+        let used = ((1.0 - free) * 100.0).clamp(0.0, 100.0);
+        let reset = b.get("resetTime").cloned().filter(|v| !v.is_null());
+        // Code Assist's individual quotas roll over daily; the reset instant is
+        // published but its window length is not, and the UI needs one to draw
+        // a pace marker against.
+        let seconds = 86_400;
+        match b.get("modelId").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            Some(model) => {
+                if freest.as_ref().is_none_or(|(prev, _)| free > *prev) {
+                    freest = Some((free, reset.clone()));
+                }
+                out.push(json!({
+                    "key": format!("ws_{model}"), "label": format!("1d {model}"),
+                    "used_percent": used, "reset_at": reset, "window_seconds": seconds,
+                }));
+            }
+            None => {
+                account_wide = true;
+                out.push(json!({
+                    "key": window_label(seconds), "label": window_label(seconds),
+                    "used_percent": used, "reset_at": reset, "window_seconds": seconds,
+                }));
+            }
+        }
+    }
+    if !account_wide {
+        if let Some((free, reset)) = freest {
+            out.push(json!({
+                "key": window_label(86_400), "label": window_label(86_400),
+                "used_percent": ((1.0 - free) * 100.0).clamp(0.0, 100.0),
+                "reset_at": reset, "window_seconds": 86_400,
+            }));
+        }
+    }
+    out
+}
+
+// ── Kimi Code ───────────────────────────────────────────────────────────────
+//
+// Kimi Code publishes `coding/v1/usages` — the numbers `kimi-cli`'s own
+// `/usage` command prints — and reading it costs no quota, so it is polled.
+//
+// Its windows are counted in *requests* rather than tokens, which the gate
+// handles because it works in fractions of a window and never in absolute
+// headroom: "62% of the 5h window is gone" decides exactly as well whether this
+// account should keep selling, whatever the unit behind it.
+
+/// Fetch + normalize Kimi Code's usage windows.
+pub(crate) async fn fetch_kimi_windows(token: &str) -> R<Vec<Value>> {
+    // `/usages` is the current spelling; older deployments answer `/usage` and
+    // 404 the plural. Only a 404 falls through to the singular — a 401 means
+    // the credential is wrong at both spellings, and asking twice would double
+    // the traffic of every poll on an account that is simply logged out.
+    let body = match kimi_usage_body(token, "https://api.kimi.com/coding/v1/usages").await {
+        Ok(body) => body,
+        Err(e) if e.message.contains("HTTP 404") => {
+            kimi_usage_body(token, "https://api.kimi.com/coding/v1/usage").await?
+        }
+        Err(e) => return Err(e),
+    };
+    let windows = normalize_kimi_usage(&body);
+    if windows.is_empty() {
+        Err(cmd_err!("errors.usage.noWindows", "the usage endpoint returned no rate-limit windows"))
+    } else {
+        Ok(windows)
+    }
+}
+
+async fn kimi_usage_body(token: &str, url: &str) -> R<Value> {
+    let resp = asale_client_core::http::upstream()
+        .get(url)
+        .header("authorization", format!("Bearer {token}"))
+        .header("accept", "application/json")
+        .header("user-agent", "kimi-cli/1.0")
+        .timeout(std::time::Duration::from_secs(12))
+        .send()
+        .await
+        .map_err(|e| {
+            cmd_err!(
+                "errors.usage.upstreamUnreachable",
+                format!("request to api.kimi.com failed: {e}"),
+                detail = e.to_string()
+            )
+        })?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        let msg = body
+            .pointer("/error/message")
+            .or_else(|| body.pointer("/message"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .chars()
+            .take(200)
+            .collect::<String>();
+        return Err(cmd_err!(
+            "errors.usage.upstreamStatus",
+            format!("HTTP {status} {msg}"),
+            status = status.as_u16(),
+            detail = msg
+        ));
+    }
+    resp.json().await.map_err(|e| {
+        cmd_err!("errors.usage.unreadable", format!("unreadable usage response: {e}"), detail = e.to_string())
+    })
+}
+
+/// Map a Kimi Code usage body onto our LimitWindow shape.
+///
+/// Two shapes are in the wild and the endpoint answers whichever its deployment
+/// speaks, so both are read:
+///
+///   * `{"data":[{"model_name":"all","used":..,"limit":..,"resetTime":..}]}` —
+///     one row per scope, `all` being the subscription-wide one.
+///   * `{"usage":{..},"limits":[{"window":{"duration":5,"timeUnit":"HOUR"},
+///     "detail":{"used":..,"limit":..}}]}` — a summary plus one row per window.
+///
+/// Everything either shape can be missing is: a row with no limit to divide by
+/// is dropped rather than reported as 0%, which would read as a free window.
+pub fn normalize_kimi_usage(body: &Value) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut push = |key: String, label: String, used: f64, limit: f64, reset: Option<Value>, secs: i64| {
+        if limit <= 0.0 {
+            return;
+        }
+        out.push(json!({
+            "key": key, "label": label,
+            "used_percent": (used / limit * 100.0).clamp(0.0, 100.0),
+            "reset_at": reset, "window_seconds": secs,
+        }));
+    };
+    // `used` is not always sent; `limit - remaining` is the same number.
+    let used_of = |v: &Value| -> Option<f64> {
+        let limit = num_field(v, &["limit", "limit_amount", "total", "totalQueries"]);
+        let used = num_field(v, &["used", "used_amount", "usage"]).or_else(|| {
+            let remaining = num_field(v, &["remaining", "remainingQueries", "remaining_amount"])?;
+            Some(limit? - remaining)
+        })?;
+        Some(used)
+    };
+
+    if let Some(rows) = body.get("data").and_then(Value::as_array) {
+        for row in rows {
+            let Some(limit) = num_field(row, &["limit", "limit_amount", "total", "totalQueries"]) else { continue };
+            let Some(used) = used_of(row) else { continue };
+            let secs = kimi_window_seconds(row).unwrap_or(604_800);
+            let reset = kimi_reset(row);
+            match row.get("model_name").and_then(Value::as_str) {
+                // The subscription-wide row. Everything else is one model's own
+                // allowance, which is a scope block rather than a gate.
+                Some("all") | None => push(window_label(secs), window_label(secs), used, limit, reset, secs),
+                Some(model) => {
+                    push(format!("ws_{model}"), format!("{} {model}", window_label(secs)), used, limit, reset, secs)
+                }
+            }
+        }
+    }
+    if let Some(rows) = body.get("limits").and_then(Value::as_array) {
+        for row in rows {
+            let detail = row.get("detail").filter(|v| v.is_object()).unwrap_or(row);
+            let Some(limit) = num_field(detail, &["limit", "limit_amount", "total", "totalQueries"]) else { continue };
+            let Some(used) = used_of(detail) else { continue };
+            let secs = kimi_window_seconds(row.get("window").unwrap_or(row)).unwrap_or(18_000);
+            push(window_label(secs), window_label(secs), used, limit, kimi_reset(detail).or_else(|| kimi_reset(row)), secs);
+        }
+    }
+    out
+}
+
+/// First of `names` that holds a number, however the vendor spelled it — some
+/// deployments send these as strings.
+fn num_field(v: &Value, names: &[&str]) -> Option<f64> {
+    names.iter().find_map(|n| match v.get(*n) {
+        Some(Value::Number(n)) => n.as_f64(),
+        Some(Value::String(s)) => s.parse().ok(),
+        _ => None,
+    })
+}
+
+/// A Kimi window's length, from the `duration` + `timeUnit` pair its limit rows
+/// carry.
+fn kimi_window_seconds(v: &Value) -> Option<i64> {
+    let duration = num_field(v, &["duration", "window_duration"])? as i64;
+    if duration <= 0 {
+        return None;
+    }
+    let unit = v
+        .get("timeUnit")
+        .or_else(|| v.get("time_unit"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    let per = if unit.contains("MINUTE") {
+        60
+    } else if unit.contains("HOUR") {
+        3_600
+    } else if unit.contains("DAY") {
+        86_400
+    } else if unit.contains("WEEK") {
+        604_800
+    } else if unit.contains("MONTH") {
+        30 * 86_400
+    } else if unit.contains("SECOND") {
+        1
+    } else {
+        return None;
+    };
+    Some(duration * per)
+}
+
+/// A Kimi reset instant, as an absolute value our window shape can carry —
+/// either the timestamp the row states or the offset it counts down.
+fn kimi_reset(v: &Value) -> Option<Value> {
+    if let Some(t) = v.get("resetTime").or_else(|| v.get("reset_at")).or_else(|| v.get("reset_time")) {
+        if !t.is_null() {
+            return Some(t.clone());
+        }
+    }
+    let secs = num_field(v, &["reset_in", "resetIn", "reset_after_seconds"])?;
+    Some(json!(now_secs() + secs as i64))
+}
+
+// ── OpenAI-style rate-limit headers (xAI) ───────────────────────────────────
+
+/// Below this, a window is a burst limit rather than a subscription window.
+///
+/// The `x-ratelimit-*` block covers both: the same three header names describe
+/// "60 requests a minute" and "your weekly allowance", and only the reset
+/// horizon separates them. Reading a per-minute limit as a subscription window
+/// would take an account off the market for being *busy*, which is the opposite
+/// of what the gate is for — so short windows are reported to nobody.
+const BURST_WINDOW_SECS: i64 = 15 * 60;
+
+/// Map an OpenAI-style `x-ratelimit-*` block onto our LimitWindow shape.
+///
+/// Both dimensions are kept where both are sent: requests and tokens run out
+/// independently, and the gate takes whichever is tighter.
+pub fn normalize_ratelimit_headers(h: &BTreeMap<String, String>, now: i64) -> Vec<Value> {
+    let mut out = Vec::new();
+    for dim in ["requests", "tokens"] {
+        let num = |k: String| -> Option<f64> { h.get(&k)?.parse::<f64>().ok() };
+        let Some(limit) = num(format!("x-ratelimit-limit-{dim}")) else { continue };
+        let Some(remaining) = num(format!("x-ratelimit-remaining-{dim}")) else { continue };
+        if limit <= 0.0 {
+            continue;
+        }
+        let Some(reset_at) = h.get(&format!("x-ratelimit-reset-{dim}")).and_then(|s| parse_reset_field(s, now)) else {
+            continue;
+        };
+        let horizon = reset_at - now;
+        if horizon < BURST_WINDOW_SECS {
+            continue;
+        }
+        let seconds = window_from_horizon(horizon);
+        out.push(json!({
+            // Keyed by duration like every other provider's account-wide window
+            // — the two dimensions usually share a reset, so they usually share
+            // a key, and the gate takes whichever of them is tighter. The label
+            // is what tells them apart on the page.
+            "key": window_label(seconds), "label": format!("{} {dim}", window_label(seconds)),
+            "used_percent": ((limit - remaining) / limit * 100.0).clamp(0.0, 100.0),
+            "reset_at": reset_at, "window_seconds": seconds,
+        }));
+    }
+    out
+}
+
+/// The window a reset horizon most likely belongs to.
+///
+/// The header block says when the allowance comes back, never how wide it is —
+/// a weekly pool read on a Wednesday reports three days. Naming the window
+/// after that would relabel the same window every hour, so the horizon is
+/// rounded up onto the ladder of durations vendors actually use. It is an
+/// inference and only the *label* and the pace marker rest on it; the
+/// utilisation and the reset instant either side of it are the vendor's own.
+fn window_from_horizon(horizon: i64) -> i64 {
+    const LADDER: [i64; 5] = [3_600, 18_000, 86_400, 604_800, 30 * 86_400];
+    LADDER.into_iter().find(|w| *w >= horizon).unwrap_or(30 * 86_400)
+}
+
+/// An `x-ratelimit-reset-*` value as an absolute instant.
+///
+/// Three spellings are in circulation and they are not distinguishable by
+/// anything but magnitude and suffix: a unix timestamp, a bare number of
+/// seconds from now, and OpenAI's duration string (`6m0s`, `1h30m`, `250ms`).
+fn parse_reset_field(raw: &str, now: i64) -> Option<i64> {
+    let s = raw.trim();
+    if let Ok(n) = s.parse::<f64>() {
+        let n = n as i64;
+        // A plain number is a unix instant if it lands anywhere near now, and a
+        // relative offset otherwise. Nothing sends a window a decade wide.
+        return Some(if n > now / 2 { n } else { now + n });
+    }
+    let mut total = 0f64;
+    let mut num = String::new();
+    let mut unit = String::new();
+    let flush = |num: &mut String, unit: &mut String, total: &mut f64| -> bool {
+        if num.is_empty() {
+            return unit.is_empty();
+        }
+        let Ok(v) = num.parse::<f64>() else { return false };
+        let per = match unit.as_str() {
+            "ms" => 0.001,
+            "s" | "" => 1.0,
+            "m" => 60.0,
+            "h" => 3_600.0,
+            "d" => 86_400.0,
+            _ => return false,
+        };
+        *total += v * per;
+        num.clear();
+        unit.clear();
+        true
+    };
+    for c in s.chars() {
+        if c.is_ascii_digit() || c == '.' {
+            if !unit.is_empty() && !flush(&mut num, &mut unit, &mut total) {
+                return None;
+            }
+            num.push(c);
+        } else if c.is_ascii_alphabetic() {
+            unit.push(c.to_ascii_lowercase());
+        } else {
+            return None;
+        }
+    }
+    if !flush(&mut num, &mut unit, &mut total) || total <= 0.0 {
+        return None;
+    }
+    Some(now + total.round() as i64)
+}
+
 /// LIKE-prefix used to attribute local publisher usage to a provider family
 /// (mirrors `publisher::provider_model_prefix`).
 pub(crate) fn provider_model_prefix(provider: &str) -> Option<&'static str> {
@@ -880,6 +1429,8 @@ pub(crate) fn provider_model_prefix(provider: &str) -> Option<&'static str> {
         "claude" | "claude_work" => Some("claude"),
         "gemini" => Some("gemini"),
         "codex" => Some("gpt"),
+        "kimi" | "kimi_api" => Some("kimi"),
+        "xai" | "xai_api" => Some("grok"),
         _ => None,
     }
 }
@@ -983,6 +1534,10 @@ mod tests {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
     }
 
+    /// 2026-08-17T07:24:19Z — before every reset instant used below, so a
+    /// window is never skipped for having already rolled over.
+    const NOW: i64 = 1_786_951_459;
+
     /// A real Plus account's header block: the primary window is the weekly
     /// one and the secondary is unset. Labelling the pair "5h" and "24h" — what
     /// the served-vs-cap estimate reports — would have named both wrong.
@@ -1036,5 +1591,180 @@ mod tests {
     #[test]
     fn codex_headerless_response_yields_no_windows() {
         assert!(normalize_codex_headers(&headers(&[("content-type", "application/json")]), 0).is_empty());
+    }
+
+    /// Whether the gate can read a window at all is decided by its key, so a
+    /// normaliser that spells one wrong produces numbers the Limits page shows
+    /// and the gate silently ignores. Every provider's account-wide key has to
+    /// survive the round trip into [`asale_client_core::quota`].
+    fn gate_of(windows: &[Value], now: i64) -> Option<asale_client_core::quota::QuotaGate> {
+        asale_client_core::quota::gate_from_windows(windows, now)
+    }
+
+    /// Code Assist reports headroom as a *remaining* fraction, per model. The
+    /// per-model buckets are scope blocks, and the account-wide window the gate
+    /// needs is synthesised from the roomiest of them — an account whose Pro
+    /// quota is spent can still sell Flash.
+    #[test]
+    fn gemini_buckets_become_scoped_windows_plus_one_account_wide() {
+        let body = json!({ "buckets": [
+            { "modelId": "gemini-3-pro", "remainingFraction": 0.0, "resetTime": "2026-08-18T00:00:00Z" },
+            { "modelId": "gemini-3-flash", "remainingFraction": 0.75, "resetTime": "2026-08-18T00:00:00Z" },
+        ]});
+        let w = normalize_gemini_buckets(&body);
+        let keys: Vec<&str> = w.iter().map(|x| x["key"].as_str().unwrap()).collect();
+        assert_eq!(keys, ["ws_gemini-3-pro", "ws_gemini-3-flash", "1d"]);
+        assert_eq!(w[0]["used_percent"], 100.0);
+        assert_eq!(w[1]["used_percent"], 25.0);
+
+        let gate = gate_of(&w, NOW).expect("the synthetic account-wide window feeds the gate");
+        assert!(!gate.exhausted(), "Flash is still sellable");
+        assert_eq!(gate.headroom, 0.75);
+        // Pro is spent, and only Pro.
+        assert!(gate.scope_block("gemini-3-pro").is_some());
+        assert!(gate.scope_block("gemini-3-flash").is_none());
+    }
+
+    /// An account-wide bucket is used as-is rather than synthesised over.
+    #[test]
+    fn a_gemini_account_wide_bucket_is_not_duplicated() {
+        let body = json!({ "buckets": [
+            { "remainingFraction": 0.4, "resetTime": "2026-08-18T00:00:00Z" },
+            { "modelId": "gemini-3-pro", "remainingFraction": 0.9 },
+        ]});
+        let w = normalize_gemini_buckets(&body);
+        assert_eq!(w.iter().filter(|x| x["key"] == "1d").count(), 1);
+        assert_eq!(gate_of(&w, NOW).unwrap().headroom, 0.4);
+    }
+
+    /// A body with no readable fraction must not read as a free window.
+    #[test]
+    fn gemini_without_fractions_yields_no_windows() {
+        assert!(normalize_gemini_buckets(&json!({ "buckets": [{ "modelId": "x" }] })).is_empty());
+        assert!(normalize_gemini_buckets(&json!({ "error": { "code": 403 } })).is_empty());
+    }
+
+    /// Kimi's newer shape: one row per scope, `all` being the subscription-wide
+    /// one. Its numbers are request counts, which the gate reads as a fraction
+    /// like any other.
+    #[test]
+    fn kimi_data_rows_split_account_wide_from_per_model() {
+        let body = json!({ "data": [
+            { "model_name": "all", "used": 620, "limit": 1000, "resetTime": "2026-08-24T00:00:00Z",
+              "duration": 7, "timeUnit": "DAY" },
+            { "model_name": "kimi-k2.7", "used": 300, "limit": 300, "duration": 5, "timeUnit": "HOUR",
+              "reset_in": 3600 },
+        ]});
+        let w = normalize_kimi_usage(&body);
+        assert_eq!(w[0]["key"], "7d");
+        assert_eq!(w[0]["used_percent"], 62.0);
+        assert_eq!(w[1]["key"], "ws_kimi-k2.7");
+        assert_eq!(w[1]["window_seconds"], 18_000);
+
+        let gate = gate_of(&w, NOW).unwrap();
+        assert_eq!(gate.tightest, "7d");
+        assert!(gate.scope_block("kimi-k2.7-turbo").is_some(), "a spent model window blocks that model");
+    }
+
+    /// Kimi's other shape: a `limits` array of `{window, detail}` pairs, with
+    /// the used count left to be derived from what remains.
+    #[test]
+    fn kimi_limit_rows_derive_usage_from_the_remainder() {
+        let body = json!({ "limits": [
+            { "window": { "duration": 300, "timeUnit": "MINUTES" },
+              "detail": { "limit": 400, "remaining": 100, "reset_in": 1800 } },
+        ]});
+        let w = normalize_kimi_usage(&body);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0]["key"], "5h");
+        assert_eq!(w[0]["used_percent"], 75.0);
+        assert_eq!(w[0]["window_seconds"], 18_000);
+    }
+
+    /// A row with nothing to divide by is dropped: 0/0 would report a free
+    /// window on an account nobody can read.
+    #[test]
+    fn kimi_rows_without_a_limit_are_dropped() {
+        assert!(normalize_kimi_usage(&json!({ "data": [{ "model_name": "all", "used": 5 }] })).is_empty());
+        assert!(normalize_kimi_usage(&json!({ "data": [{ "limit": 0, "used": 0 }] })).is_empty());
+        assert!(normalize_kimi_usage(&json!({ "message": "unauthorized" })).is_empty());
+    }
+
+    /// xAI's block, if it sends one. The weekly allowance is a window worth
+    /// gating on; the per-minute burst limit beside it is not, and reading it
+    /// as one would pull a *busy* account off the market.
+    #[test]
+    fn a_burst_limit_is_not_mistaken_for_a_spent_subscription() {
+        let w = normalize_ratelimit_headers(
+            &headers(&[
+                ("x-ratelimit-limit-requests", "1000"),
+                ("x-ratelimit-remaining-requests", "250"),
+                ("x-ratelimit-reset-requests", "3d12h"),
+                ("x-ratelimit-limit-tokens", "60"),
+                ("x-ratelimit-remaining-tokens", "1"),
+                ("x-ratelimit-reset-tokens", "6s"),
+            ]),
+            NOW,
+        );
+        assert_eq!(w.len(), 1, "the 6-second token window is a burst limit");
+        assert_eq!(w[0]["used_percent"], 75.0);
+        assert_eq!(w[0]["reset_at"], NOW + 3 * 86_400 + 12 * 3_600);
+        // Three and a half days left is a weekly pool part-spent, not a
+        // three-and-a-half-day window.
+        assert_eq!(w[0]["key"], "7d");
+        assert_eq!(w[0]["label"], "7d requests");
+        assert_eq!(gate_of(&w, NOW).unwrap().headroom, 0.25);
+    }
+
+    /// The horizon a header reports shrinks all week; the window it belongs to
+    /// does not. Rounding up onto the ladder is what keeps one window from
+    /// being relabelled every hour.
+    #[test]
+    fn a_reset_horizon_is_rounded_up_to_a_window_vendors_actually_use() {
+        assert_eq!(window_from_horizon(1_800), 3_600);
+        assert_eq!(window_from_horizon(3_600), 3_600);
+        assert_eq!(window_from_horizon(4_000), 18_000);
+        assert_eq!(window_from_horizon(80_000), 86_400);
+        assert_eq!(window_from_horizon(302_400), 604_800);
+        // Nothing sends a wider one; a month is the last rung rather than a
+        // number that grows without bound.
+        assert_eq!(window_from_horizon(999 * 86_400), 30 * 86_400);
+    }
+
+    /// The three spellings of a reset field that are in circulation, none of
+    /// which is distinguishable from the others by anything but its shape.
+    #[test]
+    fn a_reset_field_is_read_as_absolute_or_relative_by_magnitude() {
+        // Unix instant.
+        assert_eq!(parse_reset_field("1786951999", NOW), Some(1_786_951_999));
+        // Seconds from now.
+        assert_eq!(parse_reset_field("1800", NOW), Some(NOW + 1800));
+        // Go-style durations.
+        assert_eq!(parse_reset_field("6m0s", NOW), Some(NOW + 360));
+        assert_eq!(parse_reset_field("1h30m", NOW), Some(NOW + 5400));
+        assert_eq!(parse_reset_field("250ms", NOW), Some(NOW));
+        assert_eq!(parse_reset_field("", NOW), None);
+        assert_eq!(parse_reset_field("soon", NOW), None);
+    }
+
+    /// A response with no rate-limit block must not read as "0% used".
+    #[test]
+    fn ratelimit_headerless_response_yields_no_windows() {
+        assert!(normalize_ratelimit_headers(&headers(&[("content-type", "application/json")]), NOW).is_empty());
+        // Half a block is not a window either.
+        assert!(normalize_ratelimit_headers(&headers(&[("x-ratelimit-limit-requests", "100")]), NOW).is_empty());
+    }
+
+    /// Which providers can be asked while idle, and which can only be listened
+    /// to. Getting this wrong either wastes a request on an endpoint that does
+    /// not exist or leaves a readable account on the local estimate.
+    #[test]
+    fn only_providers_with_a_free_endpoint_are_asked() {
+        for p in ["claude", "claude_work", "gemini", "kimi"] {
+            assert!(has_usage_endpoint(p), "{p} answers a free usage endpoint");
+        }
+        for p in ["codex", "xai", "xai_api", "kimi_api", "custom"] {
+            assert!(!has_usage_endpoint(p), "{p} has nothing free to read");
+        }
     }
 }

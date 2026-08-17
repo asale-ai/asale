@@ -137,9 +137,16 @@ pub fn plan_window_cap(provider: Provider, plan: Option<&str>) -> u64 {
         // Kimi Code and the Grok CLI subscription publish no token allowance —
         // their limits are expressed as requests over a window, not tokens —
         // and the platform APIs are metered against a balance rather than
-        // capped at all. Neither can be asked about, so this is a deliberately
-        // conservative window; the per-account daily cap on the Sell page is
-        // the control that actually matters for these four.
+        // capped at all. So this is a deliberately conservative window; the
+        // per-account daily cap on the Sell page is the control that actually
+        // matters for these four.
+        //
+        // Their *utilisation* is a separate question with a better answer:
+        // `commands::usage` reads Kimi's own `coding/v1/usages` and banks
+        // whatever xAI volunteers on `x-ratelimit-*`, and the gate works in
+        // fractions of a window, so a request-counted percentage decides
+        // whether to keep selling just as well as a token-counted one. This
+        // number only sizes the offer once that decision is made.
         Provider::Kimi | Provider::KimiApi | Provider::Xai | Provider::XaiApi => 500_000,
         // A custom endpoint has no rolling window to estimate: it is a metered
         // key against somebody's balance, and the estimate exists to keep a

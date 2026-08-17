@@ -1176,7 +1176,8 @@
       "alreadyRunning": "A verification of this lane is already running.",
       "badProvider": "Unknown provider.",
       "notYourDevice": "That device is not on this account.",
-      "laneUnreachable": "The platform could not get an answer from this lane through the market ({{status}}), so nothing was verified. Either it was not on sale at that moment, or its upstream account refused the request — check the model's state above and try again."
+      "laneUnreachable": "The platform could not get an answer from this lane through the market ({{status}}), so nothing was verified. Either it was not on sale at that moment, or its upstream account refused the request — check the model's state above and try again.",
+      "laneWithdrawnMidRun": "The lane stopped being offered part-way through the run, so it was cut short and nothing was verified. Put the model back on sale and try again."
     }
   },
   "tray": {
