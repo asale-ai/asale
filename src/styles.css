@@ -16,6 +16,58 @@
    <html data-theme="light">.
    ========================================================================== */
 
+/* ── The typeface ───────────────────────────────────────────────────────────
+   Geist, variable, bundled — the same four files and the same four rules the
+   site ships (`asale-web/src/app/globals.css`). Rule 1 above asks for 400 / 500
+   / 600, and a system UI face answers 500 and 600 with whatever it happens to
+   have; the app's numbers are the other half of it, and `ui-monospace` is SF
+   Mono on macOS, Consolas on Windows and Liberation Mono on Linux — three
+   different digit widths for a wallet.
+
+   Bundled rather than fetched: this is a desktop app that has to render before
+   it has a network, and its build machines cannot reach Google anyway.
+   ────────────────────────────────────────────────────────────────────────── */
+@font-face {
+  font-family: Geist;
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/geist-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: Geist;
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/geist-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Geist Mono";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/geist-mono-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Geist Mono";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/geist-mono-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
 /* ── Tokens ─────────────────────────────────────────────────────────────── */
 :root,
 :root[data-theme="dark"] {
@@ -127,8 +179,19 @@
   --ring: 0 0 0 3px var(--accent-soft);
   --content-w: 980px;
 
-  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", system-ui, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  --font: Geist, -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+}
+
+/* Native CJK faces behind Geist, matching the site. A stack resolves per glyph,
+   so Latin runs — model slugs, figures, `USD` — keep the bundled face and only
+   the ideographs fall through. Keyed on `<html lang>`, which `setLanguage`
+   keeps in step with the chosen locale. */
+html:lang(zh), html:lang(zh-TW) {
+  --font: Geist, "PingFang SC", "PingFang TC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+}
+html:lang(ja) {
+  --font: Geist, "Hiragino Sans", "Yu Gothic UI", "Noto Sans JP", sans-serif;
 }
 
 /* ── Base ───────────────────────────────────────────────────────────────── */
@@ -177,6 +240,13 @@ h2 { font-size: var(--fs-head); font-weight: 600; letter-spacing: -0.012em; marg
 h3 { font-size: var(--fs-head); font-weight: 600; letter-spacing: -0.012em; margin: 0; }
 h4 { font-size: var(--fs-sub); font-weight: 600; letter-spacing: -0.006em; margin: 0; }
 
+/* Line-breaking, stated once. `balance` evens out a title instead of dropping
+   a two-word runt under a full line; `pretty` only promises prose will not end
+   on a single orphaned word. Both are progressive — where they are unsupported
+   the text lays out the way it always did. */
+h1, h2, h3, h4 { text-wrap: balance; }
+p, li, .sub { text-wrap: pretty; }
+
 .sub { color: var(--fg-2); margin: 0; font-size: var(--fs-sub); max-width: 66ch; line-height: 1.6; }
 .muted { color: var(--fg-2); }
 .faint { color: var(--fg-3); }
@@ -194,7 +264,7 @@ h4 { font-size: var(--fs-sub); font-weight: 600; letter-spacing: -0.006em; margi
 }
 
 /* ── App shell ──────────────────────────────────────────────────────────── */
-.app { display: flex; height: 100vh; overflow: hidden; }
+.app { display: flex; height: 100dvh; overflow: hidden; }
 
 .sidebar {
   width: 224px;
@@ -1583,7 +1653,7 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .pref-row .pr-desc { margin: 3px 0 0; font-size: var(--fs-meta); color: var(--fg-3); }
 .pref-row select.input { width: auto; min-width: 160px; }
 
-.auth-wrap { min-height: calc(100vh - 60px); display: grid; place-items: center; padding: var(--s5); }
+.auth-wrap { min-height: calc(100dvh - 60px); display: grid; place-items: center; padding: var(--s5); }
 .auth-card { width: 100%; max-width: 380px; }
 .auth-head { text-align: center; margin-bottom: var(--s6); }
 .auth-head h1 { font-size: 20px; }
@@ -1682,7 +1752,7 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
    inside itself puts the address out of reach. */
 /* Wider and taller than the shared cap: the deposit tab carries a warning
    block, a QR, an address and a fact grid all at once. */
-.modal.wdlg { width: min(544px, 100%); max-height: calc(100vh - 48px); }
+.modal.wdlg { width: min(544px, 100%); max-height: calc(100dvh - 48px); }
 /* Deposit runs a wallet picker beside the QR, which needs a second column. */
 .modal.wdlg.wide { width: min(720px, 100%); }
 .wdlg .modal-head h3 { display: flex; align-items: baseline; gap: var(--s2); min-width: 0; }
@@ -1751,7 +1821,7 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
   display: flex; align-items: center; gap: 9px; width: 100%; text-align: left;
   padding: 6px 7px; border: none; border-radius: var(--r1);
   background: transparent; color: var(--fg-2); cursor: pointer;
-  font-size: var(--fs-sub); transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+  font-size: var(--fs-sub); transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
 }
 .wallet-row:hover { background: var(--surface); color: var(--fg); }
 .wallet-row.active { background: var(--surface); color: var(--fg); font-weight: 500; }
@@ -1781,7 +1851,7 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .pay-fallback {
   border: none; background: none; padding: 0; cursor: pointer;
   font-size: var(--fs-micro); color: var(--fg-2); text-decoration: underline;
-  text-underline-offset: 2px; transition: color var(--dur) var(--ease);
+  text-underline-offset: 2px; transition: color var(--t-fast) var(--ease);
 }
 .pay-fallback:hover { color: var(--fg); }
 
@@ -1834,13 +1904,13 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
   min-width: max(100%, 176px);
   display: flex; flex-direction: column;
   padding: 4px; border-radius: var(--r2);
-  background: var(--bg-1); border: 1px solid var(--line);
+  background: var(--surface); border: 1px solid var(--line);
   box-shadow: 0 8px 24px rgb(0 0 0 / 0.28);
 }
 .split-menu button {
   display: flex; align-items: center; gap: var(--s2);
   padding: var(--s2) var(--s3); border-radius: var(--r1);
-  font-size: var(--fs-sub); color: var(--fg-1); text-align: left;
+  font-size: var(--fs-sub); color: var(--fg-2); text-align: left;
   white-space: nowrap;
   background: none; border: none; cursor: pointer; width: 100%;
 }
@@ -2056,7 +2126,7 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
   animation: fade-in var(--t-fast) var(--ease);
 }
 .modal {
-  width: min(560px, 100%); max-height: min(660px, calc(100vh - 48px));
+  width: min(560px, 100%); max-height: min(660px, calc(100dvh - 48px));
   display: flex; flex-direction: column; overflow: hidden;
   background: var(--surface); border: 1px solid var(--line);
   border-radius: var(--r3); box-shadow: var(--shadow-pop);

@@ -43,6 +43,18 @@ i18n.use(initReactI18next).init({
   interpolation: { escapeValue: false },
 });
 
+/** Keep `<html lang>` in step with the UI language.
+ *
+ *  It was pinned to the `en` written into index.html, whatever the app was
+ *  actually displaying. Two things read it: a screen reader, which was
+ *  pronouncing Japanese with an English voice, and the stylesheet, whose CJK
+ *  font stacks are selected on `:lang()` and therefore never applied. */
+function syncLang(lang: string) {
+  document.documentElement.lang = lang;
+}
+syncLang(i18n.language);
+i18n.on("languageChanged", syncLang);
+
 /** Apply the persisted language (if any) before first render. */
 export async function initLanguage(): Promise<void> {
   if (!inTauri) return;
