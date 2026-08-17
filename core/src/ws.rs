@@ -718,6 +718,33 @@ enum ControlResult {
     Continue,
 }
 
+/// Whether this lane's "not verified" notice has been said recently enough to
+/// leave out.
+///
+/// A repeating condition reported on a repeating frame needs a rate limit
+/// somewhere, and it belongs here rather than in whoever reads the log. One
+/// line an hour per model is enough to answer "why is nothing selling" for an
+/// operator who comes looking; more than that only buries the answer.
+fn unverified_worth_saying(model: &str) -> bool {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+    const QUIET: Duration = Duration::from_secs(3600);
+    static SAID: OnceLock<Mutex<std::collections::HashMap<String, Instant>>> = OnceLock::new();
+    let mut said = match SAID.get_or_init(Default::default).lock() {
+        Ok(g) => g,
+        // A poisoned lock here is not worth losing the message over.
+        Err(p) => p.into_inner(),
+    };
+    let now = Instant::now();
+    match said.get(model) {
+        Some(at) if now.duration_since(*at) < QUIET => false,
+        _ => {
+            said.insert(model.to_string(), now);
+            true
+        }
+    }
+}
+
 fn handle_control(
     ctrl: &ControlPayload,
     state_tx: &watch::Sender<ConnState>,
@@ -787,7 +814,16 @@ fn handle_control(
         // where "online, selling, earning nothing" would otherwise have no
         // explanation anywhere the operator can see.
         "lane.unverified" => {
-            tracing::warn!(model = %ctrl.model, "lane is not verified, so it is not being sold: {}", ctrl.reason);
+            // Once an hour per model, not once per declaration. The gateway
+            // sends this every time the lane is re-declared — every ~20s, for
+            // every unverified lane on the account — so a machine with two
+            // subscriptions connected turned `asaled`'s log into twenty
+            // identical warnings a minute, which is the same as having no log:
+            // the one line that would explain a real failure is already
+            // scrolled off.
+            if unverified_worth_saying(&ctrl.model) {
+                tracing::warn!(model = %ctrl.model, "lane is not verified, so it is not being sold: {}", ctrl.reason);
+            }
             ControlResult::Continue
         }
         "kick" => {

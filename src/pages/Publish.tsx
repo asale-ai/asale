@@ -13,7 +13,7 @@ import {
 } from "../icons";
 import { errText } from "../errors";
 import {
-  VerifyPanel, type LaneVerdict, type VerifyOverview,
+  BatchVerifyPanel, ModelChecklist, recordedStatus, type LaneVerdict, type VerifyOverview,
 } from "../components/VerifyPanel";
 
 /** The selling terms `setSell` can edit. Every field means "leave as is" when
@@ -204,13 +204,18 @@ const RANK_VISIBLE = 8;
  *  meaningful against an axis that does not move when the prices do.
  */
 function DiscountRank({
-  lanes, floor, now, onResume, resuming,
+  lanes, floor, now, onResume, resuming, verdicts, gated,
 }: {
   lanes: Lane[];
   floor: number;
   now: number;
   onResume: (lane: Lane) => void;
   resuming: Record<string, boolean>;
+  /** This account's verification standing, one entry per lane that has one. */
+  verdicts: LaneVerdict[];
+  /** Whether a missing verdict actually keeps buyers away. False in a
+   *  measure-only rollout, where saying "not selling" would be a lie. */
+  gated: boolean;
 }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
@@ -255,14 +260,32 @@ function DiscountRank({
 
   const visible = expanded ? view : view.slice(0, RANK_VISIBLE);
   const hidden = view.length - visible.length;
+
+  /** The verdict standing in the way of this lane selling, or "" when none is.
+   *
+   *  The lane's own `status` is what *this machine* is willing to do, and until
+   *  now that was the whole of what the chart drew. The gate is the other half
+   *  and it lives on the server: an unverified lane is kept out of every
+   *  buyer's reach while the client goes on declaring it, so the page said
+   *  "14 of 14 on sale" about an account the market would route exactly one
+   *  request to. `pass` and `watch` both sell — an inconclusive run is not a
+   *  finding against the seller — so only those two clear it. */
+  const blockedBy = (l: Lane): string => {
+    if (!gated || l.status !== "selling") return "";
+    const st = recordedStatus(verdicts, l.provider, l.model);
+    return st === "pass" || st === "watch" ? "" : st || "pending";
+  };
+
   // Counted over every lane, not over what the fold left on screen: these are
   // the account's totals, and a number that changed when a family was collapsed
   // would be answering a different question from the one it is labelled with.
-  const sellingCount = rows.filter((l) => l.status === "selling").length;
+  const sellingCount = rows.filter((l) => l.status === "selling" && !blockedBy(l)).length;
   const priceCount = rows.filter((l) => l.status === "withheld").length;
   const priced = rows.filter((l) => l.ratio != null).length;
 
   const stateText = (l: Lane): string => {
+    const blocked = blockedBy(l);
+    if (blocked) return t(`publish.verify.outcome.${blocked}`);
     if (l.status === "selling") return t("publish.rank.onSale");
     if (l.status === "withheld") return t("publish.rank.heldOnPrice");
     if (l.status === "off") return t("publish.rank.switchedOff");
@@ -285,7 +308,10 @@ function DiscountRank({
       <div className="dr-rows">
         {visible.flatMap((fam) => fam.shown.map((l) => {
           const lk = `${l.provider}:${l.account_id}:${l.model}`;
-          const tone = laneTone(l);
+          // Green is "this is earning". A lane the gate is holding is not, so
+          // it reads like the other things that stop a sale rather than like a
+          // sale.
+          const tone: LaneTone = blockedBy(l) ? "blocked" : laneTone(l);
           const r = l.ratio;
           const back = countdown(Math.max(l.resume_at, l.cooldown_until ?? 0), now);
           const state = stateText(l);
@@ -438,29 +464,52 @@ function TestDialog({
     return [...lanes].sort((a, b) => rank(a) - rank(b) || a.model.localeCompare(b.model));
   }, [lanes]);
 
-  const [model, setModel] = useState(() => options[0]?.model ?? "");
+  const models = useMemo(() => options.map((l) => l.model), [options]);
+  const [picked, setPicked] = useState<string[]>(models);
   const [wire, setWire] = useState(TEST_WIRES[0].id);
   const [running, setRunning] = useState(false);
-  const [result, setResult] = useState<SupplyTest | null>(null);
+  const [results, setResults] = useState<Record<string, SupplyTest | "running">>({});
   const [err, setErr] = useState("");
 
-  const chosen = options.find((l) => l.model === model);
+  // An account whose lanes load a moment after the dialog does should still
+  // start out fully ticked.
+  useEffect(() => { setPicked(models); }, [models.join(" ")]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const notSelling = picked.filter((m) => options.find((l) => l.model === m)?.status !== "selling").length;
+
+  /** Buy from each picked lane in turn.
+   *
+   *  Sequential rather than concurrent, unlike a verification batch: this is a
+   *  connectivity check whose whole answer is a round-trip time, and running
+   *  several at once against one subscription measures the queue as much as the
+   *  lane. A handful of seconds each is a wait people will sit through. */
   async function run() {
     setRunning(true);
-    setResult(null);
     setErr("");
+    setResults({});
     try {
-      setResult(await invoke<SupplyTest>("test_supply", {
-        provider: account.provider,
-        accountId: account.account_id,
-        model,
-        wire,
-      }));
-    } catch (e) {
-      // Only the reasons the test could not be *run* land here; a refusal by
-      // the market comes back as a result with `ok: false`.
-      setErr(errText(e));
+      for (const model of picked) {
+        setResults((r) => ({ ...r, [model]: "running" }));
+        try {
+          const out = await invoke<SupplyTest>("test_supply", {
+            provider: account.provider,
+            accountId: account.account_id,
+            model,
+            wire,
+          });
+          setResults((r) => ({ ...r, [model]: out }));
+        } catch (e) {
+          // Only the reasons the test could not be *run* land here; a refusal by
+          // the market comes back as a result with `ok: false`. One lane failing
+          // this way is not a reason to abandon the rest of the batch.
+          setResults((r) => {
+            const next = { ...r };
+            delete next[model];
+            return next;
+          });
+          setErr(errText(e));
+        }
+      }
     } finally {
       setRunning(false);
     }
@@ -473,14 +522,14 @@ function TestDialog({
         if (e.target === e.currentTarget && !running) onClose();
       }}
     >
-      <div className="modal" role="dialog" aria-modal="true">
+      <div className="modal verify-modal" role="dialog" aria-modal="true">
         <div className="modal-head">
           <h3>{t(tab === "test" ? "publish.test.title" : "publish.verify.title")}</h3>
           <button type="button" className="modal-x" onClick={onClose} disabled={running}>
             <IconX />
           </button>
         </div>
-        <div style={{ padding: "0 var(--s5) var(--s5)" }}>
+        <div className="verify-body">
           <div className="band-presets" style={{ marginBottom: "var(--s4)" }}>
             <button
               className={`chip ${tab === "test" ? "on" : ""}`}
@@ -498,37 +547,38 @@ function TestDialog({
             </button>
           </div>
 
+          {/* One line per tab. Both checks cost real money and both are
+              explained in a sentence; stacking the explanation, the cost note
+              and a per-model caveat on top of each other only buried all three. */}
           <p className="sub">
-            {t(tab === "test" ? "publish.test.body" : "publish.verify.body", {
+            {t(tab === "test" ? "publish.test.note" : "publish.verify.batchNote", {
               account: account.account_id,
             })}
           </p>
 
-          <div className="field">
-            <label>{t("publish.test.modelLabel")}</label>
-            <select
-              className="input"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              disabled={running || options.length === 0}
-            >
-              {options.map((l) => (
-                <option key={l.model} value={l.model}>
-                  {l.model}
-                  {l.status !== "selling" ? ` · ${t(`publish.laneStatus.${l.status}`, { defaultValue: l.status })}` : ""}
-                </option>
-              ))}
-            </select>
-            {/* A model that is not on the market will fail, and it will fail for
-                a reason this page already shows above. Saying so first is
-                cheaper than letting them buy the answer. */}
-            {chosen && chosen.status !== "selling" && (
-              <div className="hint">{t("publish.test.modelNotSelling")}</div>
-            )}
-          </div>
-
           {tab === "test" ? (
             <>
+              <ModelChecklist
+                models={models}
+                value={picked}
+                onChange={setPicked}
+                disabled={running}
+                label={t("publish.test.pickModels")}
+                note={(m) => {
+                  const r = results[m];
+                  if (r === "running") return <span className="faint">{t("publish.test.running")}</span>;
+                  if (r) {
+                    return r.ok
+                      ? <span className="good">{t("publish.test.tookSeconds", { s: (r.elapsed_ms / 1000).toFixed(1) })}</span>
+                      : <span className="bad">{t(`publish.test.fail.${r.stage}`, { defaultValue: t("publish.test.fail.gateway") })}</span>;
+                  }
+                  const l = options.find((x) => x.model === m);
+                  return l && l.status !== "selling"
+                    ? <span className="faint">{t(`publish.laneStatus.${l.status}`, { defaultValue: l.status })}</span>
+                    : null;
+                }}
+              />
+
               <div className="field">
                 <label>{t("publish.test.wireLabel")}</label>
                 <select className="input" value={wire} onChange={(e) => setWire(e.target.value)} disabled={running}>
@@ -536,33 +586,44 @@ function TestDialog({
                     <option key={w.id} value={w.id}>{w.label}</option>
                   ))}
                 </select>
-                <div className="hint">{t("publish.test.wireHint")}</div>
               </div>
 
-              <div className="callout compact">
-                <IconInfo /><span>{t("publish.test.costNote")}</span>
-              </div>
+              {/* A model that is not on the market will fail, and it will fail
+                  for a reason this page already shows above. Saying so first is
+                  cheaper than letting them buy the answer. */}
+              {notSelling > 0 && (
+                <div className="hint">{t("publish.test.someNotSelling", { n: notSelling })}</div>
+              )}
 
               <div className="btn-row" style={{ marginTop: "var(--s4)" }}>
-                <button className="btn" onClick={run} disabled={running || !model}>
-                  {running ? t("publish.test.running") : t("publish.test.run")}
+                <button className="btn" onClick={run} disabled={running || picked.length === 0}>
+                  {running
+                    ? t("publish.test.runningN", {
+                        done: Object.values(results).filter((r) => r !== "running").length,
+                        total: picked.length,
+                      })
+                    : t("publish.test.runN", { n: picked.length })}
                 </button>
                 <button className="btn subtle" onClick={onClose} disabled={running}>
                   {t("common.close")}
                 </button>
               </div>
 
-              {result && <TestResult result={result} />}
+              {/* The detail — who served, how many tokens, what came back — is
+                  only worth the space for one lane at a time, so the checklist
+                  carries the verdicts and this carries the last full answer. */}
+              {(() => {
+                const last = [...picked].reverse().find((m) => results[m] && results[m] !== "running");
+                const r = last ? results[last] : undefined;
+                return r && r !== "running" ? <TestResult result={r} /> : null;
+              })()}
               <Err>{err}</Err>
             </>
           ) : (
-            /* Keyed on the model so switching rows starts a clean panel rather
-               than showing the previous model's verdict under a new name. */
-            <VerifyPanel
-              key={model}
+            <BatchVerifyPanel
               provider={account.provider}
-              model={model}
-              verdict={verdicts.find((v) => v.provider === account.provider && v.model === model)}
+              models={models}
+              verdicts={verdicts}
             />
           )}
         </div>
@@ -580,111 +641,71 @@ function TestDialog({
  * sold as — and this dialog is where the seller watches that happen and then
  * confirms.
  *
- * # The confirm button is not the security control
+ * # There is nothing here to confirm
  *
- * It cannot be. The daemon this dialog talks to is the software being verified,
- * and anyone willing to fake a model is willing to delete a button. What
- * actually keeps an unverified lane off the market is the gateway refusing to
- * route to it, which happens whether this dialog was ever opened.
+ * There used to be a confirm button, and it was never the security control —
+ * it could not be. The daemon this dialog talks to is the software being
+ * verified, and anyone willing to fake a model is willing to delete a button.
+ * What actually keeps an unverified lane off the market is the gateway refusing
+ * to route to it, which happens whether this dialog was ever opened. All the
+ * button did was hold the seller behind a decision they had already made by
+ * flipping the switch.
  *
  * What the dialog is for is the seller: it is the one moment they are looking,
  * so it is where the arrangement gets explained — that this check happened,
  * that it will keep happening unannounced, and that the sampling is paid for
- * like any other sale.
+ * like any other sale. That makes it the same panel the sell page's own
+ * "verify" tab shows, under a different sentence, and it is deliberately built
+ * from the same component so the two cannot drift apart.
  *
  * # Why it can be dismissed mid-run
  *
  * A run is tens of seconds. Trapping somebody behind a modal for that long, on
  * a check they did not ask for, is a bad trade for a dialog whose whole job is
  * to make the rule feel reasonable. The run continues on the server; reopening
- * the dialog picks the result back up.
+ * the dialog picks the result back up. Closing leaves the switch where the
+ * seller put it — on, with the gateway holding the lane until a verdict lands.
  */
 function VerifyGateDialog({
-  account, lanes, verdicts, enforced, onConfirm, onCancel,
+  account, lanes, verdicts, onClose,
 }: {
   account: AccountStatus;
   lanes: Lane[];
   verdicts: LaneVerdict[];
-  /** False while the platform is measuring but not yet refusing. The dialog
-   *  still runs and still explains — it just does not claim the lane cannot
-   *  sell, because it can. */
-  enforced: boolean;
-  onConfirm: () => void;
-  onCancel: () => void;
+  onClose: () => void;
 }) {
   const { t } = useTranslation();
   const models = useMemo(
     () => [...new Set(lanes.map((l) => l.model))].sort((a, b) => a.localeCompare(b)),
     [lanes],
   );
-  const [model, setModel] = useState(() => models[0] ?? "");
-  const [outcome, setOutcome] = useState("");
-
-  const known = verdicts.find((v) => v.provider === account.provider && v.model === model);
-  const standing = outcome || known?.status || "";
-  /* `watch` sells. It means the run could not reach a confident conclusion,
-   * which is not an accusation and does not cost a listing — the platform
-   * simply samples that lane harder. Blocking here on anything short of a
-   * clean pass would put the client's gate somewhere stricter than the
-   * server's, and the seller would be stuck behind a button while their lane
-   * was, in fact, allowed to trade. */
-  const passed = standing === "pass" || standing === "watch";
 
   return (
     <div
       className="modal-backdrop"
-      // Not dismissible by clicking away. The switch is already on, and a
-      // stray click that left it on with nobody verifying is a lane earning
-      // nothing for a reason its owner never saw. Both exits are explicit.
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div className="modal" role="dialog" aria-modal="true">
+      <div className="modal verify-modal" role="dialog" aria-modal="true">
         <div className="modal-head">
           <h3>{t("publish.verify.gateTitle")}</h3>
-          <button type="button" className="modal-x" onClick={onCancel}>
+          <button type="button" className="modal-x" onClick={onClose}>
             <IconX />
           </button>
         </div>
-        <div style={{ padding: "0 var(--s5) var(--s5)" }}>
-          <p className="sub">{t("publish.verify.gateBody", { account: account.account_id })}</p>
+        <div className="verify-body">
+          {/* One paragraph, and only one. It has to carry three facts — the
+              subscription starts serving strangers, the platform buys from it
+              first to check, and it will go on doing so unannounced at its own
+              expense — and it used to carry them in a paragraph plus three
+              stacked callouts plus two hints, which is a wall rather than an
+              explanation. */}
+          <p className="sub">{t("publish.verify.gateNote", { account: account.account_id })}</p>
 
-          {models.length > 1 && (
-            <div className="field">
-              <label>{t("publish.verify.gateModelLabel")}</label>
-              <select
-                className="input"
-                value={model}
-                onChange={(e) => { setModel(e.target.value); setOutcome(""); }}
-              >
-                {models.map((m) => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-              </select>
-              {/* One model is verified here and the rest are verified as they
-                  first serve. Saying so beats letting a seller believe the
-                  whole account was cleared by one run. */}
-              <div className="hint">{t("publish.verify.gateModelHint")}</div>
-            </div>
-          )}
-
-          <VerifyPanel
-            key={model}
+          <BatchVerifyPanel
             provider={account.provider}
-            model={model}
-            verdict={known}
-            onOutcome={setOutcome}
+            models={models}
+            verdicts={verdicts}
           />
-
-          <div className="btn-row" style={{ marginTop: "var(--s4)" }}>
-            <button className="btn" onClick={onConfirm} disabled={enforced && !passed}>
-              {t("publish.verify.confirmSell")}
-            </button>
-            <button className="btn subtle" onClick={onCancel}>
-              {t("publish.verify.cancelSell")}
-            </button>
-          </div>
-          <div className="hint">
-            {t(enforced && !passed ? "publish.verify.confirmBlocked" : "publish.verify.alreadyOn")}
-          </div>
         </div>
       </div>
     </div>
@@ -759,11 +780,9 @@ export function Publish() {
   const [pending, setPending] = useState<Record<string, boolean>>({});
   /** Which account's supply test is open, by the same key; "" = none. */
   const [testing, setTesting] = useState("");
-  /* The account whose verification gate is open, and the terms it will apply
-     once the seller confirms. Held together because the gate interrupts a
-     `setSell` call that was already on its way — confirming has to resume it
-     with exactly the arguments it had, not with defaults. */
-  const [gate, setGate] = useState<{ key: string; terms: SellTerms } | null>(null);
+  /** Which account's pre-sale verification dialog is open, by the same key;
+   *  "" = none. It only reports — the switch it follows is already written. */
+  const [gate, setGate] = useState("");
   const [verification, setVerification] = useState<VerifyOverview | null>(null);
 
   // Per-model lane state. `now` ticks once a second so the countdowns on
@@ -936,7 +955,7 @@ export function Publish() {
   // account removed under the four-second poll closes its own dialog. Not
   // filtered on `sell_enabled` — the whole point of this one is that the
   // account is not selling yet.
-  const gateAccount = accounts.find((a) => keyOf(a) === gate?.key);
+  const gateAccount = accounts.find((a) => keyOf(a) === gate);
 
   /** Put a lane the operator has fixed back on the market. */
   async function resume(lane: Lane) {
@@ -959,14 +978,7 @@ export function Publish() {
 
   /** Flip one account's sell switch, or save one of its selling terms, via the
    *  same RPC. Terms left out are kept as they are by the daemon. */
-  async function setSell(
-    a: AccountStatus,
-    enabled: boolean,
-    terms: SellTerms = {},
-    /** Set once the verification gate has been confirmed, so the resumed call
-     *  does not re-open the dialog it just came out of. */
-    verified = false,
-  ) {
+  async function setSell(a: AccountStatus, enabled: boolean, terms: SellTerms = {}) {
     const k = keyOf(a);
     const { dailyLimit, minRatio, maxRatio, concurrency } = terms;
     setAcctErr("");
@@ -986,9 +998,9 @@ export function Publish() {
     // verification passed meant verifying a lane that did not exist, and every
     // run failed with `no_supply`. Turning the switch on does not put the lane
     // on sale: the gateway declares it `unverified` and refuses to route
-    // buyers to it until a verdict says otherwise. Cancelling the dialog turns
-    // the switch back off.
-    const needsGate = enabled && !a.sell_enabled && !verified && verification?.enabled;
+    // buyers to it until a verdict says otherwise, so the switch can safely
+    // stay on whether or not the seller sits through the dialog.
+    const needsGate = enabled && !a.sell_enabled && verification?.enabled;
     setPending((p) => ({ ...p, [k]: true }));
     // Optimistic: the list refreshes on a 4s poll, too slow for a toggle.
     setAccounts((list) =>
@@ -1014,7 +1026,7 @@ export function Publish() {
         ...(concurrency === undefined ? {} : { concurrency }),
       });
       loadAccounts();
-      if (needsGate) setGate({ key: k, terms });
+      if (needsGate) setGate(k);
     } catch (e) {
       setAcctErr(errText(e));
       // The session can lapse between the check above and this call.
@@ -1691,6 +1703,17 @@ export function Publish() {
                     </div>
                   )}
 
+                  {/* A different failure that used to wear the same label. The
+                      upstream refused this *machine* — a region it does not
+                      serve, a proxy in the way — and the credential is fine, so
+                      the one thing this banner must not do is send somebody off
+                      to sign in again. */}
+                  {own.some((l) => l.paused_reason === "blocked") && (
+                    <div className="callout warn compact">
+                      <IconInfo /><span>{t("publish.blockedHint")}</span>
+                    </div>
+                  )}
+
                   {capSpent && (
                     <div className="callout warn compact">
                       <IconInfo /><span>{t("publish.limitReached", { limit: fmtTokens(limit) })}</span>
@@ -1946,6 +1969,8 @@ export function Publish() {
                           now={now}
                           onResume={resume}
                           resuming={resuming}
+                          verdicts={verification?.lanes ?? []}
+                          gated={!!verification?.enabled && !!verification?.enforced}
                         />
                       )}
                       {a.sources.length > 0 && (
@@ -2002,23 +2027,17 @@ export function Publish() {
 
       {gateAccount && (
         <VerifyGateDialog
-          key={gate?.key}
+          key={gate}
           account={gateAccount}
           lanes={lanes.filter((l) => l.provider === gateAccount.provider && l.account_id === gateAccount.account_id)}
           verdicts={verification?.lanes ?? []}
-          enforced={verification?.enforced ?? false}
-          onConfirm={() => {
-            setGate(null);
+          // Closing is a dismissal, not a decision: turning the switch on was
+          // the decision, and the gateway is the thing holding the lane back
+          // until a verdict lands. A seller who has changed their mind turns
+          // the same switch off in the list behind this dialog.
+          onClose={() => {
+            setGate("");
             loadAccounts();
-          }}
-          // Backing out is a real decision, not a dismissal: the switch is
-          // already on, and leaving it on would mean an account sitting in
-          // `unverified` earning nothing while its owner believes they
-          // declined. Turning it off is local and always allowed.
-          onCancel={() => {
-            const a = gateAccount;
-            setGate(null);
-            void setSell(a, false);
           }}
         />
       )}

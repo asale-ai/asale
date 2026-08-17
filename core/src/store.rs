@@ -418,6 +418,35 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Forget every lane pause of one account that is held for `reason`.
+    ///
+    /// What a fresh credential is allowed to clear. Re-authenticating answers
+    /// exactly one of the reasons a lane can be out — and it must not answer
+    /// the others, or signing in again would quietly undo a lane the operator
+    /// switched off by hand or one the breaker is holding for a real fault.
+    pub async fn clear_lane_pause_reason(
+        &self,
+        provider: &str,
+        account_id: &str,
+        reason: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        let models: Vec<(String,)> = sqlx::query_as(
+            "SELECT model FROM lane_state WHERE provider = ?1 AND account_id = ?2 AND reason = ?3",
+        )
+        .bind(provider)
+        .bind(account_id)
+        .bind(reason)
+        .fetch_all(&self.pool)
+        .await?;
+        sqlx::query("DELETE FROM lane_state WHERE provider = ?1 AND account_id = ?2 AND reason = ?3")
+            .bind(provider)
+            .bind(account_id)
+            .bind(reason)
+            .execute(&self.pool)
+            .await?;
+        Ok(models.into_iter().map(|r| r.0).collect())
+    }
+
     /// Every persisted lane pause: (provider, account_id, model, reason, last_error).
     pub async fn list_lane_pauses(&self) -> anyhow::Result<Vec<(String, String, String, String, String)>> {
         let rows = sqlx::query_as("SELECT provider, account_id, model, reason, last_error FROM lane_state")

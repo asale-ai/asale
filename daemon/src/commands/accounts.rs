@@ -8,7 +8,7 @@ use crate::publisher;
 use crate::state::AppState;
 use asale_client_core::{cli_import, discovery, Provider, Wire};
 use serde_json::{json, Value};
-use super::sell::{accounts_changed};
+use super::sell::{accounts_changed, credential_replaced};
 use super::{R, err, now_secs};
 use super::usage::{WINDOW_SECS};
 use crate::cmd_err;
@@ -259,6 +259,14 @@ pub async fn import_from_cli(state: &AppState, provider: String) -> R<Value> {
         }));
     }
     let dropped = drop_legacy_placeholder(state, &provider, &out).await;
+    // Re-importing is how somebody who signed into their CLI again hands the
+    // new credential to asale, so it clears the old one's pause for the same
+    // reason a fresh OAuth login does.
+    for row in &out {
+        if let Some(id) = row.get("account_id").and_then(|v| v.as_str()) {
+            credential_replaced(state, &provider, id).await;
+        }
+    }
     accounts_changed(state).await;
 
     // Env conflict detection (spec §3.3): set variables override CLI auth.

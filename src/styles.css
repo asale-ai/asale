@@ -2430,24 +2430,70 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .tk-tile .mark { opacity: 0.85; }
 
 /* ── Model verification ──────────────────────────────────────────────
-   The dialog stacks a state block, two standing notices and a button, so the
-   gaps are set once here rather than as inline margins on four elements. */
-.verify-panel { display: flex; flex-direction: column; gap: var(--s3); }
-.verify-progress { display: flex; flex-direction: column; gap: var(--s2); }
-.verify-bar {
-  height: 6px; border-radius: 999px; overflow: hidden;
+   A checklist of an account's models with each one's standing beside it, and
+   the probes behind that standing folded into the row itself. The list scrolls
+   rather than growing: an account can offer a couple of dozen models, and a
+   dialog whose run button is below the fold is a dialog nobody finishes.
+
+   Wider than the usual modal, because the evidence a row opens onto is a
+   three-column table of probe sentences: at 560px every one of them ellipsed
+   into uselessness. */
+.modal.verify-modal { width: min(760px, 100%); }
+.verify-body { padding: 0 var(--s5) var(--s5); overflow-y: auto; }
+.check-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: var(--s2);
+}
+.model-checklist {
+  display: flex; flex-direction: column;
+  max-height: 20rem; overflow-y: auto;
+  border: 1px solid var(--line); border-radius: var(--r2);
   background: var(--bg-2);
 }
-.verify-bar-fill {
-  height: 100%; border-radius: 999px; background: var(--accent);
-  /* A run's progress arrives on a 1.5s poll and jumps several points at a
-     time. Without the transition the bar snaps, which reads as a glitch
-     rather than as work being done. */
-  transition: width 400ms ease-out;
+.model-checklist.expanded { max-height: none; overflow: visible; }
+.mc-item + .mc-item { border-top: 1px solid var(--line); }
+.mc-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: var(--s2); align-items: center;
+  padding: 5px var(--s3);
+  font-size: var(--fs-meta);
 }
-.verify-verdict-head {
-  display: flex; align-items: center; gap: var(--s2);
-  margin-bottom: var(--s2);
+.mc-row:hover { background: var(--surface-2); }
+.mc-item.open > .mc-row { background: var(--surface-2); }
+/* The checkbox and the name are one target; the disclosure beside them is not,
+   which is the whole reason this is a label inside the row rather than the row
+   itself. */
+.mc-pick {
+  display: grid; grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--s2); align-items: center; min-width: 0; cursor: pointer;
+}
+.mc-name {
+  color: var(--fg-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mc-pick.on .mc-name { color: var(--fg); }
+/* The standing: short by construction, right-aligned so a column of them reads
+   as a column, and never allowed to squeeze the name. */
+.mc-note { flex-shrink: 0; text-align: right; color: var(--fg-2); }
+.mc-note .good { color: var(--success); }
+.mc-note .warn { color: var(--warning); }
+.mc-note .bad { color: var(--danger); }
+.mc-toggle {
+  display: grid; place-items: center;
+  width: 20px; height: 20px; padding: 0;
+  border: 0; border-radius: var(--r1);
+  background: none; color: var(--fg-3); cursor: pointer;
+  transition: transform var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.mc-toggle:hover { color: var(--fg); background: var(--surface-2); }
+.mc-toggle.on { transform: rotate(180deg); color: var(--fg-2); }
+.mc-toggle svg { width: 14px; height: 14px; }
+/* Rows with nothing to open still owe the ones that do a straight edge. */
+.mc-toggle-gap { display: block; width: 20px; }
+.mc-detail {
+  padding: var(--s2) var(--s3) var(--s3);
+  border-top: 1px dashed var(--line);
+  background: var(--bg-2);
 }
 .verify-evidence { display: flex; flex-direction: column; gap: var(--s2); }
 .verify-probes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }

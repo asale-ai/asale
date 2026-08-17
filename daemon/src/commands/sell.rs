@@ -175,6 +175,45 @@ pub async fn accounts_changed(state: &AppState) {
     }
 }
 
+/// One account's credential has just been replaced — release whatever the old
+/// one's failure was holding.
+///
+/// Call this on every path that writes a fresh token for an existing account:
+/// the loopback OAuth callback, the device flow, a re-import from a local CLI.
+///
+/// The order is the whole point. `rebuild_pool` re-applies persisted pauses over
+/// the pool it has just rebuilt, and `set_accounts` carries `auth_failed`
+/// forward, so clearing either one alone is undone within the minute: the disk
+/// row has to go first, then the in-memory flag, and only then may the pool be
+/// rebuilt. That is why this is not folded into [`accounts_changed`] — its
+/// callers are the ones that know a *credential* changed, as opposed to a
+/// switch or a limit.
+pub async fn credential_replaced(state: &AppState, provider: &str, account_id: &str) {
+    let cleared = state
+        .store
+        .clear_lane_pause_reason(provider, account_id, "auth")
+        .await
+        .unwrap_or_default();
+    let in_pool = state
+        .pool
+        .lock()
+        .map(|mut p| p.clear_auth_failure(provider, account_id))
+        .unwrap_or_default();
+    if cleared.is_empty() && in_pool.is_empty() {
+        return;
+    }
+    tracing::info!(
+        provider, account_id,
+        models = in_pool.len().max(cleared.len()),
+        "a fresh credential cleared this account's authentication pause"
+    );
+    if let Some(h) = state.publisher.read().await.as_ref() {
+        for m in in_pool.iter().chain(cleared.iter().filter(|m| !in_pool.contains(m))) {
+            h.resume(m);
+        }
+    }
+}
+
 /// What the server currently believes this account's devices are selling.
 ///
 /// The authoritative counterpart to the local publish state: it answers "is the

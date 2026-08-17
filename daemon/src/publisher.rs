@@ -1155,6 +1155,13 @@ impl TokenProvider for PoolTokens {
         }
     }
 
+    fn saturated(&self, provider: &str, model: &str) -> bool {
+        let Ok(pool) = self.pool.lock() else { return false };
+        let now = now_secs();
+        let wire = pool.lane_wire(provider, model, now);
+        pool.lane_saturated(provider, model, wire, now)
+    }
+
     fn report(&self, provider: &str, account_id: &str, model: &str, outcome: TaskOutcome) {
         if account_id.is_empty() {
             return;
@@ -1178,6 +1185,10 @@ impl TokenProvider for PoolTokens {
                 TaskOutcome::AuthFailed => {
                     let d = "authentication failed (401/403)";
                     (pool.on_error(provider, account_id, model, UpstreamErrorKind::AuthFailed, d, now), d.to_string())
+                }
+                TaskOutcome::Blocked => {
+                    let d = "upstream refused this machine (403 — region block or network filter)";
+                    (pool.on_error(provider, account_id, model, UpstreamErrorKind::Blocked, d, now), d.to_string())
                 }
             }
         };
@@ -1592,7 +1603,7 @@ pub fn spawn_refresh_loop(store: Arc<LocalStore>, pool: Arc<StdMutex<AccountPool
         let mut tick = tokio::time::interval(Duration::from_secs(60));
         loop {
             tick.tick().await;
-            if let Err(e) = refresh_due_tokens(&store).await {
+            if let Err(e) = refresh_due_tokens(&store, &pool).await {
                 tracing::warn!("token refresh cycle error: {e}");
             }
             rebuild_pool(&store, &pool).await;
@@ -1600,7 +1611,7 @@ pub fn spawn_refresh_loop(store: Arc<LocalStore>, pool: Arc<StdMutex<AccountPool
     })
 }
 
-async fn refresh_due_tokens(store: &LocalStore) -> anyhow::Result<()> {
+async fn refresh_due_tokens(store: &LocalStore, pool: &Arc<StdMutex<AccountPool>>) -> anyhow::Result<()> {
     let tools = store.list_tools().await?;
     let now = now_secs();
     for tool in tools {
@@ -1623,6 +1634,24 @@ async fn refresh_due_tokens(store: &LocalStore) -> anyhow::Result<()> {
             Ok(t) => {
                 persist_refresh(store, &tool.provider, &tool.account_id, &t).await?;
                 write_back_shared_credential(&tool, &t, now).await;
+                // The vendor just handed us a working token for this account,
+                // which is a direct answer to whatever `auth` pause the old one
+                // earned. Cleared on disk before the pool, because the rebuild
+                // at the end of this tick re-applies the persisted rows.
+                let cleared = store
+                    .clear_lane_pause_reason(&tool.provider, &tool.account_id, "auth")
+                    .await
+                    .unwrap_or_default();
+                let in_pool = pool
+                    .lock()
+                    .map(|mut p| p.clear_auth_failure(&tool.provider, &tool.account_id))
+                    .unwrap_or_default();
+                if !cleared.is_empty() || !in_pool.is_empty() {
+                    tracing::info!(
+                        provider = %tool.provider, account = %tool.account_id,
+                        "token refresh succeeded — clearing the account's authentication pause"
+                    );
+                }
             }
             Err(e) => tracing::warn!(provider = %tool.provider, "refresh failed: {e}"),
         }

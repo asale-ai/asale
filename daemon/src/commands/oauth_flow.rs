@@ -9,7 +9,7 @@ use crate::state::{AppState, FlowStatus};
 use asale_client_core::{cli_import, device_flow, Provider};
 use serde_json::{json, Value};
 use std::sync::Arc;
-use super::sell::{accounts_changed};
+use super::sell::{accounts_changed, credential_replaced};
 use super::server_client::{finish_auth, resp_json};
 use super::{CmdError, R, err, err_keyed, now_secs};
 use crate::cmd_err;
@@ -214,6 +214,9 @@ pub(crate) async fn finish_provider_oauth(
             .set_setting(&publisher::upstream_acct_key(provider, &account_id), up)
             .await;
     }
+    // Before the rebuild: a pause held on the credential this login just
+    // replaced has no claim on the new one.
+    credential_replaced(state, provider, &account_id).await;
     accounts_changed(state).await;
 
     Ok(json!({"provider": provider, "account_id": account_id, "keychain_ref": keychain::token_ref(provider, &account_id)}))
@@ -515,6 +518,7 @@ async fn finish_device_login(
         .upsert_tool(provider, &account_id, &keychain::token_ref(provider, &account_id), &["oauth"], "oauth")
         .await
         .map_err(err)?;
+    credential_replaced(state, provider, &account_id).await;
     accounts_changed(state).await;
 
     Ok(json!({"provider": provider, "account_id": account_id}))

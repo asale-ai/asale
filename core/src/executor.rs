@@ -11,6 +11,7 @@ use base64::Engine;
 use futures_util::StreamExt;
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
@@ -138,6 +139,47 @@ pub enum TaskOutcome {
     ServerError,
     /// Upstream 401/403 — token invalid.
     AuthFailed,
+    /// Upstream 403 aimed at the machine rather than the credential — a region
+    /// block or a middlebox. See [`refusal_outcome`].
+    Blocked,
+}
+
+/// Which of the two very different things a 401/403 can mean.
+///
+/// A 401 is always the credential: every provider here answers a bad or expired
+/// bearer with one. A 403 is not — Anthropic serves
+/// `{"type":"forbidden","message":"Request not allowed"}` to a request coming
+/// from a region it does not sell to, and OpenAI has
+/// `unsupported_country_region_territory` for the same situation. Both arrive
+/// with a login that is perfectly valid.
+///
+/// Getting this wrong is not a cosmetic mistake. `AuthFailed` takes the whole
+/// account off the market and tells its owner to sign in again — advice that
+/// cannot work, about a credential that is not broken, while the thing that is
+/// (their network route to the vendor) goes unmentioned. So a 403 has to earn
+/// `AuthFailed` by saying something about permissions or keys; anything else it
+/// says, including nothing at all, reads as the machine being refused.
+pub fn refusal_outcome(status: u16, body: &str) -> TaskOutcome {
+    if status != 403 {
+        return TaskOutcome::AuthFailed;
+    }
+    let b = body.to_ascii_lowercase();
+    // Deliberately narrow. These are the words a provider uses when it is
+    // talking about the *credential*; a geo refusal never contains them.
+    const CREDENTIAL_MARKERS: [&str; 7] = [
+        "authentication_error",
+        "permission_error",
+        "invalid_api_key",
+        "invalid_token",
+        "expired",
+        "api key",
+        "oauth",
+    ];
+    if CREDENTIAL_MARKERS.iter().any(|m| b.contains(m)) {
+        TaskOutcome::AuthFailed
+    } else {
+        TaskOutcome::Blocked
+    }
 }
 
 /// How to resolve the upstream bearer token for a provider.
@@ -156,8 +198,82 @@ pub trait TokenProvider: Send + Sync {
         self.token_for(provider).map(|token| LeasedToken { token, ..Default::default() })
     }
 
+    /// Whether an [`acquire`](TokenProvider::acquire) that came back empty did so
+    /// only because every account for this lane is at its own concurrency
+    /// ceiling — the lane is healthy and a slot frees up when a call in flight
+    /// finishes.
+    ///
+    /// Separated from `acquire` returning `None` because the two want opposite
+    /// answers: a lane with no usable account has to be reported, and a lane that
+    /// is merely busy has to be waited for. See [`AccountPool::lane_saturated`]
+    /// for why the busy case happens at all.
+    ///
+    /// [`AccountPool::lane_saturated`]: crate::pool::AccountPool::lane_saturated
+    fn saturated(&self, _provider: &str, _model: &str) -> bool {
+        false
+    }
+
     /// Report the outcome of a leased call. Default: no-op.
     fn report(&self, _provider: &str, _account_id: &str, _model: &str, _outcome: TaskOutcome) {}
+}
+
+/// How long a relayed call waits for one of this account's concurrency slots
+/// before giving up on it.
+///
+/// Bounded by what the gateway is willing to wait for a first frame
+/// (`ASALE_RELAY_IDLE_TIMEOUT_SECS`, five minutes by default), and set far below
+/// it: a queue this side is invisible to the buyer except as latency, and thirty
+/// seconds of latency is a worse answer than a failover to another seller.
+const LEASE_WAIT: Duration = Duration::from_secs(30);
+
+/// How often the wait re-checks. Short enough that a freed slot is picked up
+/// promptly, long enough that a saturated account is not spinning a lock.
+const LEASE_POLL: Duration = Duration::from_millis(100);
+
+/// Lease a token for this task, waiting out a full lease table rather than
+/// handing the work back.
+///
+/// Work already routed here must not be refused for being early. The market
+/// dispatches against the concurrency each *lane* declares, while the ceiling
+/// those declarations come from is one budget shared across every model the
+/// account sells — so a device selling five models is routinely sent more than
+/// it said it could take. Answering that with an error was answering it with a
+/// *credential* error (`TOKEN_EXPIRED`), which the gateway reads as a lane that
+/// cannot serve: it cools the lane down, doubles the cooldown on the next one
+/// and quarantines it after a few, so a burst of ordinary traffic took the lane
+/// off the market and kept it off. It is also what made model verification
+/// impossible to complete — the probes are the burst, and by the second one the
+/// lane they were checking was in cooldown and could no longer be bought from.
+async fn lease_for_task(
+    tokens: &dyn TokenProvider,
+    provider: &str,
+    model: &str,
+    cancel: &mut tokio::sync::oneshot::Receiver<()>,
+) -> Result<LeasedToken, LeaseFailure> {
+    let deadline = Instant::now() + LEASE_WAIT;
+    loop {
+        if let Some(lease) = tokens.acquire(provider, model) {
+            return Ok(lease);
+        }
+        // Nothing to wait for: no account on this device can serve this lane at
+        // all, which is a fact about the lane and is reported as one.
+        if !tokens.saturated(provider, model) || Instant::now() >= deadline {
+            return Err(LeaseFailure::NoAccount);
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(LEASE_POLL) => {}
+            // The consumer left while we were queued. Nothing to serve.
+            _ = &mut *cancel => return Err(LeaseFailure::Canceled),
+        }
+    }
+}
+
+/// Why [`lease_for_task`] came back without a token.
+enum LeaseFailure {
+    /// No account on this device can serve this lane — now, or after waiting.
+    NoAccount,
+    /// The consumer went away while the task was queued for a slot.
+    Canceled,
 }
 
 /// Sink for completed-task metering records (spec §5.2 step 5). The Tauri layer
@@ -261,9 +377,16 @@ pub async fn execute(
     // Resolve + inject the subscription token (only place it is used). The
     // lease picks an account from the pool (spec §4) and must be reported back.
     let provider = req.upstream.provider.clone();
-    let lease = match tokens.acquire(&provider, &model) {
-        Some(l) => l,
-        None => {
+    let lease = match lease_for_task(tokens, &provider, &model, &mut cancel).await {
+        Ok(l) => l,
+        // Nobody left to read an error, and no account to blame for one.
+        Err(LeaseFailure::Canceled) => {
+            if let Some(r) = records {
+                r.record(&task_id, &provider, "", &model, &Usage::default(), "canceled").await;
+            }
+            return;
+        }
+        Err(LeaseFailure::NoAccount) => {
             send_error(out, &task_id, "TOKEN_EXPIRED", "no local token for provider", true);
             if let Some(r) = records {
                 r.record(&task_id, &provider, "", &model, &Usage::default(), "no_token").await;
@@ -426,20 +549,25 @@ pub async fn execute(
     if status >= 400 {
         let code = if status < 500 { "UPSTREAM_4XX" } else { "UPSTREAM_5XX" };
         let retriable = status >= 500 || status == 429;
-        // Pool feedback: 429 cools the account (honoring Retry-After), 5xx
-        // applies the transient cooldown, 401/403 flags the token (spec §4).
-        let outcome = match status {
-            429 => TaskOutcome::RateLimited { reset_at: retry_after_reset(&resp) },
-            401 | 403 => TaskOutcome::AuthFailed,
-            s if s >= 500 => TaskOutcome::ServerError,
-            _ => TaskOutcome::Success { tokens_used: 0 },
-        };
-        tokens.report(&provider, &lease.account_id, &model, outcome);
+        let reset_at = retry_after_reset(&resp);
         // The upstream's own words never leave this process, but they are the
         // only way to tell a real quota exhaustion from a rejection wearing a
         // 429 (Anthropic masks OAuth policy failures as `rate_limit_error`), so
         // keep them in the log rather than dropping them on the floor.
+        //
+        // Read *before* the pool is told anything, because on a 403 the body is
+        // the only thing that says whether the credential or the machine was
+        // refused — see [`refusal_outcome`].
         let detail = resp.text().await.unwrap_or_default();
+        // Pool feedback: 429 cools the account (honoring Retry-After), 5xx
+        // applies the transient cooldown, 401/403 flags the token (spec §4).
+        let outcome = match status {
+            429 => TaskOutcome::RateLimited { reset_at },
+            401 | 403 => refusal_outcome(status, &detail),
+            s if s >= 500 => TaskOutcome::ServerError,
+            _ => TaskOutcome::Success { tokens_used: 0 },
+        };
+        tokens.report(&provider, &lease.account_id, &model, outcome);
         tracing::warn!(
             task = %task_id, provider = %provider, model = %model, status, sent = %shape,
             "upstream rejected: {}", detail.chars().take(400).collect::<String>()
@@ -944,6 +1072,35 @@ fn send_error(out: &mpsc::UnboundedSender<Envelope>, task_id: &str, code: &str, 
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_geo_refusal_is_not_a_dead_login() {
+        use super::{refusal_outcome, TaskOutcome};
+        // Verbatim from a seller in a region Anthropic does not serve. The
+        // subscription is fine; the route to the vendor is not. Reading this as
+        // an auth failure took the whole account off the market under a banner
+        // telling its owner to sign in again — which they had, minutes earlier.
+        let geo = r#"{"error":{"type":"forbidden","message":"Request not allowed"}}"#;
+        assert_eq!(refusal_outcome(403, geo), TaskOutcome::Blocked);
+        assert_eq!(
+            refusal_outcome(403, r#"{"error":{"code":"unsupported_country_region_territory"}}"#),
+            TaskOutcome::Blocked
+        );
+        // A body that says nothing is not evidence about the credential either.
+        assert_eq!(refusal_outcome(403, ""), TaskOutcome::Blocked);
+
+        // A 401 is always the credential, whatever it says.
+        assert_eq!(refusal_outcome(401, geo), TaskOutcome::AuthFailed);
+        // And a 403 that does talk about permissions keeps its old meaning.
+        assert_eq!(
+            refusal_outcome(403, r#"{"error":{"type":"permission_error"}}"#),
+            TaskOutcome::AuthFailed
+        );
+        assert_eq!(
+            refusal_outcome(403, r#"{"error":{"message":"Invalid API key"}}"#),
+            TaskOutcome::AuthFailed
+        );
+    }
+
+    #[test]
     fn the_upstream_model_id_replaces_the_markets_in_the_body() {
         use super::with_model;
         // The lane is declared and metered under the market id; only what goes
@@ -1250,6 +1407,86 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":13,"outpu
             }
         });
         format!("http://127.0.0.1:{port}/")
+    }
+
+    /// An account whose lease table is full for the first `busy_polls` attempts
+    /// and has a slot afterwards — the ordinary shape of an over-dispatched
+    /// device.
+    struct BusyThenFree {
+        left: std::sync::Mutex<u32>,
+        saturated: bool,
+    }
+    impl TokenProvider for BusyThenFree {
+        fn token_for(&self, _p: &str) -> Option<String> {
+            None
+        }
+        fn acquire(&self, _p: &str, _m: &str) -> Option<LeasedToken> {
+            let mut left = self.left.lock().unwrap();
+            if *left > 0 {
+                *left -= 1;
+                return None;
+            }
+            Some(LeasedToken { token: "k".into(), account_id: "dev@example.com".into(), ..Default::default() })
+        }
+        fn saturated(&self, _p: &str, _m: &str) -> bool {
+            self.saturated
+        }
+    }
+
+    #[tokio::test]
+    async fn a_task_waits_for_one_of_this_accounts_slots_instead_of_being_handed_back() {
+        // The market dispatches against the concurrency each *lane* declares,
+        // and one account's ceiling is shared by every model it sells — so a
+        // device selling several models is routinely sent more at once than it
+        // said it could take. Answering that with `TOKEN_EXPIRED` told the
+        // gateway the credential was broken, and the gateway answered *that*
+        // with the cooldown ladder: the lane came off the market over a burst of
+        // perfectly ordinary traffic, and model verification — which is a burst
+        // by construction — could never get past its second probe.
+        let sse = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n\
+data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
+        let url = spawn_http(sse).await;
+        let tokens = BusyThenFree { left: std::sync::Mutex::new(3), saturated: true };
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        execute(&crate::http::plain(), &tokens, req(&url, "claude-x", 0), &tx, None, &test_verifier(), never_canceled()).await;
+
+        let frames = drain(&mut rx);
+        assert!(
+            frames.iter().all(|f| f.payload["code"] != "TOKEN_EXPIRED"),
+            "a busy account must queue the task, not report a broken credential: {frames:?}"
+        );
+        assert!(
+            frames.iter().any(|f| f.msg_type == protocol::T_STREAM_END),
+            "the queued task never completed: {frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lane_with_no_account_behind_it_is_still_reported_at_once() {
+        // The other half of the same decision, and the one the wait must not
+        // swallow: nothing frees up for a lane no account can serve, so waiting
+        // thirty seconds to say so would only hold the buyer's request open for
+        // an answer that was available immediately.
+        let tokens = BusyThenFree { left: std::sync::Mutex::new(u32::MAX), saturated: false };
+        let started = Instant::now();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        execute(
+            &crate::http::plain(),
+            &tokens,
+            req("http://127.0.0.1:1/", "claude-x", 0),
+            &tx,
+            None,
+            &test_verifier(),
+            never_canceled(),
+        )
+        .await;
+
+        let frames = drain(&mut rx);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].payload["code"], "TOKEN_EXPIRED");
+        assert!(started.elapsed() < LEASE_WAIT, "an unservable lane must not be waited out");
     }
 
     #[tokio::test]

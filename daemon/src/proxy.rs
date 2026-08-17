@@ -393,11 +393,27 @@ async fn forward_direct(
     let status = resp.status();
     // Pool feedback mirrors the executor's policy (spec §4).
     if !status.is_success() {
-        let kind = match status.as_u16() {
-            429 => Some(UpstreamErrorKind::RateLimited { reset_at: None }),
-            401 | 403 => Some(UpstreamErrorKind::AuthFailed),
-            s if s >= 500 => Some(UpstreamErrorKind::ServerError),
-            _ => None,
+        // A 403 is the one refusal whose meaning is in the body rather than in
+        // the code — the credential, or the machine. Buffered only for that
+        // case: an error body is small, and every other status is decided from
+        // the code alone, where streaming the answer straight through is
+        // cheaper and keeps the caller's bytes byte-identical.
+        let (kind, out) = if status.as_u16() == 403 {
+            let headers = resp.headers().clone();
+            let text = resp.text().await.unwrap_or_default();
+            let kind = match asale_client_core::executor::refusal_outcome(403, &text) {
+                asale_client_core::executor::TaskOutcome::Blocked => UpstreamErrorKind::Blocked,
+                _ => UpstreamErrorKind::AuthFailed,
+            };
+            (Some(kind), replay(status, &headers, text))
+        } else {
+            let kind = match status.as_u16() {
+                429 => Some(UpstreamErrorKind::RateLimited { reset_at: None }),
+                401 => Some(UpstreamErrorKind::AuthFailed),
+                s if s >= 500 => Some(UpstreamErrorKind::ServerError),
+                _ => None,
+            };
+            (kind, passthrough(resp))
         };
         if let Ok(mut pool) = st.pool.lock() {
             match kind {
@@ -409,7 +425,7 @@ async fn forward_direct(
         }
         // Nothing was served, so there is no subscription usage to count. The
         // failure itself is the account pool's to remember, and it just did.
-        return tag_direct(passthrough(resp), provider, &model);
+        return tag_direct(out, provider, &model);
     }
 
     // Success: stream through, metering usage; release the pool lease with the
@@ -689,6 +705,26 @@ fn passthrough(resp: reqwest::Response) -> Response {
         .body(Body::from_stream(resp.bytes_stream()))
         .unwrap();
     copy_provenance(&upstream_headers, out.headers_mut());
+    out
+}
+
+/// [`passthrough`] for a response whose body has already been read.
+///
+/// The refusal path buffers a 403 so it can tell a blocked machine from a dead
+/// credential; the caller is still owed the upstream's own words, so they go
+/// back out unchanged under the same status and content type.
+fn replay(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap, body: String) -> Response {
+    let ct = headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    let mut out = Response::builder()
+        .status(status)
+        .header("content-type", ct)
+        .body(Body::from(body))
+        .unwrap();
+    copy_provenance(headers, out.headers_mut());
     out
 }
 

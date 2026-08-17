@@ -73,8 +73,19 @@ pub enum PauseReason {
     RateLimit,
     /// Rolling window or daily sell cap spent. Comes back at the rollover.
     Quota,
-    /// 401/403 — the operator has to sign in again.
+    /// 401 (or a 403 the upstream framed as a credential problem) — the
+    /// operator has to sign in again.
     Auth,
+    /// The upstream refuses this machine's requests for a reason that is not
+    /// about the credential: a region block, a network middlebox, a CDN rule.
+    ///
+    /// Kept apart from [`PauseReason::Auth`] because the two need opposite
+    /// actions from the operator. Anthropic answers a request from a region it
+    /// does not serve with `403 {"type":"forbidden","message":"Request not
+    /// allowed"}` — the login is fine and signing in again changes nothing, so
+    /// telling somebody to re-authenticate sends them to fix the one thing that
+    /// is not broken while their subscription sits off the market.
+    Blocked,
     /// Too many consecutive failures; the operator has to look at it.
     Breaker,
     /// The operator switched this lane off.
@@ -91,6 +102,7 @@ impl PauseReason {
             PauseReason::RateLimit => "rate_limit",
             PauseReason::Quota => "quota",
             PauseReason::Auth => "auth",
+            PauseReason::Blocked => "blocked",
             PauseReason::Breaker => "breaker",
             PauseReason::Manual => "manual",
             PauseReason::Untradable => "untradable",
@@ -102,6 +114,7 @@ impl PauseReason {
             "rate_limit" => PauseReason::RateLimit,
             "quota" => PauseReason::Quota,
             "auth" => PauseReason::Auth,
+            "blocked" => PauseReason::Blocked,
             "breaker" => PauseReason::Breaker,
             "manual" => PauseReason::Manual,
             "untradable" => PauseReason::Untradable,
@@ -113,7 +126,10 @@ impl PauseReason {
     /// button exactly for these; the rest disappear on their own, and offering
     /// a button for them would only invite the operator to fight a countdown.
     pub fn requires_user(self) -> bool {
-        matches!(self, PauseReason::Auth | PauseReason::Breaker | PauseReason::Manual)
+        matches!(
+            self,
+            PauseReason::Auth | PauseReason::Blocked | PauseReason::Breaker | PauseReason::Manual
+        )
     }
 }
 
@@ -236,6 +252,12 @@ pub enum UpstreamErrorKind {
     ServerError,
     /// 401/403 — the token is bad; keep the account out until it is refreshed.
     AuthFailed,
+    /// The upstream refused this machine rather than this credential — a region
+    /// block, a middlebox, a CDN rule. Backed off on the same ladder as a 5xx,
+    /// because the cheap case is a proxy hiccup, and parked on
+    /// [`PauseReason::Blocked`] rather than the breaker when it persists, so the
+    /// operator is told what to actually go and fix.
+    Blocked,
 }
 
 /// Selection strategy (spec §4).
@@ -585,6 +607,37 @@ impl AccountPool {
         self.pick_where(provider, Some(model), wire, now, true)
     }
 
+    /// Whether a failed [`AccountPool::pick_for_sale`] was *only* this account's
+    /// own concurrency ceiling.
+    ///
+    /// The one refusal that says nothing about the lane. Every other reason
+    /// `pick_for_sale` comes back empty — no such account, sell switched off,
+    /// credential expired, quota spent, lane cooling or paused — is a condition
+    /// that lasts, and reporting it is the honest answer. A full lease table is
+    /// not: the account is healthy, this model is on offer, and a slot frees up
+    /// as soon as one of the calls in flight finishes.
+    ///
+    /// It has to be answerable separately because the market can and does
+    /// over-dispatch. An account's ceiling is one budget shared by every model
+    /// it sells, but it is declared to the gateway once *per lane*
+    /// (`publisher::declare`), so an account selling five models tells the market
+    /// it can take five at once five times over. The gateway is within its rights
+    /// to use all of it; this side is the only one that knows the accounting is
+    /// shared, so this side has to absorb the difference instead of handing the
+    /// work back — see `executor::execute`, and `TaskOutcome` for what handing it
+    /// back costs the lane.
+    pub fn lane_saturated(&self, provider: &str, model: &str, wire: Option<Wire>, now: i64) -> bool {
+        self.accounts.iter().any(|a| {
+            a.provider == provider
+                && a.sell_enabled
+                && !(wire.is_some() && a.upstream_wire.is_some() && a.upstream_wire != wire)
+                // Everything `lane_available` asks for except the free slot.
+                && a.status(now) == "available"
+                && a.in_use >= a.concurrency_max
+                && a.lanes.get(model).is_some_and(|l| l.servable(now))
+        })
+    }
+
     fn pick_where(
         &mut self,
         provider: &str,
@@ -725,7 +778,15 @@ impl AccountPool {
                 lane.cooldown_until = Some(until);
                 Some(PauseReason::RateLimit)
             }
-            UpstreamErrorKind::ServerError => {
+            // Both ride the same ladder and differ only in where it ends. A 5xx
+            // that keeps coming back means this lane is broken; a refusal aimed
+            // at the machine means the operator has a network to fix. Saying
+            // which is the entire value of the pause the seller reads.
+            UpstreamErrorKind::ServerError | UpstreamErrorKind::Blocked => {
+                let stuck = match kind {
+                    UpstreamErrorKind::Blocked => PauseReason::Blocked,
+                    _ => PauseReason::Breaker,
+                };
                 // Lane-scoped on purpose: a 5xx on one model says nothing about
                 // the account's other models, and cooling the whole account
                 // here used to take healthy capacity off the market with it.
@@ -743,10 +804,10 @@ impl AccountPool {
                     // Out of rungs: this lane is not having a bad minute, it is
                     // broken. Stop selling it and let the operator look.
                     None => {
-                        lane.paused = Some(PauseReason::Breaker);
+                        lane.paused = Some(stuck);
                         lane.resume_at = 0;
                         lane.cooldown_until = None;
-                        Some(PauseReason::Breaker)
+                        Some(stuck)
                     }
                 }
             }
@@ -782,20 +843,29 @@ impl AccountPool {
     /// rest paused would leave the operator clicking "resume" once per model —
     /// dozens of times for a Codex account — to undo one signed-in-again. So an
     /// auth pause is cleared account-wide, together with the flag that put it
-    /// there. Other reasons stay per-lane: a broken Opus lane says nothing about
+    /// there. A `Blocked` pause is cleared the same way and for the same reason:
+    /// the upstream refused the *machine*, so every lane of the account laddered
+    /// its way to the same pause and one fixed network releases all of them.
+    /// Other reasons stay per-lane: a broken Opus lane says nothing about
     /// Sonnet.
     /// Returns every lane it actually cleared, so the caller can forget the
     /// matching persisted pauses and re-declare exactly those lanes — clearing
     /// more in memory than on disk would put them all back on the next restart.
     pub fn resume_lane(&mut self, provider: &str, account_id: &str, model: &str) -> Vec<String> {
         let Some(a) = self.find(provider, account_id) else { return Vec::new() };
-        let was_auth = a.lanes.get(model).and_then(|l| l.paused) == Some(PauseReason::Auth);
+        let wide = a
+            .lanes
+            .get(model)
+            .and_then(|l| l.paused)
+            .filter(|r| matches!(r, PauseReason::Auth | PauseReason::Blocked));
         a.cooldown_until = None;
         let mut cleared = Vec::new();
-        if was_auth {
-            a.auth_failed = false;
+        if let Some(wide) = wide {
+            if wide == PauseReason::Auth {
+                a.auth_failed = false;
+            }
             for (name, lane) in a.lanes.iter_mut() {
-                if lane.paused == Some(PauseReason::Auth) {
+                if lane.paused == Some(wide) {
                     *lane = LaneState::default();
                     cleared.push(name.clone());
                 }
@@ -805,6 +875,30 @@ impl AccountPool {
             *lane = LaneState::default();
             if !cleared.iter().any(|m| m == model) {
                 cleared.push(model.to_string());
+            }
+        }
+        cleared
+    }
+
+    /// Take back an auth failure because the credential behind it has been
+    /// replaced. Returns the lanes it released.
+    ///
+    /// Signing in again is the operator doing the thing the pause asked for, so
+    /// it has to be what clears it. It did not used to be: the pause survived
+    /// the new login (the persisted rows are re-applied on every pool rebuild)
+    /// and only the "resume" button cleared it, which left somebody who had just
+    /// re-authenticated looking at a page still telling them to authenticate.
+    ///
+    /// Only `Auth` — a lane the breaker holds, or one switched off by hand, has
+    /// nothing to do with the credential and is left exactly where it is.
+    pub fn clear_auth_failure(&mut self, provider: &str, account_id: &str) -> Vec<String> {
+        let Some(a) = self.find(provider, account_id) else { return Vec::new() };
+        a.auth_failed = false;
+        let mut cleared = Vec::new();
+        for (name, lane) in a.lanes.iter_mut() {
+            if lane.paused == Some(PauseReason::Auth) {
+                *lane = LaneState::default();
+                cleared.push(name.clone());
             }
         }
         cleared
@@ -978,6 +1072,50 @@ mod tests {
 
     fn prices(pairs: &[(&str, i32)]) -> BTreeMap<String, i32> {
         pairs.iter().map(|(m, r)| (m.to_string(), *r)).collect()
+    }
+
+    #[test]
+    fn a_full_lease_table_is_told_apart_from_a_lane_that_cannot_serve() {
+        // One account's ceiling is a budget shared by every model it sells, but
+        // it is declared to the market once per lane — so the gateway is
+        // entitled to send this account `concurrency_max` tasks for *each* of
+        // its models. The difference between "come back in a moment" and "this
+        // lane cannot serve you" is the whole of what the executor needs to know
+        // to avoid reporting the first as a broken credential.
+        let now = 1_000;
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        let mut a = banded("a", (5, 100));
+        a.concurrency_max = 2;
+        p.set_accounts(vec![a]);
+
+        assert!(!p.lane_saturated("claude", OPUS, None, now), "an idle account is not saturated");
+        for _ in 0..2 {
+            assert!(p.pick_for_sale("claude", OPUS, None, now).is_some());
+        }
+        // Both slots are out on Opus, and the third caller is refused — but this
+        // is the account being busy, and Haiku, which shares that same budget,
+        // is just as busy despite not having served anything.
+        assert!(p.pick_for_sale("claude", OPUS, None, now).is_none());
+        assert!(p.lane_saturated("claude", OPUS, None, now));
+        assert!(p.pick_for_sale("claude", HAIKU, None, now).is_none());
+        assert!(p.lane_saturated("claude", HAIKU, None, now));
+
+        // A model this account does not sell has nothing to wait for, and
+        // neither does a lane whose account is out of the market for a reason
+        // that will not clear on its own.
+        assert!(!p.lane_saturated("claude", "claude-sonnet-5", None, now));
+        let mut broken = AccountPool::new(Strategy::RoundRobin);
+        broken.set_accounts(vec![{
+            let mut a = banded("a", (5, 100));
+            a.concurrency_max = 2;
+            a.in_use = 2;
+            a.auth_failed = true;
+            a
+        }]);
+        assert!(
+            !broken.lane_saturated("claude", OPUS, None, now),
+            "an expired credential is not a queue: waiting on it would never end"
+        );
     }
 
     #[test]
@@ -1307,6 +1445,71 @@ mod tests {
         assert_eq!(
             p.on_error("claude", "a", OPUS, UpstreamErrorKind::ServerError, "500", later + 1),
             None
+        );
+    }
+
+    #[test]
+    fn a_blocked_machine_is_backed_off_and_then_says_so() {
+        let mut now = 1000;
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        p.set_accounts(vec![sellable("a")]);
+        // The first refusals are treated as a proxy having a bad minute: the
+        // lane backs off, nobody is told anything, and it comes back by itself.
+        for rung in LANE_COOLDOWN_LADDER {
+            p.pick_for_sale("claude", OPUS, None, now).unwrap();
+            assert_eq!(
+                p.on_error("claude", "a", OPUS, UpstreamErrorKind::Blocked, "403 forbidden", now),
+                None
+            );
+            now += rung + 1;
+        }
+        // Out of rungs, and this is where it used to become "sign in again".
+        p.pick_for_sale("claude", OPUS, None, now).unwrap();
+        assert_eq!(
+            p.on_error("claude", "a", OPUS, UpstreamErrorKind::Blocked, "403 forbidden", now),
+            Some(PauseReason::Blocked)
+        );
+        // The account's credential is untouched: nothing here says the login is
+        // bad, so the account must not read as expired.
+        assert!(!p.find("claude", "a").unwrap().auth_failed);
+        assert_eq!(p.find("claude", "a").unwrap().status(now), "available");
+        let view = p.lane_views(now).into_iter().find(|v| v.model == OPUS).unwrap();
+        assert_eq!(view.paused_reason.as_deref(), Some("blocked"));
+        assert!(view.requires_user, "a network the operator has to fix needs a person");
+    }
+
+    #[test]
+    fn signing_in_again_is_what_clears_an_auth_pause() {
+        let now = 1000;
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        p.set_accounts(vec![sellable("a")]);
+        p.pick_for_sale("claude", OPUS, None, now).unwrap();
+        assert_eq!(
+            p.on_error("claude", "a", OPUS, UpstreamErrorKind::AuthFailed, "401", now),
+            Some(PauseReason::Auth)
+        );
+        assert_eq!(p.find("claude", "a").unwrap().status(now), "expired");
+
+        // The operator does the one thing the pause asked for. It used to take a
+        // separate "resume" click as well, because a fresh login cleared nothing
+        // — so the page went on telling somebody who had just signed in that they
+        // needed to sign in.
+        let cleared = p.clear_auth_failure("claude", "a");
+        assert!(cleared.contains(&OPUS.to_string()));
+        assert!(!p.find("claude", "a").unwrap().auth_failed);
+        assert!(p.pick_for_sale("claude", OPUS, None, now).is_some());
+    }
+
+    #[test]
+    fn a_fresh_credential_leaves_a_hand_paused_lane_alone() {
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        p.set_accounts(vec![sellable("a")]);
+        p.pause_lane("claude", "a", OPUS, PauseReason::Manual, 0);
+        assert!(p.clear_auth_failure("claude", "a").is_empty());
+        assert_eq!(
+            p.find("claude", "a").unwrap().lanes[OPUS].paused,
+            Some(PauseReason::Manual),
+            "re-authenticating says nothing about a lane its owner switched off"
         );
     }
 

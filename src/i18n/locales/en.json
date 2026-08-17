@@ -159,6 +159,7 @@
     "windowUsed": "Served this 5h window",
     "usedTodayFact": "Served today (UTC)",
     "expiredHint": "This credential has expired or could not be refreshed — reconnect the account before selling again.",
+    "blockedHint": "The provider refused requests from this machine (a region block or a network filter), not the credential — the sign-in is still valid. Check the network route to the provider, then press Resume.",
     "statusAvailable": "available",
     "statusCooldown": "cooldown",
     "statusExpired": "expired",
@@ -194,13 +195,7 @@
     "test": {
       "open": "Test selling",
       "title": "Test selling",
-      "body": "Buys one short reply from {{account}} through the market, exactly the way a buyer would — then shows what came back.",
-      "modelLabel": "Model",
-      "modelNotSelling": "This model is not on the market right now, so the test will be refused.",
       "wireLabel": "Protocol",
-      "wireHint": "The dialect the request is written in. The platform translates, so any of these can be served by this account.",
-      "costNote": "This is a real purchase: it spends a little balance and a little of this subscription's quota.",
-      "run": "Run test",
       "running": "Testing…",
       "pass": "Your selling works",
       "fail": {
@@ -213,7 +208,12 @@
       "servedBy": "Served by",
       "tokens": "Tokens in / out",
       "reply": "Reply",
-      "tab": "Connectivity"
+      "tab": "Connectivity",
+      "note": "Buys from {{account}}'s own lanes through the market, exactly as a buyer would. This spends real balance and real subscription quota.",
+      "pickModels": "Models to test",
+      "runN": "Test {{n}} model(s)",
+      "runningN": "Testing… {{done}}/{{total}}",
+      "someNotSelling": "{{n}} of the picked models are not on the market right now and will fail for that reason."
     },
     "sharedBadge": "shared with local CLI",
     "sharedHint": "This credential was imported from a CLI installed on this machine, so both use the same upstream login.",
@@ -240,6 +240,7 @@
       "rate_limit": "rate limited",
       "quota": "quota spent",
       "auth": "sign-in needed",
+      "blocked": "upstream refused",
       "breaker": "repeated errors",
       "manual": "paused",
       "cooldown": "cooling down",
@@ -299,32 +300,12 @@
       "tab": "Verification",
       "title": "Model verification",
       "gateTitle": "Verify before selling",
-      "body": "The platform buys a few short completions from {{account}} along the ordinary buyer path and checks that they behave like the model being sold. It runs entirely on the server; this machine only receives progress and the result.",
-      "gateBody": "Selling means this subscription starts serving strangers' prompts. Before that, the platform checks that the lane really is the model it is about to be sold as.",
-      "gateModelLabel": "Which model to verify first",
-      "gateModelHint": "One model is verified here; the account's other models are each verified before their first sale.",
-      "never": "This lane has not been verified yet.",
-      "run": "Verify",
-      "rerun": "Verify again",
-      "running": "Verifying…",
-      "starting": "Starting the run…",
-      "confirmSell": "Confirm and sell",
-      "confirmBlocked": "Selling opens once verification passes.",
-      "samplingNote": "Sampling continues after this. The platform re-checks the lane at times it does not announce, using requests indistinguishable from a buyer's — and pays you the market price for them, exactly as for any sale.",
-      "costNote": "Verification costs nothing: the probes are free on both sides — nobody is billed and nothing is paid out. All it uses is a little of this subscription's own quota.",
-      "sampleRecord": "Sampled {{samples}} times: {{fails}} failed, {{unclear}} inconclusive.",
-      "expires": "Valid until {{date}}, after which it is re-checked automatically.",
       "outcome": {
         "pass": "Verified",
         "watch": "Inconclusive",
         "reject": "Did not verify",
         "pending": "Not verified",
         "verifying": "Verifying"
-      },
-      "outcomeBody": {
-        "pass": "This lane behaves like the model it is sold as and can sell normally.",
-        "watch": "The run could not reach a confident conclusion. That is not an accusation — the lane keeps selling, and the platform samples it more often, which usually settles the question within days.",
-        "reject": "There is strong evidence this lane is not the model it claims, and it has been taken off the market. If you believe that is wrong, review the evidence and appeal."
       },
       "step": {
         "preflight": "Checking reachability",
@@ -339,12 +320,22 @@
         "system_adherence": "System-prompt adherence"
       },
       "evidence": {
-        "open": "View evidence",
-        "summary": "{{requests}} real requests at {{depth}} depth, seed {{seed}} — the same seed replays this run probe for probe."
+        "open": "Show evidence",
+        "summary": "{{requests}} real requests at {{depth}} depth, seed {{seed}} — the same seed replays this run probe for probe.",
+        "close": "Hide evidence",
+        "loading": "Loading evidence…"
       },
-      "cancelSell": "Cancel and turn selling off",
-      "alreadyOn": "The switch is on, but the platform will not route buyers to this lane until verification passes.",
-      "expired": "The last verification has expired, so this lane is not receiving buyers. Verify again to restore it."
+      "gateNote": "Turning selling on puts {{account}}'s subscription quota in front of strangers. Before that, the platform buys a few short completions from these lanes to check each one really is the model it is sold as — the checks are free to you, and unannounced spot checks continue afterwards at the platform's expense.",
+      "batchNote": "The platform buys a few short completions from {{account}} along the ordinary buyer path and checks that each lane behaves like the model it is sold as. The checks are free to you, and unannounced spot checks continue afterwards.",
+      "pickModels": "Models to verify",
+      "selectAll": "Select all",
+      "selectNone": "Clear",
+      "runN": "Verify {{n}} model(s)",
+      "runningN": "Verifying… {{done}}/{{total}}",
+      "rowPending": "queued",
+      "rowRunning": "running",
+      "rowUnreachable": "could not verify",
+      "noModels": "This account is not offering any model yet."
     }
   },
   "consume": {
@@ -1171,6 +1162,17 @@
       "noModel": "Choose a model to test.",
       "noLane": "`{{model}}` is not one of this account's models.",
       "sellOff": "Turn selling on for this account before testing it."
+    },
+    "verify": {
+      "disabled": "Model verification is not enabled on this deployment.",
+      "deviceOffline": "This device is not connected to the market, so there is nothing to verify yet.",
+      "laneNotOffered": "This model is not currently being offered by this device — switch selling on for it first.",
+      "laneUntradable": "The platform does not currently trade this model, so there is nothing to verify. It will clear on its own once the model is listed again.",
+      "lanePaused": "This device is holding this model back ({{reason}}), so the platform has nothing to buy from. Clear that first, then verify.",
+      "alreadyRunning": "A verification of this lane is already running.",
+      "badProvider": "Unknown provider.",
+      "notYourDevice": "That device is not on this account.",
+      "laneUnreachable": "The platform could not get an answer from this lane through the market ({{status}}), so nothing was verified. Either it was not on sale at that moment, or its upstream account refused the request — check the model's state above and try again."
     }
   },
   "tray": {
