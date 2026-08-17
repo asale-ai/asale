@@ -489,6 +489,11 @@ mod tests {
 
     #[test]
     fn is_ours_only_matches_the_file_we_generate() {
+        // Both sides of the first assertion read `$HOME`, which is
+        // process-global: without the lock a test that repoints it in between
+        // makes this compare two different homes and fail for a reason that has
+        // nothing to do with `is_ours`.
+        let _g = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         assert!(is_ours(&path().to_string_lossy()));
         assert!(!is_ours("/Users/someone/.codex/my-own-catalog.json"));
     }

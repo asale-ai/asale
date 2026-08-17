@@ -58,6 +58,15 @@ pub const COOLDOWN_TRANSIENT_SECS: i64 = 300;
 /// Cooldown after a rate-limit (429) when the upstream gives no reset, seconds.
 /// Rate limits are window-scoped, so cool longer than plain transient errors.
 pub const COOLDOWN_RATE_LIMIT_SECS: i64 = 900;
+/// How long a lane stays off the market after its upstream said the model does
+/// not exist, seconds.
+///
+/// A day, because the answer is a fact about the vendor's catalogue rather than
+/// about this minute: retrying sooner spends a buyer's request to re-learn
+/// something that changes when a vendor ships a release, and never retrying
+/// means a model that comes back — or an entitlement that is granted — stays
+/// unsold until the daemon restarts.
+pub const COOLDOWN_UNSUPPORTED_SECS: i64 = 24 * 3600;
 /// Auto-recovery cooldowns for the first transient failures of a lane, seconds.
 /// Running out of rungs trips the breaker.
 pub const LANE_COOLDOWN_LADDER: [i64; 2] = [30, 120];
@@ -94,6 +103,23 @@ pub enum PauseReason {
     /// disabled it). Nothing the seller can fix locally, and nothing to wait
     /// out either — it clears when the catalog lists the model again.
     Untradable,
+    /// The *upstream* does not serve this model to this account: the vendor
+    /// answered "no such model" for an id this device was advertising.
+    ///
+    /// The mirror image of [`PauseReason::Untradable`] — that one is the
+    /// platform declining to trade a model the subscription can serve, this one
+    /// is the subscription unable to serve a model the platform trades. Kept
+    /// apart from the breaker because it is not a run of bad luck to back off
+    /// from: every request for this id will fail the same way, so the lane has
+    /// to come off the market on the *first* one rather than after three, and
+    /// nothing an operator can do would change it.
+    ///
+    /// It still carries a resume instant ([`COOLDOWN_UNSUPPORTED_SECS`]) rather
+    /// than waiting for a person: a model can come back, an entitlement can be
+    /// granted, and the catalog can be wrong about which id a vendor answers to.
+    /// One retry a day costs one failed request and is the only thing that would
+    /// ever find out.
+    Unsupported,
 }
 
 impl PauseReason {
@@ -106,6 +132,7 @@ impl PauseReason {
             PauseReason::Breaker => "breaker",
             PauseReason::Manual => "manual",
             PauseReason::Untradable => "untradable",
+            PauseReason::Unsupported => "unsupported",
         }
     }
 
@@ -118,6 +145,7 @@ impl PauseReason {
             "breaker" => PauseReason::Breaker,
             "manual" => PauseReason::Manual,
             "untradable" => PauseReason::Untradable,
+            "unsupported" => PauseReason::Unsupported,
             _ => return None,
         })
     }
@@ -162,9 +190,33 @@ pub struct LaneState {
 }
 
 impl LaneState {
+    /// The pause actually in force at `now`.
+    ///
+    /// A pause with a `resume_at` that has passed is over. Reading `paused`
+    /// directly instead left every self-clearing pause permanent: the only
+    /// thing that ever cleared one was a *successful* call on the same lane
+    /// (`on_success`), which a paused lane is not sent, so on a device that
+    /// only sells, one 429 took a lane off the market until the daemon was
+    /// restarted. `auto_resume_at` below — and the wake-up the daemon schedules
+    /// from it — were already written as if this were true.
+    ///
+    /// The field is left set rather than cleared: this is a `&self` read, and
+    /// the stale value is harmless once every reader goes through here.
+    pub fn pause_at(&self, now: i64) -> Option<PauseReason> {
+        match self.paused {
+            // `resume_at == 0` is "no instant to come back at" — the pauses
+            // that wait for an operator, and `Untradable`, which waits for the
+            // catalog.
+            Some(r) if r.requires_user() || self.resume_at == 0 || self.resume_at > now => Some(r),
+            _ => None,
+        }
+    }
+
     /// Whether this lane may serve market traffic at `now`.
     pub fn servable(&self, now: i64) -> bool {
-        self.paused.is_none() && !self.cooldown_until.is_some_and(|c| c > now) && !self.price_withheld
+        self.pause_at(now).is_none()
+            && !self.cooldown_until.is_some_and(|c| c > now)
+            && !self.price_withheld
     }
 
     /// The next instant at which this lane's state changes by itself, if any.
@@ -258,6 +310,11 @@ pub enum UpstreamErrorKind {
     /// [`PauseReason::Blocked`] rather than the breaker when it persists, so the
     /// operator is told what to actually go and fix.
     Blocked,
+    /// The upstream does not know this model id (`404 not_found_error`, or the
+    /// Codex backend's `400 … is not supported when using Codex`). Not a
+    /// failure of the lane so much as proof it should never have been offered:
+    /// see [`PauseReason::Unsupported`].
+    Unsupported,
 }
 
 /// Selection strategy (spec §4).
@@ -811,6 +868,21 @@ impl AccountPool {
                     }
                 }
             }
+            // One request is the whole evidence needed. Every later request for
+            // this id would be answered the same way, so there is no ladder to
+            // climb and nothing to be gained by letting two more buyers find
+            // out — the lane comes off the market now and tries again tomorrow.
+            UpstreamErrorKind::Unsupported => {
+                let until = now + COOLDOWN_UNSUPPORTED_SECS;
+                let lane = a.lanes.entry(model.to_string()).or_default();
+                lane.last_error = detail.to_string();
+                lane.paused = Some(PauseReason::Unsupported);
+                lane.resume_at = until;
+                // Deliberately no `cooldown_until`: that is the account's own
+                // recovery ladder, and this says nothing about the account. Its
+                // other models are unaffected and must keep selling.
+                Some(PauseReason::Unsupported)
+            }
             UpstreamErrorKind::AuthFailed => {
                 a.auth_failed = true;
                 // Credentials are the account's, so every lane of it is out.
@@ -933,7 +1005,7 @@ impl AccountPool {
         let mut out = Vec::new();
         for a in &self.accounts {
             for (model, lane) in &a.lanes {
-                let (status, reason) = if let Some(r) = lane.paused {
+                let (status, reason) = if let Some(r) = lane.pause_at(now) {
                     ("paused", Some(r))
                 } else if lane.cooldown_until.is_some_and(|c| c > now) {
                     ("cooldown", None)
@@ -1476,6 +1548,61 @@ mod tests {
         let view = p.lane_views(now).into_iter().find(|v| v.model == OPUS).unwrap();
         assert_eq!(view.paused_reason.as_deref(), Some("blocked"));
         assert!(view.requires_user, "a network the operator has to fix needs a person");
+    }
+
+    /// A model the upstream has never heard of comes off the market on the
+    /// first request rather than after three, and takes nothing else with it.
+    #[test]
+    fn a_model_the_upstream_does_not_have_stops_being_offered_at_once() {
+        let now = 1000;
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        p.set_accounts(vec![sellable("a")]);
+        p.pick_for_sale("claude", OPUS, None, now).unwrap();
+        assert_eq!(
+            p.on_error("claude", "a", OPUS, UpstreamErrorKind::Unsupported, "404 not_found_error", now),
+            Some(PauseReason::Unsupported),
+            "no ladder: the second buyer would get the same 404 as the first"
+        );
+        assert!(p.pick_for_sale("claude", OPUS, None, now).is_none());
+        assert!(!p.any_sellable("claude", OPUS, now));
+
+        // The account is fine, and so is everything else it sells.
+        assert!(!p.find("claude", "a").unwrap().auth_failed);
+        assert_eq!(p.find("claude", "a").unwrap().status(now), "available");
+        assert!(p.pick_for_sale("claude", HAIKU, None, now).is_some());
+
+        let view = p.lane_views(now).into_iter().find(|v| v.model == OPUS).unwrap();
+        assert_eq!(view.paused_reason.as_deref(), Some("unsupported"));
+        assert!(!view.requires_user, "there is nothing for the operator to do about a retired model");
+
+        // And it tries once more a day later, in case the vendor brings it back.
+        assert_eq!(p.next_auto_resume(now), Some(now + COOLDOWN_UNSUPPORTED_SECS));
+        assert!(p.pick_for_sale("claude", OPUS, None, now + COOLDOWN_UNSUPPORTED_SECS + 1).is_some());
+    }
+
+    /// A pause with a resume instant is over when that instant passes.
+    ///
+    /// It used to take a *successful* call on the same lane to clear one — work
+    /// a paused lane is never sent — so on a device that only sells, a single
+    /// 429 parked a model until the daemon was restarted.
+    #[test]
+    fn a_self_clearing_pause_is_over_when_its_instant_passes() {
+        let now = 1000;
+        let reset = now + 600;
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        p.set_accounts(vec![sellable("a")]);
+        p.pick_for_sale("claude", OPUS, None, now).unwrap();
+        p.on_error("claude", "a", OPUS, UpstreamErrorKind::RateLimited { reset_at: Some(reset) }, "429", now);
+        assert!(p.pick_for_sale("claude", OPUS, None, now).is_none());
+
+        assert!(p.pick_for_sale("claude", OPUS, None, reset + 1).is_some(), "the reset it named has passed");
+        let view = p.lane_views(reset + 1).into_iter().find(|v| v.model == OPUS).unwrap();
+        assert_eq!(view.status, "selling");
+
+        // A pause with no instant to come back at is not touched by the clock:
+        // it waits for the operator, or for the catalog.
+        p.pause_lane("claude", "a", HAIKU, PauseReason::Manual, 0);
+        assert!(p.pick_for_sale("claude", HAIKU, None, reset + 86_400).is_none());
     }
 
     #[test]

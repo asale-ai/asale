@@ -3,10 +3,15 @@
 //
 // KEEP IN SYNC with asale-web/src/components/EarningsShareDialog.tsx — with one
 // deliberate difference: this app has two things worth putting on a card and
-// the web has one. The desktop client is where selling happens, so it can show
-// what a device actually earned over a period; the web console has no access to
-// that (the figures come from the daemon's local ledger) and only ever renders
-// the referral side.
+// the web has one. The desktop client is where selling happens, so that is
+// where the sell card is offered; the web console only ever renders the
+// referral side.
+//
+// The sell figures are the settled ledger's (`usage_summary` asks the server
+// for them). They cannot be taken off the daemon's own record of what it
+// served: that record is written when the call is served, before anything has
+// been priced, so its amount is 0 and a card built from it announced earnings
+// of 0.00 next to millions of shared tokens.
 //
 // The preview is the real canvas at full resolution, scaled down by CSS rather
 // than drawn small — what is on screen is byte-for-byte what gets shared, so

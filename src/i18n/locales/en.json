@@ -246,6 +246,7 @@
       "cooldown": "cooling down",
       "quarantined": "paused by the platform",
       "untradable": "not shared here",
+      "unsupported": "upstream has no such model",
       "price": "held on price"
     },
     "limitEdit": "Edit limit",

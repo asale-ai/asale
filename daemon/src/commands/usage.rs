@@ -15,19 +15,28 @@ use crate::cmd_err;
 /// `publisher::WINDOW_SECS`).
 pub(crate) const WINDOW_SECS: i64 = 5 * 3600;
 
-/// What this device *sold* over a period (day / week / month / all), from its
-/// own first-hand record of the calls it served.
+/// What the account *sold* over a period (day / week / month / all): tokens,
+/// earnings and call count, for the tray, the dashboard tile and the share card.
 ///
-/// Sell-side only, and cheap by design: the tray polls this every few seconds
-/// for the earnings figure, so it must not reach the network. The buy side used
-/// to ride along here and no caller ever read it — which is just as well, since
-/// the local rows behind it carried an amount of zero for every purchase. That
-/// question is [`usage_overview`] with `scope = "bought"`, one round trip to the
-/// ledger that actually settled the trades.
+/// The earnings come from the server's ledger, because that is the only place
+/// they exist. A local `provider_records` row is written the moment a call is
+/// served — before anyone has priced it — with `amount_usdt = 0`, and nothing
+/// fills it in afterwards except a manual "对账" run on the Records page (which
+/// only reaches back 150 tasks). So every sell-side earnings figure in the app
+/// read 0.00 against a real token count and a real call count, which reads as
+/// "you earned nothing" rather than "this number is not known here".
+///
+/// The reply is cached for [`SOLD_TTL`] and falls back to the local rows when
+/// the server cannot be reached, so the tray's few-second poll still costs at
+/// most one request per half-minute and an offline device still has tokens and
+/// counts to show.
 ///
 /// The subscription category is derived by the UI from `publish_limits` +
 /// `list_accounts` (capacity vs. window usage), so it is not repeated here.
 pub async fn usage_summary(state: &AppState, period: String) -> R<Value> {
+    if let Some(sold) = server_sold_summary(state, &period).await {
+        return Ok(json!({ "period": period, "sold": sold, "source": "server" }));
+    }
     // Cutoff in unix seconds; `None` = all-time.
     let since: Option<i64> = match period.as_str() {
         "day" => Some(day_start_ts()),
@@ -39,7 +48,58 @@ pub async fn usage_summary(state: &AppState, period: String) -> R<Value> {
     Ok(json!({
         "period": period,
         "sold": { "tokens": sold.0, "amount_usdt": sold.1, "count": sold.2 },
+        "source": "local",
     }))
+}
+
+/// How long a settled-earnings reading counts as current.
+const SOLD_TTL: i64 = 30;
+/// How long the tray will wait for it. Short, and shorter than the poll it
+/// feeds: this is a number in the corner of a status panel, and a server that
+/// is taking its time should cost one stale figure rather than a queue of
+/// in-flight requests.
+const SOLD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// The sell-side headline off the server's ledger, cached per period. `None`
+/// means the server did not answer — signed out, offline, or a bad gateway —
+/// and the caller should fall back to what this device recorded itself.
+async fn server_sold_summary(state: &AppState, period: &str) -> Option<Value> {
+    let now = now_secs();
+    if let Some((at, cached)) = state.sold_cache.read().await.get(period) {
+        if now - at < SOLD_TTL {
+            return cached.clone();
+        }
+    }
+    let answer = tokio::time::timeout(
+        SOLD_TIMEOUT,
+        authed(
+            state,
+            reqwest::Method::GET,
+            &format!("/api/v1/me/usage?role=provider&period={period}"),
+            None,
+        ),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .map(|v| sold_bucket(&v));
+    state.sold_cache.write().await.insert(period.to_string(), (now, answer.clone()));
+    answer
+}
+
+/// The three figures the sell-side headline needs, out of a `/me/usage` body.
+///
+/// Split out so the field names — the one thing that silently turns a real
+/// figure back into 0.00 if the server ever renames them — are covered by a
+/// test rather than by a round trip.
+fn sold_bucket(v: &Value) -> Value {
+    json!({
+        "tokens": v["total_tokens"].as_i64().unwrap_or(0),
+        // `total_amount` on the provider side is `provider_income` — the money
+        // after the platform's cut, which is what was earned.
+        "amount_usdt": v["total_amount"].as_i64().unwrap_or(0),
+        "count": v["conversations"].as_i64().unwrap_or(0),
+    })
 }
 
 /// The buy-side usage dashboard, straight from the server's ledger.
@@ -51,10 +111,15 @@ pub async fn usage_summary(state: &AppState, period: String) -> R<Value> {
 /// with the invoice by most of the prompt. A page that cannot be right is worse
 /// than a page that says it is offline.
 async fn bought_overview(state: &AppState, period: &str) -> R<Value> {
+    server_overview(state, "consumer", period).await
+}
+
+/// One side of the trade, as the ledger has it.
+async fn server_overview(state: &AppState, role: &str, period: &str) -> R<Value> {
     authed(
         state,
         reqwest::Method::GET,
-        &format!("/api/v1/me/usage?role=consumer&period={period}"),
+        &format!("/api/v1/me/usage?role={role}&period={period}"),
         None,
     )
     .await
@@ -71,6 +136,18 @@ pub async fn usage_overview(state: &AppState, period: String, scope: String) -> 
     // through rather than re-derived.
     if scope == "bought" {
         return bought_overview(state, &period).await;
+    }
+    // The sell side is the ledger's answer too, for the money if nothing else:
+    // the local rows carry `amount_usdt = 0` until someone reconciles by hand
+    // (see `usage_summary`), so the page's earnings line was either zero or,
+    // because it hides a zero, missing. A device that cannot reach the server
+    // still has its own tokens and counts, so a failure falls through to the
+    // local aggregation rather than emptying the page.
+    if scope == "sold" {
+        match server_overview(state, "provider", &period).await {
+            Ok(v) => return Ok(v),
+            Err(e) => tracing::warn!(error = %e.message, "sell-side usage: server unreachable, showing this device's own records"),
+        }
     }
     // Fold any newly-inserted ledger rows into the snapshot first (incremental —
     // only rows added since the last run are scanned), then read the snapshot.
@@ -771,6 +848,36 @@ pub(crate) fn provider_model_prefix(provider: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real `/me/usage?role=provider` body, as the server writes it. The
+    /// earnings live under `total_amount` — reading any other name gives back
+    /// the 0.00 this whole path exists to stop showing.
+    #[test]
+    fn the_sell_headline_reads_the_ledgers_own_field_names() {
+        let body = json!({
+            "period": "all", "scope": "sold",
+            "total_tokens": 18_062_379_i64,
+            "total_amount": 32_991_046_i64,
+            "conversations": 2562,
+            "models": [], "daily": [], "heatmap": [],
+            "stats": { "d7": 0, "d30": 0, "avg": 0, "active_days": 1, "first_day": "2026-08-01" },
+        });
+        assert_eq!(
+            sold_bucket(&body),
+            json!({ "tokens": 18_062_379_i64, "amount_usdt": 32_991_046_i64, "count": 2562 })
+        );
+    }
+
+    /// An account that has never sold anything answers with zeros, not with
+    /// missing fields — and a body that is missing them anyway must read as
+    /// zero rather than panic.
+    #[test]
+    fn a_body_without_the_fields_reads_as_zero() {
+        assert_eq!(
+            sold_bucket(&json!({})),
+            json!({ "tokens": 0, "amount_usdt": 0, "count": 0 })
+        );
+    }
 
     /// Shape of a real `oauth/usage` body: two fixed windows plus a model-scoped
     /// weekly one in the generic `limits` array.

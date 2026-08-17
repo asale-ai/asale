@@ -142,6 +142,8 @@ pub enum TaskOutcome {
     /// Upstream 403 aimed at the machine rather than the credential — a region
     /// block or a middlebox. See [`refusal_outcome`].
     Blocked,
+    /// The upstream has never heard of this model id. See [`unsupported_model`].
+    Unsupported,
 }
 
 /// Which of the two very different things a 401/403 can mean.
@@ -179,6 +181,41 @@ pub fn refusal_outcome(status: u16, body: &str) -> TaskOutcome {
         TaskOutcome::AuthFailed
     } else {
         TaskOutcome::Blocked
+    }
+}
+
+/// Whether a 4xx says the *model* does not exist, as opposed to anything else
+/// wrong with the request.
+///
+/// This is the one 4xx that must not be shrugged off. The rest are the
+/// consumer's problem — a malformed body, an oversized prompt — and the lane
+/// that relayed them is healthy, which is why a 4xx otherwise costs the lane
+/// nothing. "No such model" is a fact about what this account can serve, and it
+/// will be just as true for the next buyer: on 2026-08-17 four Anthropic ids
+/// the platform still listed (`claude-3-haiku`, `claude-opus-4`,
+/// `claude-opus-4-1`, `claude-sonnet-4`) were answered `404 not_found_error` by
+/// every subscription that was asked, and every buyer who picked one failed,
+/// because nothing in the seller took the id out of what it was advertising.
+///
+/// Narrow on purpose. A bare 404 with none of these words is a wrong URL —
+/// which is a real thing to get wrong on a custom endpoint — and the lane it
+/// belongs to may well be fine.
+pub fn unsupported_model(status: u16, body: &str) -> bool {
+    let b = body.to_ascii_lowercase();
+    match status {
+        // The Codex backend refuses a slug the account is not entitled to at
+        // validation time, before it is a 404: `"<model> is not supported when
+        // using Codex with a ChatGPT account"`.
+        400 => b.contains("not supported when using codex"),
+        404 => {
+            // Anthropic: `{"type":"not_found_error","message":"model: X"}`.
+            // OpenAI: `model_not_found` / "does not exist or you do not have
+            // access to it". OpenRouter-shaped resellers: "no endpoints found".
+            ["not_found_error", "model_not_found", "does not exist", "no endpoints found"]
+                .iter()
+                .any(|m| b.contains(m))
+        }
+        _ => false,
     }
 }
 
@@ -565,6 +602,10 @@ pub async fn execute(
             429 => TaskOutcome::RateLimited { reset_at },
             401 | 403 => refusal_outcome(status, &detail),
             s if s >= 500 => TaskOutcome::ServerError,
+            // Before the catch-all below: a model the upstream does not have is
+            // the one 4xx that says something about this lane rather than about
+            // the request, and it takes the lane off the market.
+            s if unsupported_model(s, &detail) => TaskOutcome::Unsupported,
             _ => TaskOutcome::Success { tokens_used: 0 },
         };
         tokens.report(&provider, &lease.account_id, &model, outcome);
@@ -694,6 +735,16 @@ pub async fn execute(
         };
         scan.push(&bytes);
         // Budget guard: interrupt if output exceeds the granted budget.
+        //
+        // What it can *do* about it depends on when it finds out, and that is
+        // the upstream's choice rather than ours — see `UsageScanner::completed`.
+        // A cap the upstream could enforce itself never gets here at all; the
+        // gateway forwards it as `max_tokens` / `max_output_tokens` and the
+        // vendor stops on its own. The exception is the ChatGPT Codex backend,
+        // which answers `400 {"detail":"Unsupported parameter:
+        // max_output_tokens"}` to the field and then reports its usage only at
+        // the end — so on that one lane this guard is always retroactive, and
+        // the whole of its effect is the finish reason below.
         if scan.usage().output_tokens > req.budget_tokens && req.budget_tokens > 0 {
             budget_hit = true;
         }
@@ -704,7 +755,16 @@ pub async fn execute(
         ));
         seq += 1;
         if budget_hit {
-            send_error(out, &task_id, "BUDGET_EXCEEDED", "output exceeded budget", false);
+            // Only an error if there was something left to cut off. A stream
+            // that has already signed off delivered a whole answer, and ending
+            // it with an error frame made the gateway record a settled call as
+            // `interrupted`, put a failure on the seller's lane, and hand the
+            // buyer a complete reply with a fault stapled to the end of it.
+            // The bill is bounded either way — the gateway caps usage at the
+            // budget it signed — so the frame bought nothing.
+            if !scan.completed() {
+                send_error(out, &task_id, "BUDGET_EXCEEDED", "output exceeded budget", false);
+            }
             break;
         }
     }
@@ -952,6 +1012,8 @@ pub struct UsageScanner {
     usage: Usage,
     /// Bytes after the last newline seen — an SSE line still being delivered.
     partial: Vec<u8>,
+    /// Whether the stream has announced its own end.
+    completed: bool,
 }
 
 /// Cap on the held fragment. SSE is newline-framed, so a line this long means
@@ -972,6 +1034,7 @@ impl UsageScanner {
             Some(cut) => {
                 let complete: Vec<u8> = self.partial.drain(..=cut).collect();
                 accumulate_usage(&mut self.usage, &complete);
+                self.completed |= stream_ended(&complete);
             }
             // No line has ended yet. Keep waiting — unless what we are holding
             // has stopped being plausibly one SSE line.
@@ -984,6 +1047,23 @@ impl UsageScanner {
     /// consume the scanner.
     pub fn usage(&self) -> Usage {
         self.usage
+    }
+
+    /// Whether the upstream has signed off on this stream.
+    ///
+    /// The budget guard needs the difference between "the model is still
+    /// writing and has already passed the cap" and "the cap was only exceeded
+    /// by the usage frame the stream ends with". Only the first is a runaway
+    /// worth cutting into; the second is an answer that arrived complete, and
+    /// treating it as an error told the buyer their finished reply had failed.
+    ///
+    /// The two cases are not a matter of taste about which dialect reports
+    /// usage when — they are exactly that. Anthropic counts output as it goes,
+    /// so a runaway is caught while there is still something to stop. The
+    /// Responses dialect reports usage once, in `response.completed`, so the
+    /// guard cannot fire there until the generation is already paid for.
+    pub fn completed(&self) -> bool {
+        self.completed
     }
 
     /// Parse whatever fragment is still held and return the total. For a stream
@@ -1016,6 +1096,34 @@ pub fn accumulate_usage(usage: &mut Usage, bytes: &[u8]) {
             merge_usage(usage, &v);
         }
     }
+}
+
+/// Whether an SSE fragment carries a dialect's own "that was all" marker.
+///
+/// Each vendor spells it differently and Gemini does not spell it at all — its
+/// stream simply stops — so a `false` here means "no proof the stream is over",
+/// which is the safe reading for the one caller: [`UsageScanner::completed`],
+/// whose `true` suppresses an error.
+fn stream_ended(bytes: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(bytes);
+    text.split('\n').any(|line| {
+        let Some(payload) = line.trim().strip_prefix("data:") else { return false };
+        let payload = payload.trim();
+        // OpenAI chat completions.
+        if payload == "[DONE]" {
+            return true;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else { return false };
+        matches!(
+            v.get("type").and_then(|t| t.as_str()),
+            // Responses: the terminal event, whichever way it ended. `incomplete`
+            // is the upstream's own truncation (its cap, not ours) and `failed`
+            // is an upstream error — both mean nothing further is coming.
+            Some("response.completed" | "response.incomplete" | "response.failed")
+                // Anthropic.
+                | Some("message_stop")
+        )
+    })
 }
 
 /// Usage from a non-streaming response body: the same dialect shapes, without
@@ -1098,6 +1206,35 @@ mod tests {
             refusal_outcome(403, r#"{"error":{"message":"Invalid API key"}}"#),
             TaskOutcome::AuthFailed
         );
+    }
+
+    /// Bodies taken from the 2026-08-17 failures and from the Codex refusal
+    /// the probe path already knew about.
+    #[test]
+    fn a_missing_model_is_told_apart_from_every_other_4xx() {
+        use super::unsupported_model;
+        assert!(unsupported_model(
+            404,
+            r#"{"type":"error","error":{"type":"not_found_error","message":"model: claude-opus-4-1"}}"#
+        ));
+        assert!(unsupported_model(
+            404,
+            r#"{"error":{"message":"The model `gpt-4-turbo-preview` does not exist or you do not have access to it.","code":"model_not_found"}}"#
+        ));
+        assert!(unsupported_model(404, r#"{"error":{"message":"No endpoints found matching your data policy"}}"#));
+        assert!(unsupported_model(
+            400,
+            r#"{"detail":"gpt-5-codex is not supported when using Codex with a ChatGPT account"}"#
+        ));
+
+        // The consumer's problem, not the lane's: these must stay a plain 4xx
+        // that costs the seller nothing.
+        assert!(!unsupported_model(400, r#"{"error":{"message":"messages: at least one message is required"}}"#));
+        assert!(!unsupported_model(413, "request entity too large"));
+        assert!(!unsupported_model(429, r#"{"error":{"type":"rate_limit_error"}}"#));
+        // A bare 404 is a wrong URL — a real mistake on a custom endpoint, and
+        // not evidence about the model.
+        assert!(!unsupported_model(404, "<html><title>404 Not Found</title></html>"));
     }
 
     #[test]
@@ -1260,6 +1397,42 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":13,"outpu
             scan.push(&vec![b'x'; MAX_PARTIAL_LINE]);
         }
         assert!(scan.partial.len() <= MAX_PARTIAL_LINE, "fragment is bounded");
+    }
+
+    /// Which dialects can tell the guard the stream is over, and which cannot.
+    ///
+    /// This is what decides whether passing the budget is an error or just a
+    /// truncated turn, so it is worth pinning per dialect rather than trusting
+    /// one example.
+    #[test]
+    fn the_scanner_knows_when_a_stream_has_signed_off() {
+        let ended = |frames: &[&str]| {
+            let mut s = UsageScanner::new();
+            for f in frames {
+                s.push(format!("{f}\n").as_bytes());
+            }
+            s.completed()
+        };
+        // Responses — the only place the Codex backend ever reports usage, and
+        // it is the terminal event itself.
+        assert!(ended(&[r#"data: {"type":"response.completed","response":{"usage":{"output_tokens":551}}}"#]));
+        assert!(ended(&[r#"data: {"type":"response.incomplete","response":{}}"#]));
+        assert!(ended(&[r#"data: {"type":"message_stop"}"#]));
+        assert!(ended(&["data: [DONE]"]));
+
+        // Mid-flight: Anthropic reports output as it goes, so a runaway is
+        // caught while there is still something to cut off.
+        assert!(!ended(&[r#"data: {"type":"message_delta","usage":{"output_tokens":900}}"#]));
+        assert!(!ended(&[r#"data: {"type":"response.output_text.delta","delta":"hi"}"#]));
+        // Gemini never says it is done; "no proof" must not read as "over".
+        assert!(!ended(&[r#"data: {"usageMetadata":{"candidatesTokenCount":12}}"#]));
+
+        // A terminal frame split across two transport chunks is still terminal.
+        let mut s = UsageScanner::new();
+        s.push(br#"data: {"type":"response.comp"#);
+        assert!(!s.completed(), "half a line proves nothing");
+        s.push(b"leted\",\"response\":{}}\n");
+        assert!(s.completed());
     }
 
     /// The gateway key the tests pretend is pinned into the build.
@@ -1598,6 +1771,41 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":500}}\n\n";
         execute(&crate::http::plain(), &StaticToken(Some("k".into())), req(&url, "claude", 100), &tx, None, &test_verifier(), never_canceled()).await;
         let frames = drain(&mut rx);
         assert!(frames.iter().any(|f| f.payload["code"] == "BUDGET_EXCEEDED"));
+    }
+
+    /// The same overshoot, discovered a frame too late to do anything about.
+    ///
+    /// A Responses stream reports its usage once, in the event that ends it —
+    /// the shape every ChatGPT Codex sale has, because that backend refuses the
+    /// `max_output_tokens` that would have let it stop by itself. The answer is
+    /// already delivered and paid for by the time the guard can see the number,
+    /// so an error frame here does not save anyone a token: it only turned a
+    /// settled call into `interrupted` and handed the buyer a complete reply
+    /// with a fault on the end.
+    #[tokio::test]
+    async fn a_budget_passed_only_by_the_final_frame_is_a_truncation_not_a_failure() {
+        let sse = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n\
+data: {\"type\":\"response.output_text.delta\",\"delta\":\"the whole answer\"}\n\n\
+data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":29,\"output_tokens\":551}}}\n\n";
+        let url = spawn_http(sse).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let rows = Arc::new(Mutex::new(Vec::new()));
+        let sink = CapturingSink { rows: rows.clone() };
+        execute(&crate::http::plain(), &StaticToken(Some("k".into())), req(&url, "gpt-5.5", 200), &tx, Some(&sink), &test_verifier(), never_canceled()).await;
+
+        let frames = drain(&mut rx);
+        assert!(
+            !frames.iter().any(|f| f.payload["code"] == "BUDGET_EXCEEDED"),
+            "nothing was cut off, so nothing failed"
+        );
+        // The buyer keeps every byte, and is told the turn was capped rather
+        // than that it ended of its own accord (`normalize_finish`).
+        assert!(frames.iter().any(|f| f.msg_type == protocol::T_STREAM_CHUNK));
+        let end = frames.iter().find(|f| f.msg_type == protocol::T_STREAM_END).expect("stream_end");
+        assert_eq!(end.payload["finish_reason"], "budget");
+        assert_eq!(end.payload["usage"]["output_tokens"], 551, "what the subscription actually spent");
+        // The seller's own record still says which kind of ending it was.
+        assert_eq!(rows.lock().await[0].1, "budget");
     }
 
     struct ReportingToken {

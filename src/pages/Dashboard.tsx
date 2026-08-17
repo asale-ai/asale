@@ -37,10 +37,10 @@ export function Dashboard({ onNavigate, region = "" }: { onNavigate: (t: Tab) =>
       invoke<ProxyStatus>("proxy_status")
         .then((s) => { fails = 0; setStatus(s); setDaemonDown(false); })
         .catch(() => { if (++fails >= 3) setDaemonDown(true); });
-    // What this device earned today, in USDT. It comes from the settled ledger
-    // rather than from `used_today × price`: the amount on a provider record is
-    // the server's own `provider_income` (fee already taken), so it is the money
-    // and not an estimate of it.
+    // What this account earned today, in USDT. It comes from the settled ledger
+    // rather than from `used_today × price`: the amount is the server's own
+    // `provider_income` (fee already taken), so it is the money and not an
+    // estimate of it.
     const sold = () =>
       invoke<UsageSummary>("usage_summary", { period: "day" }).then((s) => setEarned(s.sold.amount_usdt));
     const poll = () => {

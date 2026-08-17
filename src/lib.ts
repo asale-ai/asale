@@ -804,10 +804,16 @@ export interface UsageBucket {
   count: number;
 }
 /** Sell side only — see `usage_summary`. The buy side is `usage_overview`
- *  with `scope: "bought"`, which asks the server. */
+ *  with `scope: "bought"`, which asks the server.
+ *
+ *  `source` says where the figures came from: `server` is the settled ledger
+ *  (account-wide, and the only place earnings exist); `local` is this device's
+ *  own record, used when the server cannot be reached — its tokens and counts
+ *  are real but its `amount_usdt` is only what a manual reconcile filled in. */
 export interface UsageSummary {
   period: "day" | "week" | "month" | "all";
   sold: UsageBucket;
+  source?: "server" | "local";
 }
 
 // ── Usage overview (full dashboard, Usage page) ──

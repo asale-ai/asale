@@ -53,6 +53,13 @@ pub struct AppState {
     /// Limits-page poll; failures are cached too, so an unreachable upstream
     /// costs one timeout per half-minute rather than one per poll.
     pub limits_cache: Arc<RwLock<std::collections::HashMap<String, (i64, Result<serde_json::Value, String>)>>>,
+    /// Cache of the sell-side earnings summary the server settles, keyed by
+    /// period → (fetched_at unix secs, the summary, or `None` if the server
+    /// could not be reached). The tray polls this every few seconds and the
+    /// ledger only moves at settlement, so one request per half-minute is
+    /// enough; failures are cached too, so being signed out or offline costs a
+    /// timeout at that same rate rather than one per poll.
+    pub sold_cache: Arc<RwLock<std::collections::HashMap<String, (i64, Option<serde_json::Value>)>>>,
     /// Whether the signed-in account is a platform operator (`users.role ==
     /// "admin"` server-side). Gates the custom-endpoint commands; see
     /// `commands::accounts::platform_operator`.
@@ -123,6 +130,7 @@ impl AppState {
             device_id,
             pool,
             limits_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            sold_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             operator: Arc::new(RwLock::new(None)),
             oauth_flows: Arc::new(RwLock::new(HashMap::new())),
             oauth_submitters: Arc::new(RwLock::new(HashMap::new())),

@@ -246,6 +246,7 @@
       "cooldown": "クールダウン中",
       "quarantined": "プラットフォームにより停止",
       "untradable": "共有対象外",
+      "unsupported": "上流に該当モデルなし",
       "price": "価格がレンジ外"
     },
     "limitEdit": "上限を変更",

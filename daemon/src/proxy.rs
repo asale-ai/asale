@@ -512,6 +512,19 @@ async fn send_market(
     if let Some(lang) = ui_language(st).await {
         req = req.header("accept-language", lang);
     }
+    // Which install is buying. `st.http` already carries the version header on
+    // every asale-host call, but until this one went with it the server had no
+    // device row to write it to on the buy path: the only two places a version
+    // reaches the backoffice are the publisher WS handshake and device
+    // registration, and an install that never sells performs neither. So an
+    // account that only buys used to show whichever build it last sold with.
+    //
+    // Not an identity claim and never treated as one — the request is authorized
+    // by the API key above, and the server only accepts this id for a device the
+    // key's account already owns.
+    if let Some(app) = &st.app {
+        req = req.header(asale_protocol::frame::H_DEVICE, app.device_id.clone());
+    }
     req.body(bytes.to_vec()).send().await
 }
 

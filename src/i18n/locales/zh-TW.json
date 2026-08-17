@@ -246,6 +246,7 @@
       "cooldown": "冷卻中",
       "quarantined": "已被平台暫停",
       "untradable": "平台未開放共享",
+      "unsupported": "上游沒有該模型",
       "price": "價格低於區間"
     },
     "limitEdit": "修改限額",

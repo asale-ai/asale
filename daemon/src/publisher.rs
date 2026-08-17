@@ -1186,6 +1186,10 @@ impl TokenProvider for PoolTokens {
                     let d = "authentication failed (401/403)";
                     (pool.on_error(provider, account_id, model, UpstreamErrorKind::AuthFailed, d, now), d.to_string())
                 }
+                TaskOutcome::Unsupported => {
+                    let d = "upstream does not serve this model";
+                    (pool.on_error(provider, account_id, model, UpstreamErrorKind::Unsupported, d, now), d.to_string())
+                }
                 TaskOutcome::Blocked => {
                     let d = "upstream refused this machine (403 — region block or network filter)";
                     (pool.on_error(provider, account_id, model, UpstreamErrorKind::Blocked, d, now), d.to_string())
