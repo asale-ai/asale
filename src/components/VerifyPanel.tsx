@@ -248,7 +248,7 @@ export function useBatchVerification(provider: string) {
  *  the common case is a worse default than unticking one to express the rare
  *  one. */
 export function ModelChecklist({
-  models, value, onChange, disabled, label, note, detail, expandable,
+  models, value, onChange, disabled, label, note, detail, expandable, unavailable,
 }: {
   models: string[];
   value: string[];
@@ -264,9 +264,17 @@ export function ModelChecklist({
    *  offer a disclosure that opens onto "not found": the evidence behind a
    *  verdict only exists once there is a verdict. */
   expandable?: (model: string) => boolean;
+  /** Rows that cannot be acted on, and are shown anyway.
+   *
+   *  Listing them is the point. A model missing from the list reads as a model
+   *  the account does not have, which sends the seller to look for it in the
+   *  wrong place; a model listed, greyed and annotated says what it is waiting
+   *  for. The caller is expected to put the reason in `note`. */
+  unavailable?: (model: string) => boolean;
 }) {
   const { t } = useTranslation();
-  const all = models.length > 0 && value.length === models.length;
+  const pickable = models.filter((m) => !unavailable?.(m));
+  const all = pickable.length > 0 && pickable.every((m) => value.includes(m));
   const toggle = (m: string) =>
     onChange(value.includes(m) ? value.filter((x) => x !== m) : [...value, m]);
 
@@ -289,8 +297,8 @@ export function ModelChecklist({
         <button
           type="button"
           className="lane-resume"
-          onClick={() => onChange(all ? [] : [...models])}
-          disabled={disabled || models.length === 0}
+          onClick={() => onChange(all ? [] : pickable)}
+          disabled={disabled || pickable.length === 0}
         >
           {t(all ? "publish.verify.selectNone" : "publish.verify.selectAll")}
         </button>
@@ -308,15 +316,16 @@ export function ModelChecklist({
           // label: nested in one, every click on the chevron would also tick
           // the box it was trying not to touch.
           const canOpen = !!detail && (!expandable || expandable(m));
+          const off = !!unavailable?.(m);
           return (
-            <div key={m} className={`mc-item${shown ? " open" : ""}`}>
+            <div key={m} className={`mc-item${shown ? " open" : ""}${off ? " unavailable" : ""}`}>
               <div className="mc-row">
-                <label className={`mc-pick${value.includes(m) ? " on" : ""}`}>
+                <label className={`mc-pick${value.includes(m) && !off ? " on" : ""}`}>
                   <input
                     type="checkbox"
-                    checked={value.includes(m)}
+                    checked={value.includes(m) && !off}
                     onChange={() => toggle(m)}
-                    disabled={disabled}
+                    disabled={disabled || off}
                   />
                   <span className="mc-name mono">{m}</span>
                 </label>

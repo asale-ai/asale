@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { PROVIDERS as ALL_PROVIDERS } from "@shared/providers.generated";
 import { groupModelsByFamily } from "@shared/model-groups";
@@ -449,11 +449,16 @@ const TEST_WIRES = [
  * a worse tool than one that asks.
  */
 function TestDialog({
-  account, lanes, verdicts, onClose,
+  account, lanes, verdicts, gated, onClose,
 }: {
   account: AccountStatus;
   lanes: Lane[];
   verdicts: LaneVerdict[];
+  /** Whether an unverified lane is actually being held out of buyers' reach.
+   *  Follows `enforced`, not `enabled`: while the platform is only measuring,
+   *  a lane with no verdict serves normally and greying it here would be this
+   *  dialog inventing a refusal that is not happening. */
+  gated: boolean;
   onClose: () => void;
 }) {
   const { t } = useTranslation();
@@ -466,26 +471,50 @@ function TestDialog({
    * them would make the fast check slow and the slow check look like a
    * connectivity test. */
   const [tab, setTab] = useState<"test" | "verify">("test");
-  // Selling lanes first, then the rest: the default has to be a model that
-  // could actually answer, or the first thing every seller sees is a failure
-  // that is about their choice rather than about their supply.
+
+  /* A lane the verification gate is holding back cannot be tested, and the
+   * reason is worth spelling out because it looks like the opposite.
+   *
+   * The test is a real purchase through the ordinary front door, and it is
+   * deliberately *not* exempt from the gate — a test that passed where a buyer
+   * would fail is worse than no test. So until a verdict lands, every request
+   * this dialog sends is refused, and it used to be refused as `no_supply`:
+   * "nobody is selling this", about the seller's own switched-on account. The
+   * server now names the real reason (`errors.market.laneUnverified`), and this
+   * is the other half — not letting them spend the round trip to find out. */
+  const blocked = useCallback((model: string) => {
+    if (!gated) return false;
+    const st = recordedStatus(verdicts, account.provider, model);
+    return st !== "pass" && st !== "watch";
+  }, [gated, verdicts, account.provider]);
+
+  // Testable lanes first, then the rest, then the ones the gate is holding:
+  // the default has to be a model that could actually answer, or the first
+  // thing every seller sees is a failure that is about their choice rather
+  // than about their supply.
   const options = useMemo(() => {
-    const rank = (l: Lane) => (l.status === "selling" ? 0 : l.sell_enabled ? 1 : 2);
+    const rank = (l: Lane) =>
+      blocked(l.model) ? 3 : l.status === "selling" ? 0 : l.sell_enabled ? 1 : 2;
     return [...lanes].sort((a, b) => rank(a) - rank(b) || a.model.localeCompare(b.model));
-  }, [lanes]);
+  }, [lanes, blocked]);
 
   const models = useMemo(() => options.map((l) => l.model), [options]);
-  const [picked, setPicked] = useState<string[]>(models);
+  /** The models this button may actually spend money on. */
+  const testable = useMemo(() => models.filter((m) => !blocked(m)), [models, blocked]);
+  const [picked, setPicked] = useState<string[]>(testable);
   const [wire, setWire] = useState(TEST_WIRES[0].id);
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<Record<string, SupplyTest | "running">>({});
   const [err, setErr] = useState("");
 
   // An account whose lanes load a moment after the dialog does should still
-  // start out fully ticked.
-  useEffect(() => { setPicked(models); }, [models.join(" ")]); // eslint-disable-line react-hooks/exhaustive-deps
+  // start out fully ticked. Keyed on the testable set rather than on every
+  // model, so a verdict landing while the dialog is open brings the lane it
+  // just cleared into the selection.
+  useEffect(() => { setPicked(testable); }, [testable.join(" ")]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const notSelling = picked.filter((m) => options.find((l) => l.model === m)?.status !== "selling").length;
+  const blockedCount = models.filter(blocked).length;
 
   /** Buy from each picked lane in turn.
    *
@@ -498,7 +527,10 @@ function TestDialog({
     setErr("");
     setResults({});
     try {
-      for (const model of picked) {
+      // Re-filtered rather than trusted: `picked` is state, and a verdict
+      // arriving between the click and this loop could have moved a lane into
+      // the gate's hands since it was ticked.
+      for (const model of picked.filter((m) => !blocked(m))) {
         setResults((r) => ({ ...r, [model]: "running" }));
         try {
           const out = await invoke<SupplyTest>("test_supply", {
@@ -574,7 +606,12 @@ function TestDialog({
                 onChange={setPicked}
                 disabled={running}
                 label={t("publish.test.pickModels")}
+                unavailable={blocked}
                 note={(m) => {
+                  // The gate outranks every other annotation: a lane it is
+                  // holding cannot be tested at all, so what its own switch or
+                  // its last result says about it is beside the point.
+                  if (blocked(m)) return <span className="warn">{t("publish.test.needsVerify")}</span>;
                   const r = results[m];
                   if (r === "running") return <span className="faint">{t("publish.test.running")}</span>;
                   if (r) {
@@ -603,6 +640,25 @@ function TestDialog({
                   cheaper than letting them buy the answer. */}
               {notSelling > 0 && (
                 <div className="hint">{t("publish.test.someNotSelling", { n: notSelling })}</div>
+              )}
+
+              {/* Not a warning about the test — a pointer to the one action
+                  that clears it. The verification lives one tab away in this
+                  same dialog, so the button switches to it rather than sending
+                  the seller back to the page to find it. */}
+              {blockedCount > 0 && (
+                <div className="callout compact">
+                  <IconShield />
+                  <span>{t("publish.test.someUnverified", { n: blockedCount })}</span>
+                  <button
+                    type="button"
+                    className="lane-resume"
+                    onClick={() => setTab("verify")}
+                    disabled={running}
+                  >
+                    {t("publish.test.goVerify")}
+                  </button>
+                </div>
               )}
 
               <div className="btn-row" style={{ marginTop: "var(--s4)" }}>
@@ -933,16 +989,23 @@ export function Publish() {
    * A failure is left silent. Verification is not what this page is for, and a
    * red banner about it would sit on top of the switches and terms somebody
    * actually came here to change. */
+  const loadVerification = useCallback(async (): Promise<VerifyOverview | null> => {
+    if (!inTauri) return null;
+    try {
+      const v = await invoke<VerifyOverview>("lane_verification_overview");
+      setVerification(v);
+      return v;
+    } catch {
+      return null;
+    }
+  }, []);
+
   useEffect(() => {
     if (!inTauri) return;
-    const poll = () =>
-      invoke<VerifyOverview>("lane_verification_overview")
-        .then(setVerification)
-        .catch(() => {});
-    poll();
-    const id = setInterval(poll, 60000);
+    void loadVerification();
+    const id = setInterval(() => { void loadVerification(); }, 60000);
     return () => clearInterval(id);
-  }, []);
+  }, [loadVerification]);
 
   // Reputation standing. The gateway reports it once per supply declaration
   // (every 60s), so polling faster than that would only re-read the same value.
@@ -966,6 +1029,82 @@ export function Publish() {
   // filtered on `sell_enabled` — the whole point of this one is that the
   // account is not selling yet.
   const gateAccount = accounts.find((a) => keyOf(a) === gate);
+
+  /** Accounts already shown the verification dialog in this visit to the page.
+   *
+   *  Without it the auto-open below and the seller's dismissal fight each
+   *  other: the condition that opened the dialog is still true the moment it
+   *  closes, so it would reopen on the next render forever. A ref rather than
+   *  state because nothing renders from it, and per visit rather than for good
+   *  because an unverified lane is a lane earning nothing — worth raising again
+   *  next time they come to look at their selling, just not every four
+   *  seconds. */
+  const prompted = useRef<Set<string>>(new Set());
+
+  /** Whether the *automatic* prompt has already fired this visit.
+   *
+   *  Separate from `prompted` above, which is per account. A device holding
+   *  four unverified accounts would otherwise answer every dismissal with the
+   *  next account's dialog, which is not a prompt — it is a queue the seller
+   *  has to click their way out of. One is enough to make the point; the rest
+   *  are reachable from the lane list behind it. */
+  const autoPrompted = useRef(false);
+
+  /** Show the verification dialog for one account.
+   *
+   *  `force` means the seller just did something — moved the switch — and is
+   *  owed the dialog whether or not they have already dismissed one for this
+   *  account. Without it this is the automatic prompt, which stands aside for a
+   *  dismissal.
+   *
+   *  Either way it stands the *automatic* prompt down for the rest of the
+   *  visit. One dialog is the point, and it does not matter which path opened
+   *  it: answering a dismissal with the next account's copy is the queue this
+   *  is written to avoid. */
+  const openGate = useCallback((k: string, force = false) => {
+    if (!force && prompted.current.has(k)) return;
+    prompted.current.add(k);
+    autoPrompted.current = true;
+    setGate(k);
+  }, []);
+
+  /* An account selling models that have never passed verification is earning
+   * nothing from them, and nothing on the market will change that on its own —
+   * the gateway holds an unverified lane out of every buyer's reach until a
+   * verdict lands, and the only run that arrives promptly is one the seller
+   * starts. So the dialog is put in front of them.
+   *
+   * Deliberately *not* a verification started automatically. A run buys real
+   * completions from the seller's own subscription, and starting that without
+   * being asked is not this page's call to make even where the platform eats
+   * the bill — see `Kind::Admission` settling at zero. The seller presses the
+   * button; this only makes sure they are shown it.
+   *
+   * The switch-on path opens the same dialog through the same door, so a seller
+   * who dismissed it there is not shown it again by this. */
+  useEffect(() => {
+    if (!verification?.enabled || autoPrompted.current) return;
+    // Something else already has the screen; try again on the next poll.
+    if (gate || testing || deviceCode || pasteFlow) return;
+    // Including a half-finished edit. These polls tick every four seconds, and
+    // a modal landing on top of a number somebody is typing loses the number.
+    if (limitEditing || bandEditing || slotsEditing) return;
+    // Lanes arrive a beat after accounts do. Reading "no lanes" as "no lane
+    // needs verifying" would burn the one prompt this account gets.
+    if (lanes.length === 0) return;
+    const waiting = accounts.find((a) => {
+      if (!a.sell_enabled || prompted.current.has(keyOf(a))) return false;
+      const mine = lanes.filter((l) => l.provider === a.provider && l.account_id === a.account_id);
+      return mine.length > 0 && mine.some((l) => {
+        const st = recordedStatus(verification.lanes, l.provider, l.model);
+        return st !== "pass" && st !== "watch";
+      });
+    });
+    if (waiting) openGate(keyOf(waiting));
+  }, [
+    accounts, lanes, verification, gate, testing, deviceCode, pasteFlow,
+    limitEditing, bandEditing, slotsEditing, openGate,
+  ]);
 
   /** Put a lane the operator has fixed back on the market. */
   async function resume(lane: Lane) {
@@ -1010,7 +1149,7 @@ export function Publish() {
     // on sale: the gateway declares it `unverified` and refuses to route
     // buyers to it until a verdict says otherwise, so the switch can safely
     // stay on whether or not the seller sits through the dialog.
-    const needsGate = enabled && !a.sell_enabled && verification?.enabled;
+    const turningOn = enabled && !a.sell_enabled;
     setPending((p) => ({ ...p, [k]: true }));
     // Optimistic: the list refreshes on a 4s poll, too slow for a toggle.
     setAccounts((list) =>
@@ -1036,7 +1175,16 @@ export function Publish() {
         ...(concurrency === undefined ? {} : { concurrency }),
       });
       loadAccounts();
-      if (needsGate) setGate(k);
+      // Decided on a *fresh* reading, not the polled one. The overview is
+      // fetched on mount and once a minute after that, and the first fetch is
+      // exactly the one a new seller misses: they arrive signed out, the call
+      // 401s, `verification` stays null, and the switch they flip a moment
+      // later finds `null?.enabled` — so the dialog never opened, and the lane
+      // sat unverified and unbuyable with nothing on screen to say why.
+      if (turningOn) {
+        const v = (await loadVerification()) ?? verification;
+        if (v?.enabled) openGate(k, true);
+      }
     } catch (e) {
       setAcctErr(errText(e));
       // The session can lapse between the check above and this call.
@@ -2068,6 +2216,7 @@ export function Publish() {
           account={testAccount}
           lanes={lanes.filter((l) => l.provider === testAccount.provider && l.account_id === testAccount.account_id)}
           verdicts={verification?.lanes ?? []}
+          gated={!!verification?.enabled && !!verification?.enforced}
           onClose={() => setTesting("")}
         />
       )}

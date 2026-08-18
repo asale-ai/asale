@@ -216,7 +216,10 @@
       "pickModels": "要测试的模型",
       "runN": "开始测试（{{n}} 个）",
       "runningN": "测试中… {{done}}/{{total}}",
-      "someNotSelling": "所选模型中有 {{n}} 个当前不在市场上，会因此失败。"
+      "someNotSelling": "所选模型中有 {{n}} 个当前不在市场上，会因此失败。",
+      "needsVerify": "待验证",
+      "someUnverified": "该账号有 {{n}} 个模型还没通过验证。在通过之前，市场不会把任何买家的请求路由过去——这个测试也一样。",
+      "goVerify": "去验证"
     },
     "sharedBadge": "与本机 CLI 共用",
     "sharedHint": "该凭据从本机安装的 CLI 导入，两者使用同一个上游登录。",
@@ -1028,7 +1031,8 @@
     },
     "market": {
       "noSupply": "当前没有卖家在售 {{model}}。",
-      "modelNotTraded": "本平台不交易 {{model}}。"
+      "modelNotTraded": "本平台不交易 {{model}}。",
+      "laneUnverified": "本机的 {{model}} 通道还没通过模型验证，市场暂时不会把请求路由过来。跑一次验证就能开始出售。"
     },
     "wallet": {
       "insufficientBalance": "余额不足。",

@@ -2542,6 +2542,12 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .mc-pick.on .mc-name { color: var(--fg); }
+/* A row that is listed but cannot be picked. Dimmed rather than hidden: a model
+   missing from the list reads as a model the account does not have, and sends
+   the seller looking for it in the wrong place. The note beside it says what it
+   is waiting for. */
+.mc-item.unavailable .mc-name { color: var(--fg-3); opacity: 0.6; }
+.mc-item.unavailable .mc-pick { cursor: default; }
 /* The standing: short by construction, right-aligned so a column of them reads
    as a column, and never allowed to squeeze the name. */
 .mc-note { flex-shrink: 0; text-align: right; color: var(--fg-2); }

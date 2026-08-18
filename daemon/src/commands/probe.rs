@@ -37,7 +37,7 @@
 //! [`MAX_TOKENS`] of reply, and the UI says so before the button is pressed.
 
 use serde_json::{json, Value};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::state::AppState;
 use super::{R, now_secs};
@@ -55,6 +55,33 @@ const PROMPT: &str = "Reply with exactly one word: ok";
 /// failure and is not one. This is small enough to be pocket change and large
 /// enough that the models we trade actually finish a word.
 const MAX_TOKENS: i64 = 64;
+
+/// How long a test waits for the lane it is about to buy from to reach the
+/// market, before giving up and buying anyway.
+///
+/// Flipping the sell switch and pressing this button are one gesture, and the
+/// gap between them is not zero: the switch rebuilds the account pool and
+/// nudges the socket, and when it is the *first* account being switched on, the
+/// publisher session starts from nothing — config, catalog, price table,
+/// connect, register — before the first declaration is even sent. A test fired
+/// inside that window matched nothing and came back "nobody is selling this",
+/// about a switch the seller had turned on a second earlier, and pressing the
+/// button again did not make it arrive any sooner.
+///
+/// Fifteen seconds, which is not a number picked here: it is
+/// `verify::DECLARE_WAIT` on the server, the same wait the verification button
+/// already absorbs, against the same table. Two buttons side by side in one
+/// dialog that disagreed about how long a declaration takes would be a bug in
+/// waiting.
+const DECLARE_WAIT: Duration = Duration::from_secs(15);
+
+/// How often the market's own picture is re-read while waiting.
+///
+/// Slower than the server's own 400ms poll of the same table, because this one
+/// is an authenticated REST round trip rather than a local query. It only
+/// decides how quickly the common case — the row is already there — gets out of
+/// the loop, and that case exits on the first read.
+const DECLARE_POLL: Duration = Duration::from_millis(700);
 
 /// How long to wait for the whole round trip before calling it hung.
 ///
@@ -222,6 +249,98 @@ fn provenance(h: &reqwest::header::HeaderMap) -> Value {
     })
 }
 
+/// Whether the market's own device list shows *this* install declaring
+/// `(provider, model)`.
+///
+/// `None` means the list could not be read that way — no session, no answer, a
+/// payload without this device in it — and it is deliberately not folded in
+/// with "not declared". The two lead to opposite decisions in
+/// [`wait_until_declared`]: one is worth waiting out, and the other is a
+/// question this side cannot answer, where waiting proves nothing.
+///
+/// Presence of the row is the whole test. Not `available`: a lane the publisher
+/// is holding back — quota, cooldown, a price band — is one the market would
+/// refuse a stranger too, and this button exists to report that refusal rather
+/// than to wait for it to go away. What it waits for is the declaration
+/// existing at all.
+///
+/// The answer carries a second fact alongside it, in `Declared::any`: whether
+/// this device has declared *anything*. A declaration is a full snapshot — the gateway
+/// reconciles against it and withdraws whatever the snapshot left out — so a
+/// device with other lanes on the market has already had its snapshot land, and
+/// this lane's absence from it is an answer rather than a lane still in flight.
+/// That is what keeps a twelve-model batch from paying the wait twelve times
+/// over.
+fn declared_in(devices: &Value, provider: &str, model: &str) -> Option<Declared> {
+    let me = devices["devices"]
+        .as_array()?
+        .iter()
+        .find(|d| d["this_device"].as_bool() == Some(true))?;
+    let models = me["models"].as_array()?;
+    Some(Declared {
+        lane: models.iter().any(|m| {
+            m["provider"].as_str() == Some(provider) && m["model"].as_str() == Some(model)
+        }),
+        any: !models.is_empty(),
+    })
+}
+
+/// What the market says this device is offering, as far as the wait cares.
+#[derive(Debug, PartialEq, Eq)]
+struct Declared {
+    /// The lane being tested is on the market.
+    lane: bool,
+    /// This device has declared at least one lane, so its snapshot has landed.
+    any: bool,
+}
+
+impl Declared {
+    /// Is there still something a wait could change?
+    fn worth_waiting_for(&self) -> bool {
+        !self.lane && !self.any
+    }
+}
+
+/// Block until the market has heard of this lane, or until waiting stops being
+/// worth it.
+///
+/// Fails **open**, in both senses: an unreadable answer returns immediately,
+/// and so does the deadline. The purchase that follows has its own matching and
+/// its own refusal, and it is a better reporter than this loop — the one thing
+/// this must not do is turn "the server is having a bad minute" into a button
+/// that appears to hang and then blames the seller's subscription.
+async fn wait_until_declared(state: &AppState, provider: &str, model: &str) {
+    // A device with no publisher session is not on its way to the market, it is
+    // simply not going. Waiting fifteen seconds to be told that — once per model
+    // in a batch — is the one case where this loop makes the button worse than
+    // it was, and it is the cheapest of all of them to rule out.
+    if state.publisher.read().await.is_none() {
+        return;
+    }
+    let deadline = Instant::now() + DECLARE_WAIT;
+    loop {
+        match super::sell::devices_list(state)
+            .await
+            .ok()
+            .and_then(|v| declared_in(&v, provider, model))
+        {
+            Some(d) if d.worth_waiting_for() => {}
+            // On the market, already reconciled against a snapshot that left it
+            // out, or unanswerable. None of the three gets better by waiting.
+            _ => return,
+        }
+        if Instant::now() >= deadline {
+            tracing::info!(
+                provider, %model,
+                "the market still has no declaration for this lane after {}s; testing anyway",
+                DECLARE_WAIT.as_secs()
+            );
+            return;
+        }
+        tokio::time::sleep(DECLARE_POLL).await;
+    }
+}
+
 /// Run one real purchase against this device's own lane.
 ///
 /// `provider` and `account_id` name the row the button was pressed on; they are
@@ -269,6 +388,12 @@ pub async fn test_supply(
             "turn selling on for this account first"
         ));
     }
+
+    // The switch and this button are one gesture; the declaration behind them
+    // is not instant. Waited out here rather than reported, for the reasons on
+    // `DECLARE_WAIT` — and before the clock below starts, so the round trip
+    // this reports is the purchase's own and not the wait's.
+    wait_until_declared(state, &provider, &model).await;
 
     let key = super::buy::ensure_consumer_key(state).await?;
     let base = state.cfg.gateway_api_base.trim_end_matches('/');
@@ -448,6 +573,84 @@ async fn send(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn devices(rows: Value) -> Value {
+        json!({"devices": [
+            // A second machine on the same account, listed first on purpose:
+            // its lanes are not this install's and must never satisfy the wait.
+            {"device_id": "other", "this_device": false, "models": [
+                {"provider": "claude", "model": "claude-opus-5"},
+            ]},
+            {"device_id": "mine", "this_device": true, "models": rows},
+        ]})
+    }
+
+    /// The wait ends when *this* device's declaration lands, and not before.
+    ///
+    /// Every one of these was a way for the test button to stop waiting on
+    /// somebody else's supply and then report the market's refusal as though it
+    /// had said something about the lane the seller asked about.
+    #[test]
+    fn only_this_devices_own_declaration_ends_the_wait() {
+        let mine = devices(json!([{"provider": "codex", "model": "gpt-5.6"}]));
+        let lane = |p: &str, m: &str| declared_in(&mine, p, m).unwrap().lane;
+        assert!(lane("codex", "gpt-5.6"));
+        assert!(!lane("codex", "gpt-5.6-codex"), "a different model");
+        assert!(!lane("claude", "gpt-5.6"), "a different provider");
+        assert!(!lane("claude", "claude-opus-5"), "declared, but by the seller's other machine");
+        assert!(!declared_in(&devices(json!([])), "codex", "gpt-5.6").unwrap().lane);
+    }
+
+    /// A snapshot that landed without this lane in it is an answer, not a wait.
+    ///
+    /// `supply.declare` is a full snapshot and the gateway reconciles against
+    /// it, so once *any* of this device's lanes is on the market the frame that
+    /// would have carried this one has already arrived. Without this, a batch
+    /// of a dozen models on an account whose lane is genuinely absent paid the
+    /// full wait a dozen times over — three minutes of spinner before the first
+    /// answer.
+    #[test]
+    fn a_snapshot_that_landed_without_this_lane_is_not_waited_out() {
+        let waiting = declared_in(&devices(json!([])), "codex", "gpt-5.6").unwrap();
+        assert!(waiting.worth_waiting_for(), "nothing declared yet: the session may still be coming up");
+
+        let landed = declared_in(
+            &devices(json!([{"provider": "codex", "model": "gpt-5.6-codex"}])),
+            "codex",
+            "gpt-5.6",
+        )
+        .unwrap();
+        assert!(
+            !landed.worth_waiting_for(),
+            "the snapshot arrived and left this lane out; waiting cannot change that"
+        );
+
+        let present = declared_in(
+            &devices(json!([{"provider": "codex", "model": "gpt-5.6"}])),
+            "codex",
+            "gpt-5.6",
+        )
+        .unwrap();
+        assert!(!present.worth_waiting_for(), "already on the market");
+    }
+
+    /// An answer we could not read is not "not declared".
+    ///
+    /// Folding the two together would make an expired session, or a server
+    /// having a bad minute, into fifteen seconds of apparent hang on every
+    /// press of a button whose own purchase would have reported the problem
+    /// properly.
+    #[test]
+    fn an_unreadable_device_list_does_not_start_a_wait() {
+        for unreadable in [
+            json!({}),
+            json!({"devices": []}),
+            json!({"devices": [{"device_id": "other", "this_device": false, "models": []}]}),
+            json!({"devices": [{"device_id": "mine", "this_device": true}]}),
+        ] {
+            assert_eq!(declared_in(&unreadable, "codex", "gpt-5.6"), None);
+        }
+    }
 
     /// The default is OpenAI chat, and an unknown id lands on it rather than
     /// failing: the picker's value comes from a saved preference that may

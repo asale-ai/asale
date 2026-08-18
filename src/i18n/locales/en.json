@@ -216,7 +216,10 @@
       "pickModels": "Models to test",
       "runN": "Test {{n}} model(s)",
       "runningN": "Testing… {{done}}/{{total}}",
-      "someNotSelling": "{{n}} of the picked models are not on the market right now and will fail for that reason."
+      "someNotSelling": "{{n}} of the picked models are not on the market right now and will fail for that reason.",
+      "needsVerify": "not verified",
+      "someUnverified": "{{n}} of this account's models have not passed verification yet. The market holds them out of every buyer's reach — including this test — until they do.",
+      "goVerify": "Verify them"
     },
     "sharedBadge": "shared with local CLI",
     "sharedHint": "This credential was imported from a CLI installed on this machine, so both use the same upstream login.",
@@ -1028,7 +1031,8 @@
     },
     "market": {
       "noSupply": "No provider is selling {{model}} right now.",
-      "modelNotTraded": "{{model}} is not traded on this platform."
+      "modelNotTraded": "{{model}} is not traded on this platform.",
+      "laneUnverified": "This device's {{model}} lane has not passed model verification yet, so the market will not route to it. Run the verification and it will start selling."
     },
     "wallet": {
       "insufficientBalance": "Insufficient balance.",
