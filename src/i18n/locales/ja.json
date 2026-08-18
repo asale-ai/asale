@@ -1132,7 +1132,7 @@
     "cli": {
       "unknownProvider": "サポートされていない CLI です。Claude / Codex / Gemini から選んでください。",
       "noCredentials": "このマシンに {{provider}} CLI のサインイン情報が見つかりません。",
-      "notAnApiKeyProvider": "このプロバイダーはサインインで接続します。API キーは従量課金のプラットフォーム API（kimi_api、xai_api）専用です。",
+      "notAnApiKeyProvider": "このプロバイダーはサインインで接続します。API キーは従量課金のプラットフォーム API 専用で、販売ページで「API キー」として提供されているものが対象です。",
       "apiKeyRejected": "{{provider}} がこの API キーを拒否しました。全文をコピーしたか、失効していないか確認してください。",
       "apiKeyEmpty": "API キーを入力してください。",
       "apiKeyHasWhitespace": "API キーにスペースが含まれています。コマンド全体ではなくキーだけを貼り付けてください。",

@@ -134,12 +134,12 @@ pub fn plan_window_cap(provider: Provider, plan: Option<&str>) -> u64 {
                 300_000
             }
         }
-        // Kimi Code and the Grok CLI subscription publish no token allowance —
-        // their limits are expressed as requests over a window, not tokens —
-        // and the platform APIs are metered against a balance rather than
-        // capped at all. So this is a deliberately conservative window; the
-        // per-account daily cap on the Sell page is the control that actually
-        // matters for these four.
+        // Everything else publishes no token allowance to read a plan out of —
+        // Kimi Code and the Grok CLI express their limits as requests over a
+        // window, and a metered key bills against a balance rather than being
+        // capped at all — so the window is a flat number the table carries
+        // (`WindowCap::Fixed`), and the per-account daily cap on the Sell page
+        // is the control that actually matters for them.
         //
         // Their *utilisation* is a separate question with a better answer:
         // `commands::usage` reads Kimi's own `coding/v1/usages` and banks
@@ -147,21 +147,18 @@ pub fn plan_window_cap(provider: Provider, plan: Option<&str>) -> u64 {
         // fractions of a window, so a request-counted percentage decides
         // whether to keep selling just as well as a token-counted one. This
         // number only sizes the offer once that decision is made.
-        Provider::Kimi | Provider::KimiApi | Provider::Xai | Provider::XaiApi => 500_000,
-        // A custom endpoint has no rolling window to estimate: it is a metered
-        // key against somebody's balance, and the estimate exists to keep a
-        // *subscription* from over-declaring what its plan allows. A realistic
-        // number here would take the account off the market after an afternoon
-        // for a limit that does not exist, so the window is effectively open and
-        // the per-account daily cap is the control that bounds it.
-        Provider::Custom => CUSTOM_WINDOW_TOKENS,
+        other => match asale_protocol::spec(other).window_cap {
+            asale_protocol::WindowCap::Fixed(cap) => cap,
+            // The three plan-based families are the arms above; this is
+            // unreachable, and a low-balled answer is the safe way to be wrong.
+            asale_protocol::WindowCap::Plan => 200_000,
+        },
     }
 }
 
-/// The window declared for a custom endpoint. Large enough to never be the
-/// binding constraint, finite so the lane still declares a number the market can
-/// reason about rather than an unbounded one.
-pub const CUSTOM_WINDOW_TOKENS: u64 = 100_000_000;
+/// The window declared for a metered key, re-exported so callers that size an
+/// offer do not each reach into the protocol crate for it.
+pub use asale_protocol::providers::CUSTOM_WINDOW_TOKENS;
 
 /// Build a rolling-window quota estimate from the plan cap and locally measured
 /// usage in the window. This is the real §P0-1 estimate: cap − used.
@@ -780,7 +777,7 @@ impl ToolAdapter for DeviceFlowAdapter {
     }
 }
 
-// ── API-key adapters (Moonshot platform / xAI platform) ─────────────────────
+// ── API-key adapters (Moonshot / xAI / DeepSeek platforms) ─────────────────
 
 /// Adapter for a provider whose credential is a long-lived API key.
 ///
@@ -792,62 +789,63 @@ impl ToolAdapter for DeviceFlowAdapter {
 /// is false — so it fails loudly rather than pretending to have renewed
 /// something.
 ///
-/// One type covers both because the difference between them is a host and a
-/// name, not behaviour.
+/// One type covers all of them because the difference between them is a host
+/// and a name — both read off `asale_protocol::providers` — not behaviour.
 pub struct ApiKeyAdapter {
-    provider: Provider,
-    base_url: &'static str,
-    user_agent: &'static str,
+    spec: &'static asale_protocol::ProviderSpec,
 }
 
 impl ApiKeyAdapter {
-    /// Moonshot's platform API. The base URL is the mainland deployment; a key
-    /// issued by the global one (`api.moonshot.ai`) is rejected here and vice
-    /// versa. Informational only — the gateway builds the URL actually called.
+    /// Moonshot's platform API. Its `api_base` is the mainland deployment; a
+    /// key issued by the global one (`api.moonshot.ai`) is rejected there and
+    /// vice versa, which is why connecting one probes both.
     pub fn kimi() -> ApiKeyAdapter {
-        ApiKeyAdapter {
-            provider: Provider::KimiApi,
-            base_url: "https://api.moonshot.cn/v1",
-            user_agent: "kimi-cli/1.0",
-        }
+        ApiKeyAdapter { spec: asale_protocol::spec(Provider::KimiApi) }
     }
 
     pub fn xai() -> ApiKeyAdapter {
-        ApiKeyAdapter {
-            provider: Provider::XaiApi,
-            base_url: "https://api.x.ai/v1",
-            user_agent: "grok-cli/1.0",
-        }
+        ApiKeyAdapter { spec: asale_protocol::spec(Provider::XaiApi) }
+    }
+
+    /// DeepSeek's platform API — the one vendor here with no coding
+    /// subscription beside it, so there is no second host a key could belong to
+    /// and no product name to disambiguate.
+    pub fn deepseek() -> ApiKeyAdapter {
+        ApiKeyAdapter { spec: asale_protocol::spec(Provider::Deepseek) }
     }
 
     /// The adapter for an API-key provider, or `None` for one that uses OAuth.
+    ///
+    /// Table-driven: a new key-connected provider needs no arm here, only a row
+    /// with `Credential::ApiKey`. `custom` is the exception — its host belongs
+    /// to its operator and arrives with the account, so there is no static
+    /// upstream for this adapter to describe.
     pub fn for_provider(p: Provider) -> Option<ApiKeyAdapter> {
-        match p {
-            Provider::KimiApi => Some(ApiKeyAdapter::kimi()),
-            Provider::XaiApi => Some(ApiKeyAdapter::xai()),
-            _ => None,
+        if p == Provider::Custom || !asale_protocol::ids::is_api_key_provider(p) {
+            return None;
         }
+        Some(ApiKeyAdapter { spec: asale_protocol::spec(p) })
     }
 }
 
 #[async_trait]
 impl ToolAdapter for ApiKeyAdapter {
     fn provider(&self) -> Provider {
-        self.provider
+        self.spec.provider
     }
 
     async fn refresh(&self, _refresh_token: &str) -> anyhow::Result<RefreshedToken> {
         anyhow::bail!(
             "{} accounts authenticate with an API key, which never expires and cannot be refreshed — \
              if upstream is rejecting it the key was revoked or rotated, and the fix is to paste the new one",
-            self.provider
+            self.spec.provider
         )
     }
 
     fn upstream(&self) -> UpstreamSpec {
         UpstreamSpec {
-            base_url: self.base_url.into(),
-            default_headers: vec![("user-agent".into(), self.user_agent.into())],
+            base_url: self.spec.api_base.into(),
+            default_headers: vec![("user-agent".into(), self.spec.user_agent.into())],
         }
     }
 }
@@ -858,7 +856,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_api_key_account_is_never_refreshed_and_says_why() {
-        for p in [Provider::KimiApi, Provider::XaiApi] {
+        for p in [Provider::KimiApi, Provider::XaiApi, Provider::Deepseek] {
             let a = ApiKeyAdapter::for_provider(p).expect("api-key provider has an adapter");
             assert_eq!(a.provider(), p);
             // Stored with no expiry, so the refresh loop skips it outright —
@@ -881,6 +879,8 @@ mod tests {
         assert!(ApiKeyAdapter::kimi().upstream().base_url.contains("moonshot"));
         assert_eq!(DeviceFlowAdapter::xai(None).upstream().base_url, "https://cli-chat-proxy.grok.com/v1");
         assert_eq!(ApiKeyAdapter::xai().upstream().base_url, "https://api.x.ai/v1");
+        // DeepSeek has only the one endpoint, and it is the vendor's own.
+        assert_eq!(ApiKeyAdapter::deepseek().upstream().base_url, "https://api.deepseek.com/v1");
     }
 
     #[test]

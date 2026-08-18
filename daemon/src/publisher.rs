@@ -75,18 +75,7 @@ struct SellableCatalog {
 /// These are native vendor API ids, because the gateway relays the id a
 /// consumer asked for verbatim — see `native_model_name` on the server.
 fn fallback_models(provider: &str) -> &'static [&'static str] {
-    match provider {
-        "claude" | "claude_work" => &["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
-        // Not `gpt-5-codex`: the ChatGPT backend a Codex subscription is served
-        // by refuses that slug outright (see `codex_entitlement`). These are the
-        // ones it does serve, and entitlement discovery narrows them to whatever
-        // the account is actually granted as soon as it answers.
-        "codex" => &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
-        "gemini" => &["gemini-2.5-pro", "gemini-2.5-flash"],
-        "kimi" | "kimi_api" => &["kimi-k2.7-code", "kimi-k2-thinking", "kimi-k3"],
-        "xai" | "xai_api" => &["grok-4.5", "grok-4.3", "grok-build-0.1"],
-        _ => &[],
-    }
+    Provider::from_str_opt(provider).map_or(&[][..], |p| asale_protocol::spec(p).fallback_models)
 }
 
 /// Model ids a vendor's own API is known to answer to, when that set is
@@ -100,26 +89,24 @@ fn fallback_models(provider: &str) -> &'static [&'static str] {
 /// its fault. Rewriting the id would mean guessing which of the two variants a
 /// consumer meant, so instead the mismatched rows are simply not advertised.
 ///
+/// DeepSeek is the same problem from the other direction. Its API accepts
+/// exactly two model strings — `deepseek-v4-flash` and `deepseek-v4-pro`, each
+/// a pointer the vendor moves to its newest re-post ("simply use
+/// `deepseek-v4-flash` or `deepseek-v4-pro` to access the latest version",
+/// <https://api-docs.deepseek.com/quick_start/models>). The catalog carries far
+/// more than that under the same vendor: the dated re-posts the pointers
+/// resolve to (`deepseek-v4-flash-0731`), and the whole V3/R1 back catalogue
+/// the aggregator can still route elsewhere. All of them are real rows worth
+/// pricing — a custom endpoint may well serve them — and none of them is a
+/// string a DeepSeek key can send.
+///
 /// `None` means "advertise whatever the catalog lists", which is the case for
 /// every other vendor including Moonshot, whose ids line up exactly.
 ///
 /// Source: the model registry the vendor CLIs ship, read from CLIProxyAPI
 /// `internal/registry/models/models.json`.
 fn native_models(provider: &str) -> Option<&'static [&'static str]> {
-    match provider {
-        "xai" | "xai_api" => Some(&[
-            "grok-build-0.1",
-            "grok-4.5",
-            "grok-4.3",
-            "grok-4.20-0309-reasoning",
-            "grok-4.20-0309-non-reasoning",
-            "grok-4.20-multi-agent-0309",
-            "grok-3-mini",
-            "grok-3-mini-fast",
-            "grok-composer-2.5-fast",
-        ]),
-        _ => None,
-    }
+    Provider::from_str_opt(provider).and_then(|p| asale_protocol::spec(p).native_models)
 }
 
 /// Catalog vendor (`prices.provider`, an OpenRouter vendor slug) → the local
@@ -1957,6 +1944,9 @@ mod tests {
         assert_eq!(providers_for_vendor("moonshotai"), &[Provider::Kimi, Provider::KimiApi]);
         // The catalog spells this one with a hyphen; `xai` is not the slug.
         assert_eq!(providers_for_vendor("x-ai"), &[Provider::Xai, Provider::XaiApi]);
+        // DeepSeek's slug and its credential family are the same word — the
+        // company ships no subscription for a metered key to be told apart from.
+        assert_eq!(providers_for_vendor("deepseek"), &[Provider::Deepseek]);
         assert!(providers_for_vendor("xai").is_empty());
         // OpenRouter routing aliases are not ids any vendor API accepts.
         assert!(providers_for_vendor("~anthropic").is_empty());
@@ -1968,10 +1958,10 @@ mod tests {
     /// what it cannot build, and so does anything else keyed on the adapter.
     #[test]
     fn every_connectable_provider_has_an_adapter() {
-        for p in asale_protocol::ids::SUBSCRIBABLE_PROVIDERS {
+        for p in asale_protocol::ids::subscribable_providers() {
             let a = adapter_for(p.as_str())
                 .unwrap_or_else(|| panic!("`{p}` can be connected but has no adapter"));
-            assert_eq!(a.provider(), *p);
+            assert_eq!(a.provider(), p);
         }
         assert!(adapter_for("nope").is_none());
     }
@@ -2062,15 +2052,40 @@ mod tests {
         assert_eq!(sellable_models(&pulled, "kimi", None), vec!["kimi-k2.7-code"]);
     }
 
+    /// DeepSeek answers to two model strings and the catalog lists ten under
+    /// its slug: the dated re-posts its own pointers resolve to, and the V3/R1
+    /// back catalogue an aggregator can still route. A key that advertised
+    /// those would be matched and then refused by its own vendor.
+    #[test]
+    fn deepseek_advertises_only_the_two_ids_its_api_accepts() {
+        let mut by_provider = std::collections::BTreeMap::new();
+        by_provider.insert(
+            "deepseek".to_string(),
+            vec![
+                "deepseek-v4-flash".to_string(),
+                // What `deepseek-v4-flash` currently resolves to — a real
+                // catalog row, and not a string the vendor takes.
+                "deepseek-v4-flash-0731".to_string(),
+                "deepseek-v4-pro".to_string(),
+                "deepseek-v3.2".to_string(),
+            ],
+        );
+        let pulled = Some(SellableCatalog { fetched_at: 1, by_provider, ..Default::default() });
+        assert_eq!(
+            sellable_models(&pulled, "deepseek", None),
+            vec!["deepseek-v4-flash", "deepseek-v4-pro"]
+        );
+    }
+
     /// The offline fallback has to satisfy the same rule as the catalog: it is
     /// advertised before anything has been pulled, so a stale id there puts
     /// unusable capacity on the market for as long as the device is offline.
     #[test]
     fn the_built_in_lists_only_name_ids_the_vendor_serves() {
-        for provider in ["xai", "xai_api"] {
+        for provider in ["xai", "xai_api", "deepseek"] {
             let native = native_models(provider).unwrap();
             for m in fallback_models(provider) {
-                assert!(native.contains(m), "`{m}` is not an id the xAI API serves");
+                assert!(native.contains(m), "`{m}` is not an id the {provider} API serves");
             }
         }
         assert!(!fallback_models("kimi").is_empty(), "a fresh Kimi install must have something to sell");

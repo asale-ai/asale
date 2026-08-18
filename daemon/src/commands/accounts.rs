@@ -1026,8 +1026,8 @@ fn host_of(base: &str) -> String {
     }
 }
 
-/// Connect a metered platform account (`kimi_api`, `xai_api`) by pasting its
-/// API key.
+/// Connect a metered platform account by pasting its API key — whichever
+/// families `providers::PROVIDERS` marks `Credential::ApiKey`.
 ///
 /// This is the pay-as-you-go half of each vendor, not the coding subscription —
 /// those use `oauth_device_login`. A platform key never expires and has no
@@ -1053,7 +1053,8 @@ pub async fn connect_api_key(
         return Err(cmd_err!(
             "errors.cli.notAnApiKeyProvider",
             "this provider is connected by signing in, not with an API key — \
-             pasted keys are for the metered platform APIs (kimi_api | xai_api)"
+             pasted keys are for the metered platform APIs, which are the ones \
+             `providers::PROVIDERS` marks `Credential::ApiKey`"
         ));
     };
     // The same two shape checks `api_key_cred` makes, restated here so they can
@@ -1102,13 +1103,13 @@ pub async fn connect_api_key(
 /// Moonshot runs two independent deployments and a key works on exactly one of
 /// them, so both are tried: rejecting a perfectly good global key because this
 /// device happened to probe the mainland host would be a false alarm the user
-/// has no way to argue with. xAI has a single host.
+/// has no way to argue with. xAI and DeepSeek each have a single host.
+///
+/// The hosts themselves live in `asale_protocol::providers`, beside the URL the
+/// gateway relays to — a key verified against one host and then relayed to
+/// another is the failure this pairing exists to make impossible.
 fn verify_hosts(p: Provider) -> &'static [&'static str] {
-    match p {
-        Provider::KimiApi => &["https://api.moonshot.cn/v1", "https://api.moonshot.ai/v1"],
-        Provider::XaiApi => &["https://api.x.ai/v1"],
-        _ => &[],
-    }
+    asale_protocol::spec(p).verify_hosts
 }
 
 /// Ask the vendor whether a key is live, using the one endpoint every
@@ -1179,6 +1180,10 @@ mod tests {
         assert!(is_key_credential("kimi_api", "me@x.com", Some("api_key")));
         assert!(is_key_credential("xai_api", "me@x.com", Some("import")));
         assert!(is_key_credential("codex", "api-key", Some("import")));
+        // DeepSeek is key-only, so the provider alone settles it — there is no
+        // subscription flavour of it for the origin to disambiguate.
+        assert!(is_key_credential("deepseek", "me@x.com", Some("oauth")));
+        assert_eq!(verify_hosts(Provider::Deepseek), &["https://api.deepseek.com/v1"]);
 
         assert!(!is_key_credential("claude", "me@x.com", Some("import")));
         assert!(!is_key_credential("codex", "me@x.com", Some("oauth")));

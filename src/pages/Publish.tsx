@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { PROVIDERS as ALL_PROVIDERS } from "@shared/providers.generated";
 import { groupModelsByFamily } from "@shared/model-groups";
 import {
   invoke, inTauri, realTauri, runOAuthFlow, submitOAuthCode, fmtTokens,
@@ -37,21 +38,19 @@ interface SellerStatus {
   deprioritised: boolean;
 }
 
+// The three tile groups below are the generated provider table split by how an
+// account is connected — which is exactly what separates them on screen. A new
+// provider appears in the right group by virtue of its `credential`, with no
+// edit here; a provider missing from all three would be one nobody can connect,
+// which is the failure these used to produce silently.
+
 /** Subscriptions connected by signing in through a loopback OAuth callback. */
-const PROVIDERS = [
-  { id: "claude", label: "Claude Code" },
-  { id: "claude_work", label: "Claude Work" },
-  { id: "codex", label: "Codex / OpenAI" },
-  { id: "gemini", label: "Gemini" },
-];
+const PROVIDERS = ALL_PROVIDERS.filter((p) => p.credential === "oauth");
 
 /** Subscriptions authorised by device code. Same two-step flow, except the
  *  user confirms a short code instead of being redirected back — which is why
  *  these two also work when the UI runs in a browser on another machine. */
-const DEVICE_PROVIDERS = [
-  { id: "kimi", label: "Kimi Code" },
-  { id: "xai", label: "Grok CLI" },
-];
+const DEVICE_PROVIDERS = ALL_PROVIDERS.filter((p) => p.credential === "device_flow");
 
 /** Custom endpoint — internal.
  *
@@ -99,11 +98,14 @@ const ENDPOINT_WIRES = [
 const wireLabel = (id: string) => ENDPOINT_WIRES.find((w) => w.id === id)?.label || id;
 
 /** The metered platform APIs, which issue keys rather than subscriptions.
- *  `keyUrl` is where the key is issued. */
-const KEY_PROVIDERS = [
-  { id: "kimi_api", label: "Moonshot API", keyUrl: "https://platform.moonshot.cn/console/api-keys" },
-  { id: "xai_api", label: "xAI API", keyUrl: "https://console.x.ai" },
-];
+ *  `keyUrl` is where the key is issued.
+ *
+ *  Read off the generated provider table rather than listed here: a provider
+ *  that can be connected with a pasted key is one this form has to offer, and
+ *  the two going out of step is a family nobody can connect. `custom` is
+ *  key-connected too and deliberately absent — the platform runs those itself
+ *  (`connectable: false`) and they are set up further down this page. */
+const KEY_PROVIDERS = ALL_PROVIDERS.filter((p) => p.credential === "api_key" && p.connectable);
 
 /** "in 4m 12s" — a countdown is what makes an auto-recovering pause read as
  *  "wait" rather than "broken". Returns "" once the instant has passed. */

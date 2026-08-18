@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { PROVIDERS as ALL_PROVIDERS } from "@shared/providers.generated";
 import {
   invoke, inTauri,
   type UsageLimits, type LimitProvider, type LimitWindow,
@@ -8,16 +9,9 @@ import { computePace, resetToMs, formatReset, formatExactReset, type DisplayMode
 import { PageHead, IconAction, Mark, Skeleton } from "../ui";
 import { IconRefresh, IconPlus } from "../icons";
 
-const PROVIDERS = [
-  { id: "claude", label: "Claude Code" },
-  { id: "claude_work", label: "Claude Work" },
-  { id: "codex", label: "Codex" },
-  { id: "gemini", label: "Gemini" },
-  { id: "kimi", label: "Kimi Code" },
-  { id: "kimi_api", label: "Moonshot API" },
-  { id: "xai", label: "Grok CLI" },
-  { id: "xai_api", label: "xAI API" },
-];
+/** Every family a person can connect, in the order the generated provider table
+ *  lists them — the same order the Sell page offers them in. */
+const PROVIDERS = ALL_PROVIDERS.filter((p) => p.connectable);
 /** Exact id first: several ids are prefixes of others (`kimi`/`kimi_api`,
  *  `claude`/`claude_work`), and a prefix match alone labels the platform-API
  *  rows with the subscription's name. */

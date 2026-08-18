@@ -6,10 +6,11 @@
 //!
 //! * [`Provider`] — an **upstream credential family**. What a publisher holds a
 //!   subscription for and injects a token for: `claude`, `claude_work`,
-//!   `codex`, `gemini`, `kimi`, `xai`. This is what travels on the wire.
+//!   `codex`, `gemini`, `kimi`, `xai`, `deepseek`. This is what travels on
+//!   the wire.
 //! * [`Vendor`] — a **catalog vendor slug**, the left half of an OpenRouter
 //!   model id (`anthropic/claude-opus-4`) and the `prices.provider` column:
-//!   `anthropic`, `openai`, `google`, `moonshotai`, `x-ai`.
+//!   `anthropic`, `openai`, `google`, `moonshotai`, `deepseek`, `x-ai`.
 //! * a *tool* — a locally installed AI CLI whose config the buy switch rewrites
 //!   (Claude Code, Codex, Gemini CLI). Purely client-side and never on the
 //!   wire, so it lives in the daemon (`tool_config::Tool`), not here.
@@ -33,6 +34,9 @@ use serde::{Deserialize, Serialize};
 /// | `kimi_api` | Moonshot API key     | `api.moonshot.cn` (chat)              |
 /// | `xai`      | Grok CLI OAuth       | `cli-chat-proxy.grok.com` (responses) |
 /// | `xai_api`  | xAI API key          | `api.x.ai` (chat)                     |
+///
+/// DeepSeek needs no such pair: it ships no coding subscription, only the
+/// metered platform key, so the one flavour keeps the plain vendor name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
@@ -44,6 +48,8 @@ pub enum Provider {
     KimiApi,
     Xai,
     XaiApi,
+    /// DeepSeek's platform API key. One flavour only — see the table above.
+    Deepseek,
     /// An OpenAI-compatible endpoint reached with a pasted key and a base URL
     /// the operator supplies — the one provider whose upstream is not known at
     /// compile time.
@@ -59,34 +65,13 @@ pub enum Provider {
 
 impl Provider {
     pub fn as_str(&self) -> &'static str {
-        match self {
-            Provider::Claude => "claude",
-            Provider::ClaudeWork => "claude_work",
-            Provider::Codex => "codex",
-            Provider::Gemini => "gemini",
-            Provider::Kimi => "kimi",
-            Provider::KimiApi => "kimi_api",
-            Provider::Xai => "xai",
-            Provider::XaiApi => "xai_api",
-            Provider::Custom => "custom",
-        }
+        crate::providers::spec(*self).id
     }
 
     /// Parse a wire/database string. `None` for anything unknown — callers
     /// decide whether that is a rejection or a skip.
     pub fn from_str_opt(s: &str) -> Option<Provider> {
-        Some(match s {
-            "claude" => Provider::Claude,
-            "claude_work" => Provider::ClaudeWork,
-            "codex" => Provider::Codex,
-            "gemini" => Provider::Gemini,
-            "kimi" => Provider::Kimi,
-            "kimi_api" => Provider::KimiApi,
-            "xai" => Provider::Xai,
-            "xai_api" => Provider::XaiApi,
-            "custom" => Provider::Custom,
-            _ => return None,
-        })
+        crate::providers::spec_of(s).map(|r| r.provider)
     }
 
     /// The upstream family, which drives translator + URL choice. `claude_work`
@@ -103,20 +88,10 @@ impl Provider {
 
     /// The label a person recognises, for UI and error messages.
     pub fn display_name(&self) -> &'static str {
-        match self {
-            Provider::Claude => "Claude Code",
-            Provider::ClaudeWork => "Claude Work",
-            Provider::Codex => "Codex / OpenAI",
-            Provider::Gemini => "Gemini",
-            Provider::Kimi => "Kimi Code",
-            Provider::KimiApi => "Moonshot API",
-            Provider::Xai => "Grok CLI",
-            Provider::XaiApi => "xAI API",
-            Provider::Custom => "Custom endpoint",
-        }
+        crate::providers::spec(*self).label
     }
 
-    pub const ALL: [Provider; 9] = [
+    pub const ALL: [Provider; 10] = [
         Provider::Claude,
         Provider::ClaudeWork,
         Provider::Codex,
@@ -125,6 +100,7 @@ impl Provider {
         Provider::KimiApi,
         Provider::Xai,
         Provider::XaiApi,
+        Provider::Deepseek,
         Provider::Custom,
     ];
 }
@@ -214,6 +190,7 @@ pub enum Vendor {
     Openai,
     Google,
     Moonshotai,
+    Deepseek,
     /// OpenRouter spells this one with a hyphen (`x-ai/grok-4.5`), which no
     /// `rename_all` rule produces — hence the explicit rename. The slug is the
     /// contract with `prices.provider`, so getting it wrong silently maps every
@@ -229,7 +206,23 @@ impl Vendor {
             Vendor::Openai => "openai",
             Vendor::Google => "google",
             Vendor::Moonshotai => "moonshotai",
+            Vendor::Deepseek => "deepseek",
             Vendor::Xai => "x-ai",
+        }
+    }
+
+    /// Brand casing for a vendor's slug — what a board rail or a legend shows.
+    ///
+    /// The slug is lowercase and hyphenated because it is a catalog key
+    /// (`x-ai/grok-4.5`); printing it raw spells two of the six wrong.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Vendor::Anthropic => "Anthropic",
+            Vendor::Openai => "OpenAI",
+            Vendor::Google => "Google",
+            Vendor::Moonshotai => "Moonshot",
+            Vendor::Deepseek => "DeepSeek",
+            Vendor::Xai => "xAI",
         }
     }
 
@@ -239,6 +232,7 @@ impl Vendor {
             "openai" => Vendor::Openai,
             "google" => Vendor::Google,
             "moonshotai" => Vendor::Moonshotai,
+            "deepseek" => Vendor::Deepseek,
             "x-ai" => Vendor::Xai,
             _ => return None,
         })
@@ -246,36 +240,36 @@ impl Vendor {
 
     /// The credential families whose subscriptions can serve this vendor's
     /// models.
+    ///
+    /// Written down rather than derived from `providers::PROVIDERS`, because
+    /// what it carries beyond the mapping is the *order* a vendor's two
+    /// flavours are offered in. `providers::tests::the_vendor_map_and_the_table
+    /// _agree` holds the two halves in step.
     pub fn providers(&self) -> &'static [Provider] {
         match self {
             Vendor::Anthropic => &[Provider::Claude, Provider::ClaudeWork],
             Vendor::Openai => &[Provider::Codex],
             Vendor::Google => &[Provider::Gemini],
             Vendor::Moonshotai => &[Provider::Kimi, Provider::KimiApi],
+            Vendor::Deepseek => &[Provider::Deepseek],
             Vendor::Xai => &[Provider::Xai, Provider::XaiApi],
         }
     }
 
-    pub const ALL: [Vendor; 5] =
-        [Vendor::Anthropic, Vendor::Openai, Vendor::Google, Vendor::Moonshotai, Vendor::Xai];
+    pub const ALL: [Vendor; 6] =
+        [Vendor::Anthropic, Vendor::Openai, Vendor::Google, Vendor::Moonshotai, Vendor::Deepseek, Vendor::Xai];
 }
 
 /// Every provider some catalog vendor maps to — i.e. the credential families a
 /// subscription can actually be imported for and sold from.
 ///
-/// This is the union of [`Vendor::providers`] over [`Vendor::ALL`], kept as a
-/// constant because callers iterate it in a fixed display order. The test below
-/// holds the two in sync.
-pub const SUBSCRIBABLE_PROVIDERS: &[Provider] = &[
-    Provider::Claude,
-    Provider::ClaudeWork,
-    Provider::Codex,
-    Provider::Gemini,
-    Provider::Kimi,
-    Provider::KimiApi,
-    Provider::Xai,
-    Provider::XaiApi,
-];
+/// Derived from the one place a provider's vendor is written down, in the order
+/// `providers::PROVIDERS` lists them, which is the order they are offered in.
+/// It used to be a third hand-kept list of the same fact, guarded by a test
+/// that could only tell you afterwards that you had forgotten it.
+pub fn subscribable_providers() -> Vec<Provider> {
+    crate::providers::PROVIDERS.iter().filter(|s| s.vendor.is_some()).map(|s| s.provider).collect()
+}
 
 /// Whether a provider authenticates with a long-lived API key rather than an
 /// OAuth token that expires and is refreshed.
@@ -284,7 +278,7 @@ pub const SUBSCRIBABLE_PROVIDERS: &[Provider] = &[
 /// skipped by the refresh loop. Everything downstream (injection, metering, the
 /// sell switch) is identical to an OAuth account.
 pub fn is_api_key_provider(p: Provider) -> bool {
-    matches!(p, Provider::KimiApi | Provider::XaiApi | Provider::Custom)
+    matches!(crate::providers::spec(p).credential, crate::providers::Credential::ApiKey { .. })
 }
 
 /// Whether connecting this provider runs an RFC 8628 device-code flow rather
@@ -294,7 +288,7 @@ pub fn is_api_key_provider(p: Provider) -> bool {
 /// authorises by device code: there is no redirect URI to register, the user
 /// approves a short code in a browser, and the daemon polls for the token.
 pub fn is_device_flow_provider(p: Provider) -> bool {
-    matches!(p, Provider::Kimi | Provider::Xai)
+    crate::providers::spec(p).credential == crate::providers::Credential::DeviceFlow
 }
 
 impl std::fmt::Display for Vendor {
@@ -345,7 +339,7 @@ mod tests {
         assert!(!is_device_flow_provider(Provider::Custom));
         // No vendor maps to it: it is internal, and the account list the UI
         // offers to connect is built from the vendor map.
-        assert!(!SUBSCRIBABLE_PROVIDERS.contains(&Provider::Custom));
+        assert!(!subscribable_providers().contains(&Provider::Custom));
         assert!(Vendor::ALL.iter().all(|v| !v.providers().contains(&Provider::Custom)));
         // Its upstream is its own — collapsing it into another family would
         // send an operator's key to that vendor's host.
@@ -378,6 +372,13 @@ mod tests {
         // which host the gateway sends the request to, not in what they can do.
         assert_eq!(Vendor::Moonshotai.providers(), &[Provider::Kimi, Provider::KimiApi]);
         assert_eq!(Vendor::Xai.providers(), &[Provider::Xai, Provider::XaiApi]);
+        // DeepSeek sells no coding subscription, so there is nothing for the
+        // metered key to be told apart from: one vendor, one provider, and the
+        // provider keeps the plain vendor name rather than an `_api` suffix.
+        assert_eq!(Vendor::Deepseek.providers(), &[Provider::Deepseek]);
+        assert!(is_api_key_provider(Provider::Deepseek));
+        assert!(!is_device_flow_provider(Provider::Deepseek));
+        assert_eq!(Provider::Deepseek.upstream_family(), Provider::Deepseek);
         assert_eq!(Vendor::from_str_opt("nope"), None);
     }
 
@@ -428,7 +429,7 @@ mod tests {
         let mut union: Vec<Provider> =
             Vendor::ALL.iter().flat_map(|v| v.providers().iter().copied()).collect();
         union.sort_by_key(|p| p.as_str());
-        let mut listed = SUBSCRIBABLE_PROVIDERS.to_vec();
+        let mut listed = subscribable_providers();
         listed.sort_by_key(|p| p.as_str());
         assert_eq!(union, listed);
     }

@@ -4,7 +4,7 @@
 //! consumer never see it.
 
 use crate::protocol::{self, Envelope, HttpRequestPayload, Usage};
-use asale_protocol::ids::Wire;
+use asale_protocol::ids::{Provider, Wire};
 use crate::security::QuotaVerifier;
 use async_trait::async_trait;
 use base64::Engine;
@@ -350,9 +350,8 @@ pub trait RecordSink: Send + Sync {
 /// dedicated endpoint that costs no quota, which is a better reading than a
 /// header because it can be taken while the account is idle.
 pub fn quota_headers(provider: &str, headers: &reqwest::header::HeaderMap) -> BTreeMap<String, String> {
-    let prefix = match provider {
-        "codex" => "x-codex-",
-        "xai" | "xai_api" => "x-ratelimit-",
+    let prefix = match Provider::from_str_opt(provider).map(|p| asale_protocol::spec(p).quota) {
+        Some(asale_protocol::QuotaSource::Headers(prefix)) => prefix,
         _ => return BTreeMap::new(),
     };
     headers

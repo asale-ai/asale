@@ -1132,7 +1132,7 @@
     "cli": {
       "unknownProvider": "不支持的 CLI，请选择 Claude、Codex 或 Gemini。",
       "noCredentials": "本机未找到 {{provider}} CLI 的登录信息。",
-      "notAnApiKeyProvider": "该服务通过登录连接，而不是粘贴 API Key；API Key 仅用于按量计费的平台接口（kimi_api、xai_api）。",
+      "notAnApiKeyProvider": "该服务通过登录连接，而不是粘贴 API Key；API Key 仅用于按量计费的平台接口，也就是「卖出」页上以 API Key 方式连接的那几个。",
       "apiKeyRejected": "{{provider}} 拒绝了该 API Key，请确认已完整复制且未被吊销。",
       "apiKeyEmpty": "请输入 API Key。",
       "apiKeyHasWhitespace": "API Key 中包含空格，请只粘贴密钥本身，而不是整条命令。",

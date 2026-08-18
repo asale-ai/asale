@@ -619,12 +619,18 @@ pub async fn platform_oauth_login(
                 // `region` is the country the sign-up screen collected; the
                 // server applies it only if this exchange creates an account,
                 // so sending it on a returning user's login is a no-op.
+                // `device_fp` for the same reason `auth::register` sends it:
+                // the server's one-reward-per-device rule keys on it, and a
+                // sign-up path that omits it registers no marks at all — which
+                // reads downstream as "this machine already claimed" and
+                // silently costs every desktop OAuth sign-up its welcome credit.
                 .json(&json!({
                     "code": code,
                     "redirect_uri": redirect_uri,
                     "code_verifier": pkce.verifier,
                     "region": region,
                     "client": "desktop",
+                    "device_fp": [st.device_id.clone()],
                 }));
             if let Some(token) = link_token {
                 req = req.header("authorization", format!("Bearer {token}"));

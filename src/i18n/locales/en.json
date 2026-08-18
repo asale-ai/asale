@@ -1132,7 +1132,7 @@
     "cli": {
       "unknownProvider": "Unsupported CLI. Choose Claude, Codex or Gemini.",
       "noCredentials": "No {{provider}} CLI sign-in was found on this machine.",
-      "notAnApiKeyProvider": "This provider is connected by signing in, not with an API key. Pasted keys are for the metered platform APIs (kimi_api, xai_api).",
+      "notAnApiKeyProvider": "This provider is connected by signing in, not with an API key. Pasted keys are for the metered platform APIs — the ones offered under “API key” on the Sell page.",
       "apiKeyRejected": "{{provider}} rejected this API key — check it was copied in full and has not been revoked.",
       "apiKeyEmpty": "Enter an API key.",
       "apiKeyHasWhitespace": "The API key contains spaces — paste just the key, not the whole command.",

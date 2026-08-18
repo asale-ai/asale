@@ -269,7 +269,7 @@ pub async fn usage_limits(state: &AppState, force: Option<bool>) -> R<Value> {
     let caps = provider_caps(state).await?;
     let tools = state.store.list_tools().await.map_err(err)?;
     let mut providers = Vec::new();
-    for provider in asale_protocol::ids::SUBSCRIBABLE_PROVIDERS.iter().map(|p| p.as_str()) {
+    for provider in asale_protocol::ids::subscribable_providers().iter().map(|p| p.as_str()) {
         let (window_cap, accounts, plan) = caps.get(provider).cloned().unwrap_or((0, 0, None));
         if accounts == 0 {
             providers.push(json!({ "id": provider, "connected": false }));
@@ -321,7 +321,14 @@ pub async fn usage_limits(state: &AppState, force: Option<bool>) -> R<Value> {
 /// predicate is asked about: the reading is free, so it can be taken on a
 /// timer rather than bought with a request.
 pub(crate) fn has_usage_endpoint(provider: &str) -> bool {
-    matches!(provider, "claude" | "claude_work" | "gemini" | "kimi")
+    quota_source(provider) == Some(asale_protocol::QuotaSource::Endpoint)
+}
+
+/// Where this provider's real utilisation can be read, per
+/// `asale_protocol::providers` — the same field the header-banking path reads,
+/// so "can be asked while idle" and "can only be listened to" cannot disagree.
+fn quota_source(provider: &str) -> Option<asale_protocol::QuotaSource> {
+    Provider::from_str_opt(provider).map(|p| asale_protocol::spec(p).quota)
 }
 
 /// The real rate-limit windows for a provider, however that provider can be
@@ -355,11 +362,14 @@ pub(crate) async fn live_windows(state: &AppState, provider: &str, tools: &[Tool
         "codex" => codex_windows(state, provider, tools, force).await,
         // xAI volunteers `x-ratelimit-*` on the responses it serves and answers
         // nothing that could be asked while idle, so the bank is the whole
-        // mechanism — there is no probe to fall back on.
-        "xai" | "xai_api" => match banked_quota(state, provider, tools).await {
-            Some((at, windows)) => LiveWindows::Ok { windows, as_of: Some(at), stale_reason: None },
-            None => LiveWindows::Unsupported,
-        },
+        // mechanism — there is no probe to fall back on. Codex is header-sourced
+        // too but has a probe, which is why it is named above rather than here.
+        p if matches!(quota_source(p), Some(asale_protocol::QuotaSource::Headers(_))) => {
+            match banked_quota(state, provider, tools).await {
+                Some((at, windows)) => LiveWindows::Ok { windows, as_of: Some(at), stale_reason: None },
+                None => LiveWindows::Unsupported,
+            }
+        }
         _ => return LiveWindows::Unsupported,
     };
     if let LiveWindows::Failed(reason) = &outcome {
@@ -679,9 +689,13 @@ pub(crate) async fn record_quota_headers(
     account_id: &str,
     headers: &BTreeMap<String, String>,
 ) {
-    let windows = match provider {
-        "codex" => normalize_codex_headers(headers, now_secs()),
-        "xai" | "xai_api" => normalize_ratelimit_headers(headers, now_secs()),
+    // Which headers carry a reading is the table's answer; how to read them is
+    // not — Codex publishes its own `x-codex-*` shape and the conventional
+    // `x-ratelimit-*` block needs its per-minute burst limits thrown away, so
+    // each keeps its own parser.
+    let windows = match quota_source(provider) {
+        Some(asale_protocol::QuotaSource::Headers("x-codex-")) => normalize_codex_headers(headers, now_secs()),
+        Some(asale_protocol::QuotaSource::Headers(_)) => normalize_ratelimit_headers(headers, now_secs()),
         _ => return,
     };
     record_quota_windows(store, provider, account_id, &Value::Array(windows)).await;
@@ -1425,14 +1439,7 @@ fn parse_reset_field(raw: &str, now: i64) -> Option<i64> {
 /// LIKE-prefix used to attribute local publisher usage to a provider family
 /// (mirrors `publisher::provider_model_prefix`).
 pub(crate) fn provider_model_prefix(provider: &str) -> Option<&'static str> {
-    match provider {
-        "claude" | "claude_work" => Some("claude"),
-        "gemini" => Some("gemini"),
-        "codex" => Some("gpt"),
-        "kimi" | "kimi_api" => Some("kimi"),
-        "xai" | "xai_api" => Some("grok"),
-        _ => None,
-    }
+    Provider::from_str_opt(provider).and_then(|p| asale_protocol::spec(p).model_prefix)
 }
 
 #[cfg(test)]
@@ -1763,7 +1770,7 @@ mod tests {
         for p in ["claude", "claude_work", "gemini", "kimi"] {
             assert!(has_usage_endpoint(p), "{p} answers a free usage endpoint");
         }
-        for p in ["codex", "xai", "xai_api", "kimi_api", "custom"] {
+        for p in ["codex", "xai", "xai_api", "kimi_api", "deepseek", "custom"] {
             assert!(!has_usage_endpoint(p), "{p} has nothing free to read");
         }
     }
