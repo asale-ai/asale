@@ -1,6 +1,6 @@
 [package]
 name = "asale-protocol"
-version = "0.4.8"
+version = "0.4.9"
 edition = "2021"
 description = "asale wsrelay wire contract — shared verbatim by asale-server and the client. Pure serde: no tokio, no axum, no sqlx."
 
