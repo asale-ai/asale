@@ -19,6 +19,8 @@ import { IconAccount, IconAlert, IconGlobe, IconUsage, IconZap } from "../icons"
 
 /** More arcs than this and the map reads as a hairball rather than a network. */
 const MAX_ARCS = 24;
+/** Match the landing-page hero's `laneScale={0.55}` exactly. */
+const LANE_SCALE = 0.55;
 /** Fixed so the hover box can be clamped without measuring it. */
 const TIP_W = 172;
 
@@ -130,11 +132,25 @@ export function WorldMap({ region = "", children }: { region?: string; children?
       (f) => f.from !== f.to && COUNTRY_CENTROIDS[f.from] && COUNTRY_CENTROIDS[f.to]
     );
     const max = Math.max(1, ...cross.map((f) => f.tokens));
-    return cross.slice(0, MAX_ARCS).map((f) => ({
-      ...f,
-      d: arcPath(COUNTRY_CENTROIDS[f.from], COUNTRY_CENTROIDS[f.to]),
-      weight: f.tokens / max,
-    }));
+    const visible = cross.slice(0, MAX_ARCS);
+    // The busiest visible lanes commonly sit in a narrow absolute band. Spread
+    // their log volumes across the colour scale so the spectrum stays useful;
+    // stroke width below still uses the honest tokens/max ratio.
+    const logs = visible.map((f) => Math.log1p(f.tokens));
+    const lo = Math.min(...logs);
+    const hi = Math.max(...logs);
+    return visible.map((f, i) => {
+      const weight = f.tokens / max;
+      const tone = hi > lo ? (logs[i] - lo) / (hi - lo) : 0.5;
+      return {
+        ...f,
+        d: arcPath(COUNTRY_CENTROIDS[f.from], COUNTRY_CENTROIDS[f.to]),
+        weight,
+        // Deliberately separate from the indigo population ramp: a lane is
+        // traffic, not a long thin country-density mark.
+        color: flowColor(tone),
+      };
+    });
   }, [flows]);
 
   const totals = useMemo(() => {
@@ -211,7 +227,14 @@ export function WorldMap({ region = "", children }: { region?: string; children?
           <span className="map-key">
             <span className="mf-hint">{t("dashboard.map.legendFlow")}</span>
             <svg width="34" height="10" aria-hidden="true">
-              <path d="M2 8 Q17 -2 32 5" fill="none" stroke="url(#asale-lane)" strokeWidth="2" strokeLinecap="round" />
+              <defs>
+                <linearGradient id="asale-flow-key" x1="2" y1="8" x2="32" y2="5" gradientUnits="userSpaceOnUse">
+                  <stop offset="0" stopColor="var(--flow-low)" />
+                  <stop offset="0.55" stopColor="var(--flow-mid)" />
+                  <stop offset="1" stopColor="var(--flow-high)" />
+                </linearGradient>
+              </defs>
+              <path d="M2 8 Q17 -2 32 5" fill="none" stroke="url(#asale-flow-key)" strokeWidth="2" strokeLinecap="round" />
             </svg>
           </span>
 
@@ -238,13 +261,11 @@ export function WorldMap({ region = "", children }: { region?: string; children?
           aria-label={t("dashboard.map.title")}
         >
           <defs>
-            {/* Arcs fade in from the seller and land bright on the buyer, so
-                direction reads without arrowheads cluttering the map. */}
-            <linearGradient id="asale-lane" x1="0" y1="0" x2="1" y2="0">
-              <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.05" />
-              <stop offset="45%" stopColor="var(--accent-hover)" stopOpacity="0.75" />
-              <stop offset="100%" stopColor="var(--accent-hover)" stopOpacity="0.95" />
-            </linearGradient>
+            {/* Shared blur for the moving aura. A separate crisp core keeps the
+                beam defined against both the dark and light card surfaces. */}
+            <filter id="asale-flow-glow" x="-30%" y="-30%" width="160%" height="160%" colorInterpolationFilters="sRGB">
+              <feGaussianBlur stdDeviation="2.4" />
+            </filter>
           </defs>
 
           <g strokeWidth={0.4} stroke="var(--map-edge)">
@@ -268,21 +289,52 @@ export function WorldMap({ region = "", children }: { region?: string; children?
             })}
           </g>
 
-          <g fill="none" stroke="url(#asale-lane)" strokeLinecap="round">
-            {arcs.map((f, i) => (
-              <g key={`${f.from}-${f.to}`}>
-                <path d={f.d} strokeWidth={0.5 + f.weight * 1.7} opacity={0.28 + f.weight * 0.6} />
-                {/* One packet per lane, offset so they never march in lockstep. */}
-                <circle r={1.1 + f.weight * 1.4} fill="var(--accent-hover)" opacity={0.9}>
-                  <animateMotion
-                    dur={`${4.5 + (i % 5) * 0.9}s`}
-                    begin={`${(i % 7) * 0.55}s`}
-                    repeatCount="indefinite"
-                    path={f.d}
+          <g fill="none" strokeLinecap="round" pointerEvents="none">
+            {arcs.map((f, i) => {
+              const duration = 5.6 - f.weight * 2 + (i % 4) * 0.28;
+              const delay = -((i * 0.73) % duration);
+              const beam = 8 + f.weight * 9;
+              const gap = 100 - beam;
+              const width = (0.42 + f.weight * 1.2) * LANE_SCALE;
+              return (
+                <g key={`${f.from}-${f.to}`} style={{ color: f.color }}>
+                  {/* Quiet residual route underneath the moving energy. */}
+                  <path
+                    d={f.d}
+                    stroke="currentColor"
+                    strokeWidth={width}
+                    opacity={0.13 + f.weight * 0.2}
                   />
-                </circle>
-              </g>
-            ))}
+
+                  {/* Soft aura and sharp core share a proportional dash, so a
+                      short regional hop and a long ocean lane carry the same
+                      visual rhythm. */}
+                  <path
+                    className="map-flow-pulse map-flow-halo"
+                    d={f.d}
+                    pathLength={100}
+                    stroke="currentColor"
+                    strokeWidth={width * 5.2}
+                    strokeDasharray={`${beam} ${gap}`}
+                    opacity={0.24 + f.weight * 0.26}
+                    filter="url(#asale-flow-glow)"
+                  >
+                    <animate attributeName="stroke-dashoffset" from="0" to="-100" dur={`${duration}s`} begin={`${delay}s`} repeatCount="indefinite" />
+                  </path>
+                  <path
+                    className="map-flow-pulse map-flow-core"
+                    d={f.d}
+                    pathLength={100}
+                    stroke="currentColor"
+                    strokeWidth={width * 1.55}
+                    strokeDasharray={`${beam} ${gap}`}
+                    opacity={0.78 + f.weight * 0.2}
+                  >
+                    <animate attributeName="stroke-dashoffset" from="0" to="-100" dur={`${duration}s`} begin={`${delay}s`} repeatCount="indefinite" />
+                  </path>
+                </g>
+              );
+            })}
           </g>
 
           <g pointerEvents="none">
@@ -408,4 +460,14 @@ function arcPath([x1, y1]: readonly [number, number], [x2, y2]: readonly [number
   const cx = (x1 + x2) / 2 + (dy / dist) * lift * (dx >= 0 ? 1 : -1);
   const cy = (y1 + y2) / 2 - (dx / dist) * lift * (dx >= 0 ? 1 : -1);
   return `M${x1} ${y1} Q${cx.toFixed(1)} ${cy.toFixed(1)} ${x2} ${y2}`;
+}
+
+/** Same independent traffic spectrum as the website: ice blue for the lower
+ * visible lanes, mint through the middle, electric gold at the top. */
+function flowColor(weight: number): string {
+  const t = Math.max(0, Math.min(1, weight));
+  if (t <= 0.5) {
+    return `color-mix(in oklab, var(--flow-low) ${Math.round((1 - t * 2) * 100)}%, var(--flow-mid))`;
+  }
+  return `color-mix(in oklab, var(--flow-mid) ${Math.round((2 - t * 2) * 100)}%, var(--flow-high))`;
 }

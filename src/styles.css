@@ -105,6 +105,11 @@
      accent is mixed *into* the land to shade it; no second hue is introduced. */
   --map-land: #1c1f27;
   --map-edge: #0c0d11;
+  /* Traffic is its own quantitative mark, separate from the indigo country
+     density ramp. These values match the website's dark palette. */
+  --flow-low: #55c9ff;
+  --flow-mid: #56e5c4;
+  --flow-high: #ffd36a;
 
   --overlay: rgba(4, 5, 8, 0.6);
   --shadow-pop: 0 16px 44px -18px rgba(0, 0, 0, 0.8), 0 2px 8px -4px rgba(0, 0, 0, 0.6);
@@ -139,6 +144,9 @@
 
   --map-land: #e4e4ec;
   --map-edge: #fbfbfc;
+  --flow-low: #238fc7;
+  --flow-mid: #16a98f;
+  --flow-high: #c98a18;
 
   --overlay: rgba(24, 26, 34, 0.3);
   --shadow-pop: 0 16px 40px -18px rgba(20, 24, 40, 0.28), 0 2px 6px -3px rgba(20, 24, 40, 0.1);
@@ -1311,7 +1319,7 @@ select.input {
 
 /* ── World map ──────────────────────────────────────────────────────────────
    Country outlines come from src/lib/world.ts, so this is plain SVG: fills are
-   the accent mixed into the land, and the only motion is the packet on a lane.
+   the accent mixed into the land, and light beams travel along traffic lanes.
 
    Same shape as the landing page's (asale-web): the map runs the full width of
    the card, corner to corner, with one band above it holding the totals on the
@@ -1324,6 +1332,11 @@ select.input {
 .map-svg { display: block; width: 100%; height: auto; transition: opacity var(--t-slow) var(--ease); }
 .map-svg.is-loading { opacity: 0.4; }
 .map-svg path.is-live { cursor: pointer; }
+.map-flow-pulse { vector-effect: non-scaling-stroke; }
+@media (prefers-reduced-motion: reduce) {
+  /* Static residual routes retain the data; only perpetual travel is removed. */
+  .map-flow-pulse { display: none; }
+}
 
 .map-tip {
   position: absolute; z-index: 10; pointer-events: none;
