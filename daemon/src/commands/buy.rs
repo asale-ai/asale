@@ -560,11 +560,19 @@ pub async fn refresh_buy_tool_keys(state: &AppState, key: &str) -> R<Vec<String>
     Ok(refreshed)
 }
 
+/// The server-side sellable catalog is the source of truth for the picker. The
+/// unfiltered endpoint is the wider pricing catalog (including vendors no
+/// built-in provider can serve), so omitting this query silently puts unusable
+/// providers back in the UI.
+fn market_models_url(api_base: &str) -> String {
+    format!("{api_base}/api/v1/market/models?sellable=1")
+}
+
 /// Market models available to subscribe to (public endpoint on the web API).
 pub async fn market_models(state: &AppState) -> R<Value> {
     let http = asale_client_core::http::plain();
     let resp = http
-        .get(format!("{}/api/v1/market/models", state.cfg.server_api_base))
+        .get(market_models_url(&state.cfg.server_api_base))
         .send()
         .await
         .map_err(err)?;
@@ -610,6 +618,14 @@ pub async fn market_globe(state: &AppState) -> R<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn market_picker_requests_the_server_sellable_catalog() {
+        assert_eq!(
+            market_models_url("https://api.asale.ai"),
+            "https://api.asale.ai/api/v1/market/models?sellable=1"
+        );
+    }
 
     /// The path whitelist is the whole of this command's safety: `asaled` can
     /// be bound to a non-loopback address, so whatever it agrees to open is
