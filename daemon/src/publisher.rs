@@ -448,44 +448,46 @@ pub async fn store_custom_models(
 /// every pool rebuild.
 const CUSTOM_MODELS_TTL: i64 = 3600;
 
-/// The models one custom endpoint currently serves.
+/// Whatever model list is cached for one account, however stale.
+async fn cached_listing(store: &LocalStore, account_id: &str) -> Option<CustomListing> {
+    store
+        .get_setting(&custom_models_key(account_id))
+        .await
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+}
+
+/// The models one account's own endpoint currently serves, by market id.
 ///
 /// Cached and refreshed on the same terms as [`codex_entitlement`]: a stale list
 /// outlives a failed call, because a network blip must not take a working
 /// publisher off the market, while an empty *answer* is taken at face value.
-async fn custom_endpoint_models(store: &LocalStore, tool: &asale_client_core::store::ToolRow) -> CustomListing {
-    let key = custom_models_key(&tool.account_id);
-    let cached: Option<CustomListing> = store
-        .get_setting(&key)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|raw| serde_json::from_str(&raw).ok());
+async fn endpoint_models(
+    store: &LocalStore,
+    tool: &asale_client_core::store::ToolRow,
+    base: &str,
+    wire: Wire,
+) -> CustomListing {
+    let cached = cached_listing(store, &tool.account_id).await;
     if let Some(c) = &cached {
         if now_secs() - c.fetched_at < CUSTOM_MODELS_TTL {
             return c.clone();
         }
     }
     let stale = || cached.clone().unwrap_or_default();
-    let base = match store.get_setting(&custom_base_key(&tool.account_id)).await.ok().flatten() {
-        Some(b) if !b.is_empty() => b,
-        _ => {
-            tracing::warn!(account = %tool.account_id, "custom account has no base URL recorded");
-            return stale();
-        }
-    };
     let Some(key_value) = keychain::get(&tool.keychain_ref).ok().flatten() else {
-        tracing::warn!(account = %tool.account_id, "custom account: no key in the secret store");
+        tracing::warn!(account = %tool.account_id, provider = %tool.provider, "no key in the secret store");
         return stale();
     };
-    let wire = custom_wire(store, &tool.account_id).await;
-    match asale_client_core::discovery::custom_endpoint_models(&base, &key_value, wire).await {
+    match asale_client_core::discovery::custom_endpoint_models(base, &key_value, wire).await {
         Ok(models) => match store_custom_models(store, &tool.account_id, &models).await {
             Ok(fresh) => {
                 if cached.as_ref().map(|c| &c.aliases) != Some(&fresh.aliases) {
                     tracing::info!(
                         account = %tool.account_id,
-                        "custom endpoint serves {} models ({} usable ids)",
+                        provider = %tool.provider,
+                        "endpoint serves {} models ({} usable ids)",
                         models.len(),
                         fresh.aliases.len()
                     );
@@ -493,15 +495,53 @@ async fn custom_endpoint_models(store: &LocalStore, tool: &asale_client_core::st
                 fresh
             }
             Err(e) => {
-                tracing::warn!(account = %tool.account_id, "storing the custom model list failed: {e}");
+                tracing::warn!(account = %tool.account_id, "storing the model list failed: {e}");
                 stale()
             }
         },
         Err(e) => {
-            tracing::warn!(account = %tool.account_id, "custom endpoint model lookup failed: {e}");
+            tracing::warn!(account = %tool.account_id, provider = %tool.provider, "model lookup failed: {e}");
             stale()
         }
     }
+}
+
+/// The models one custom endpoint currently serves. Its host and its dialect
+/// are its operator's, so both come out of the account's own settings.
+async fn custom_endpoint_models(store: &LocalStore, tool: &asale_client_core::store::ToolRow) -> CustomListing {
+    let base = match store.get_setting(&custom_base_key(&tool.account_id)).await.ok().flatten() {
+        Some(b) if !b.is_empty() => b,
+        _ => {
+            tracing::warn!(account = %tool.account_id, "custom account has no base URL recorded");
+            return cached_listing(store, &tool.account_id).await.unwrap_or_default();
+        }
+    };
+    let wire = custom_wire(store, &tool.account_id).await;
+    endpoint_models(store, tool, &base, wire).await
+}
+
+/// The models one *vendor* API key may actually ask for, from the vendor's own
+/// `/models`.
+///
+/// The tradable catalog and its reference prices come from OpenRouter, whose
+/// `qwen/*` rows are not the set Alibaba serves: of the 50 it prices, 20 are
+/// third-party re-hosts DashScope has never answered to under that spelling —
+/// `qwen-2.5-72b-instruct` (Alibaba writes `qwen2.5-…`, no hyphen), every
+/// `qwen3-vl-*`, `qwen3-coder`, `qwen3-max-thinking`. A lane behind one of those
+/// 404s on its first request, which costs a consumer a turn and this device its
+/// reputation — the same failure `0066_disable_variant_catalog_ids` was written
+/// for.
+///
+/// So the vendor is the authority on what its key may offer, exactly as a custom
+/// endpoint's operator is. A list hardcoded in the table would say the same thing
+/// today and would have to be re-released every time Alibaba ships a model.
+async fn vendor_endpoint_models(
+    store: &LocalStore,
+    tool: &asale_client_core::store::ToolRow,
+    p: Provider,
+) -> CustomListing {
+    let spec = asale_protocol::spec(p);
+    endpoint_models(store, tool, spec.api_base, spec.wire).await
 }
 
 /// The cached catalog, or None when nothing has been pulled yet.
@@ -536,10 +576,11 @@ pub async fn refresh_sellable_catalog(store: &LocalStore, api_base: &str) -> any
             continue;
         }
         // A custom endpoint is not tied to one of the built-in subscription
-        // families. Keep every text model in its candidate pool, including
-        // vendors such as Qwen that intentionally map to no native provider.
-        // The endpoint's own /models response narrows this list before anything
-        // is advertised, so this cannot widen an ordinary subscription lane.
+        // families, so keep every text model in its candidate pool — including
+        // the ones whose catalog vendor maps to no provider at all, which are
+        // otherwise filed under nothing and can never be sold. The endpoint's
+        // own /models narrows this list before anything is advertised, so it
+        // cannot widen an ordinary subscription lane.
         by_provider
             .entry(CUSTOM_PROVIDER.to_string())
             .or_default()
@@ -1332,6 +1373,12 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
         // executor can put the endpoint's own spelling back into the body.
         let listing = match tool.provider.as_str() {
             CUSTOM_PROVIDER => Some(custom_endpoint_models(store, tool).await),
+            // Alibaba serves a different set from the one OpenRouter prices
+            // under `qwen/*`, so its own `/models` decides — see
+            // `vendor_endpoint_models` for what goes wrong without this.
+            p if p == Provider::Qwen.as_str() => {
+                Some(vendor_endpoint_models(store, tool, Provider::Qwen).await)
+            }
             _ => None,
         };
         let entitled = match tool.provider.as_str() {
@@ -1339,7 +1386,9 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
             // Same contract as Codex's entitlement: an empty answer means
             // advertise nothing, because a model the endpoint will refuse costs a
             // consumer a failed turn and this device its reputation.
-            CUSTOM_PROVIDER => Some(listing.as_ref().map(|l| l.market_ids()).unwrap_or_default()),
+            p if p == CUSTOM_PROVIDER || p == Provider::Qwen.as_str() => {
+                Some(listing.as_ref().map(|l| l.market_ids()).unwrap_or_default())
+            }
             _ => None,
         };
         let mut a = AccountRuntime::new(&tool.provider, &tool.account_id, &tool.keychain_ref)
@@ -1859,6 +1908,34 @@ mod tests {
         // Nothing pulled yet: a custom endpoint has no built-in fallback set,
         // because its models are its operator's, not a vendor's.
         assert!(sellable_models(&None, CUSTOM_PROVIDER, Some(&["gpt-5.5".to_string()])).is_empty());
+    }
+
+    /// OpenRouter prices 50 `qwen/*` ids; DashScope answers to 30 of them. The
+    /// gap is not cosmetic — `qwen-2.5-72b-instruct` (Alibaba writes it without
+    /// the hyphen) and the whole `qwen3-vl-*` family are third-party re-hosts
+    /// Alibaba has never served — and a lane behind one of them 404s on its
+    /// first request. The vendor's own `/models` is what narrows the catalog
+    /// down, and it reaches this function as `entitled`.
+    #[test]
+    fn a_qwen_key_sells_only_what_alibaba_actually_serves() {
+        let mut by_provider = std::collections::BTreeMap::new();
+        by_provider.insert(
+            "qwen".to_string(),
+            ["qwen3-max", "qwen3-vl-8b-instruct", "qwen3.8-max"].iter().map(|s| s.to_string()).collect(),
+        );
+        let catalog = Some(SellableCatalog { fetched_at: 1, by_provider, ..Default::default() });
+        // What `/compatible-mode/v1/models` answers, trimmed to the point: it
+        // is wider than this vendor's own rows, because DashScope resells other
+        // vendors' models too.
+        let served = ["qwen3-max".to_string(), "qwen3.8-max".to_string(), "deepseek-v3.2".to_string()];
+        let mut sold = sellable_models(&catalog, Provider::Qwen.as_str(), Some(&served));
+        sold.sort();
+        assert_eq!(sold, vec!["qwen3-max".to_string(), "qwen3.8-max".to_string()]);
+        // Priced here, never served there: advertising it would cost a buyer a
+        // turn and this device its reputation.
+        assert!(!sold.contains(&"qwen3-vl-8b-instruct".to_string()));
+        // Served there but filed under another vendor: not this lane's to sell.
+        assert!(!sold.contains(&"deepseek-v3.2".to_string()));
     }
 
     /// What the platform prices, in the catalog's own spelling.
