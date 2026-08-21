@@ -318,7 +318,7 @@ export function ApiKeys() {
         )}
 
         {!data ? (
-          <div style={{ display: "grid", gap: 10, marginTop: "var(--s3)" }}>
+          <div style={{ display: "grid", gap: "var(--s10)", marginTop: "var(--s12)" }}>
             <Skeleton h={34} />
             <Skeleton h={34} />
           </div>
@@ -435,7 +435,7 @@ function CreateForm({
         </div>
       </div>
 
-      <div className="btn-row" style={{ marginTop: "var(--s4)" }}>
+      <div className="btn-row" style={{ marginTop: "var(--s16)" }}>
         <button className="btn sm" disabled={busy} onClick={onSubmit}>
           {t("apikeys.create")}
         </button>
@@ -527,7 +527,7 @@ function KeyName({ row, editing, onEdit, onEditDone, onRename }: RowProps) {
   }
 
   return (
-    <span style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+    <span style={{ display: "flex", alignItems: "center", gap: "var(--s6)", flexWrap: "wrap" }}>
       <strong className={row.label ? undefined : "faint"}>{row.label || t("apikeys.unnamed")}</strong>
       <button
         className="icon-btn sm onhover"
@@ -793,11 +793,11 @@ function ApplyDialog({
             <IconX />
           </button>
         </div>
-        <div style={{ padding: "0 var(--s5) var(--s5)" }}>
+        <div style={{ padding: "0 var(--s20) var(--s20)" }}>
           <p className="sub">
             {kind === "default" ? t("apikeys.askDefaultBody", { tools }) : t("apikeys.askApplyBody", { tools })}
           </p>
-          <div className="btn-row" style={{ marginTop: "var(--s4)" }}>
+          <div className="btn-row" style={{ marginTop: "var(--s16)" }}>
             <button className="btn" onClick={() => onAnswer(true)}>
               {t("apikeys.askApplyYes")}
             </button>
@@ -843,7 +843,7 @@ function CompatCard({ sampleKey, proxyBase }: { sampleKey?: string; proxyBase?: 
   return (
     <Card title={t("apikeys.compatTitle")} desc={t("apikeys.compatDesc")}>
       {/* Dialect first: it decides every other value in this card. */}
-      <div className="segmented sm" style={{ marginBottom: "var(--s3)" }}>
+      <div className="segmented sm" style={{ marginBottom: "var(--s12)" }}>
         {COMPAT_MODES.map((m) => (
           <button key={m} className={m === mode ? "active" : ""} onClick={() => setMode(m)}>
             {COMPAT[m].name}
@@ -860,7 +860,7 @@ function CompatCard({ sampleKey, proxyBase }: { sampleKey?: string; proxyBase?: 
           between. Only offered once the daemon has said where its proxy is. */}
       {proxyBase && (
         <>
-          <div className="segmented sm" style={{ marginBottom: "var(--s2)" }}>
+          <div className="segmented sm" style={{ marginBottom: "var(--s8)" }}>
             <button className={target === "cloud" ? "active" : ""} onClick={() => setTarget("cloud")}>
               {t("apikeys.targetCloud")}
             </button>
@@ -868,7 +868,7 @@ function CompatCard({ sampleKey, proxyBase }: { sampleKey?: string; proxyBase?: 
               {t("apikeys.targetLocal")}
             </button>
           </div>
-          <p className="faint" style={{ margin: "0 0 var(--s3)", fontSize: "var(--fs-meta)", lineHeight: 1.6 }}>
+          <p className="faint" style={{ margin: "0 0 var(--s12)", fontSize: "var(--fs-meta)", lineHeight: 1.6 }}>
             {local ? t("apikeys.targetLocalHint") : t("apikeys.targetCloudHint")}
           </p>
         </>
@@ -885,11 +885,11 @@ function CompatCard({ sampleKey, proxyBase }: { sampleKey?: string; proxyBase?: 
         </tbody>
       </table>
 
-      <div className="section-title" style={{ fontSize: "var(--fs-sub)", margin: "var(--s5) 0 var(--s2)" }}>
+      <div className="section-title" style={{ fontSize: "var(--fs-sub)", margin: "var(--s20) 0 var(--s8)" }}>
         {t("apikeys.sample")}
       </div>
       <CodePanel code={code} lang={lang} onLang={setLang} />
-      <p className="faint" style={{ marginTop: "var(--s2)", fontSize: "var(--fs-meta)" }}>
+      <p className="faint" style={{ marginTop: "var(--s8)", fontSize: "var(--fs-meta)" }}>
         {local
           ? t("apikeys.sampleUsesLocalProxy")
           : sampleKey
@@ -907,7 +907,7 @@ function Fact({ k, v, pre, copyable }: { k: string; v: string; pre?: boolean; co
     <tr>
       <td className="nowrap faint">{k}</td>
       <td>
-        <span style={{ display: "flex", alignItems: "flex-start", gap: "var(--s2)" }}>
+        <span style={{ display: "flex", alignItems: "flex-start", gap: "var(--s8)" }}>
           {/* A URL has no word boundaries worth keeping, so it breaks anywhere;
               the endpoint list does, and breaking `generateContent` mid-word
               made it unreadable. */}

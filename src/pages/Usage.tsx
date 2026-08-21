@@ -142,7 +142,7 @@ export function Usage() {
             </div>
             <div className="mrank">
               {loading ? (
-                <div style={{ padding: "8px 0" }}><Skeleton h={14} style={{ marginBottom: 8 }} /><Skeleton h={14} w="70%" /></div>
+                <div style={{ padding: "8px 0" }}><Skeleton h={14} style={{ marginBottom: "var(--s8)" }} /><Skeleton h={14} w="70%" /></div>
               ) : models.length === 0 ? (
                 <div className="mrank-empty">{t("usage.noModels")}</div>
               ) : (

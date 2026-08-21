@@ -572,7 +572,7 @@ function TestDialog({
           </button>
         </div>
         <div className="verify-body">
-          <div className="band-presets" style={{ marginBottom: "var(--s4)" }}>
+          <div className="band-presets" style={{ marginBottom: "var(--s16)" }}>
             <button
               className={`chip ${tab === "test" ? "on" : ""}`}
               onClick={() => setTab("test")}
@@ -661,7 +661,7 @@ function TestDialog({
                 </div>
               )}
 
-              <div className="btn-row" style={{ marginTop: "var(--s4)" }}>
+              <div className="btn-row" style={{ marginTop: "var(--s16)" }}>
                 <button className="btn" onClick={run} disabled={running || picked.length === 0}>
                   {running
                     ? t("publish.test.runningN", {
@@ -800,7 +800,7 @@ function TestResult({ result: r }: { result: SupplyTest }) {
       </div>
 
       {r.ok ? (
-        <div className="fact-grid tight" style={{ marginTop: "var(--s3)" }}>
+        <div className="fact-grid tight" style={{ marginTop: "var(--s12)" }}>
           <div className="fact">
             <span className="fact-k">{t("publish.test.servedBy")}</span>
             <span className="fact-v mono">{r.provenance?.upstream || "—"}</span>
@@ -824,7 +824,7 @@ function TestResult({ result: r }: { result: SupplyTest }) {
         // would otherwise be followed by a generic "request failed", which reads
         // as a second, vaguer fault rather than as the same one.
         r.error && (
-          <div className="hint" style={{ marginTop: "var(--s2)" }}>
+          <div className="hint" style={{ marginTop: "var(--s8)" }}>
             {errText(toDaemonError(r.error, t("common.requestFailed")))}
           </div>
         )
@@ -1733,10 +1733,10 @@ export function Publish() {
           <IconInfo />
           <div>
             <strong>{t("publish.rankedLastTitle")}</strong>
-            <div className="text-sm" style={{ marginTop: 4 }}>
+            <div className="text-sm" style={{ marginTop: "var(--s4)" }}>
               {t("publish.rankedLastBody", { score: sellerStatus.score, min: sellerStatus.min_score })}
             </div>
-            <div className="text-sm faint" style={{ marginTop: 4 }}>
+            <div className="text-sm faint" style={{ marginTop: "var(--s4)" }}>
               {t("publish.rankedLastHow")}
             </div>
           </div>

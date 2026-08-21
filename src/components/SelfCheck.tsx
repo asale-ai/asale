@@ -90,7 +90,7 @@ export function SelfCheck() {
             {f.severity === "error" ? <IconAlert /> : <IconInfo />}
             <div style={{ flex: 1 }}>
               <strong>{t(`selfcheck.${f.id}.title`)}</strong>
-              <div className="text-sm" style={{ marginTop: 4 }}>
+              <div className="text-sm" style={{ marginTop: "var(--s4)" }}>
                 {t(`selfcheck.${f.id}.body`, f.params as Record<string, string>)}
               </div>
               {/* The outcome mark is an icon on the same 24-grid as every other
@@ -100,10 +100,10 @@ export function SelfCheck() {
                 <div
                   className="text-sm"
                   style={{
-                    marginTop: 6,
+                    marginTop: "var(--s6)",
                     display: "flex",
                     alignItems: "flex-start",
-                    gap: 6,
+                    gap: "var(--s6)",
                     opacity: out.ok ? 1 : 0.85,
                   }}
                 >

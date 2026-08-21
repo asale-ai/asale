@@ -65,7 +65,7 @@ export function SkeletonRows({ rows = 2 }: { rows?: number }) {
           <div className="lr-main">
             <Skeleton w={36} h={36} r={10} />
             <div style={{ flex: 1 }}>
-              <Skeleton w="40%" h={13} style={{ marginBottom: 6 }} />
+              <Skeleton w="40%" h={13} style={{ marginBottom: "var(--s6)" }} />
               <Skeleton w="60%" h={11} />
             </div>
           </div>
@@ -84,15 +84,15 @@ export function PageSkeleton() {
     <div className="page-skeleton" aria-busy="true">
       <div className="page-head">
         <div className="ph-text" style={{ flex: 1 }}>
-          <Skeleton w={168} h={26} r={9} style={{ marginBottom: 10 }} />
+          <Skeleton w={168} h={26} r={9} style={{ marginBottom: "var(--s10)" }} />
           <Skeleton w={260} h={13} />
         </div>
       </div>
       <div className="stat-grid">
         {[0, 1, 2].map((i) => (
           <div key={i} className="stat-tile">
-            <Skeleton w={86} h={12} style={{ marginBottom: 14 }} />
-            <Skeleton w={120} h={26} r={9} style={{ marginBottom: 10 }} />
+            <Skeleton w={86} h={12} style={{ marginBottom: "var(--s14)" }} />
+            <Skeleton w={120} h={26} r={9} style={{ marginBottom: "var(--s10)" }} />
             <Skeleton w={70} h={11} />
           </div>
         ))}

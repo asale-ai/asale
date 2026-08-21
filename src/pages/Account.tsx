@@ -134,8 +134,8 @@ export function Account() {
             <Skeleton w={220} h={12} style={{ margin: "0 auto" }} />
           </div>
           <div className="card auth-panel">
-            <Skeleton h={38} r={10} style={{ marginBottom: 10 }} />
-            <Skeleton h={38} r={10} style={{ marginBottom: 16 }} />
+            <Skeleton h={38} r={10} style={{ marginBottom: "var(--s10)" }} />
+            <Skeleton h={38} r={10} style={{ marginBottom: "var(--s16)" }} />
             <Skeleton h={40} r={10} />
           </div>
         </div>

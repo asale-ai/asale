@@ -153,7 +153,7 @@ export function App() {
     <div className="sidebar-user is-loading" aria-busy="true">
       <Skeleton w="var(--nav-ico-w)" h="var(--nav-ico-w)" r={999} />
       <span className="su-text">
-        <Skeleton w="72%" h={11} style={{ marginBottom: 5 }} />
+        <Skeleton w="72%" h={11} style={{ marginBottom: "var(--s4)" }} />
         <Skeleton w="52%" h={9} />
       </span>
     </div>

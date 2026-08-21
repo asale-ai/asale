@@ -375,7 +375,7 @@ export function BatchVerifyPanel({
 
   // Follow the model list: an account whose lanes arrive a moment after the
   // dialog opens should still start out fully ticked.
-  useEffect(() => { setPicked(models); }, [models.join(" ")]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setPicked(models); }, [models.join("--")]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const done = Object.values(rows).filter((r) => r.state === "done" || r.state === "failed").length;
   const total = Object.keys(rows).length;
@@ -429,7 +429,7 @@ export function BatchVerifyPanel({
         detail={(m) => <Evidence key={m} provider={provider} model={m} />}
       />
 
-      <div className="btn-row" style={{ marginTop: "var(--s4)" }}>
+      <div className="btn-row" style={{ marginTop: "var(--s16)" }}>
         <button
           className="btn"
           onClick={() => void start(picked)}
