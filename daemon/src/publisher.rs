@@ -535,6 +535,15 @@ pub async fn refresh_sellable_catalog(store: &LocalStore, api_base: &str) -> any
         if model.is_empty() || !produces_text(modality) {
             continue;
         }
+        // A custom endpoint is not tied to one of the built-in subscription
+        // families. Keep every text model in its candidate pool, including
+        // vendors such as Qwen that intentionally map to no native provider.
+        // The endpoint's own /models response narrows this list before anything
+        // is advertised, so this cannot widen an ordinary subscription lane.
+        by_provider
+            .entry(CUSTOM_PROVIDER.to_string())
+            .or_default()
+            .push(model.to_string());
         for p in providers_for_vendor(vendor) {
             by_provider.entry(p.as_str().to_string()).or_default().push(model.to_string());
         }
@@ -1942,6 +1951,7 @@ mod tests {
         // Both flavours of a vendor serve its catalog rows — the subscription
         // and the metered platform key differ only in which host they reach.
         assert_eq!(providers_for_vendor("moonshotai"), &[Provider::Kimi, Provider::KimiApi]);
+        assert_eq!(providers_for_vendor("qwen"), &[Provider::Qwen]);
         // The catalog spells this one with a hyphen; `xai` is not the slug.
         assert_eq!(providers_for_vendor("x-ai"), &[Provider::Xai, Provider::XaiApi]);
         // DeepSeek's slug and its credential family are the same word — the

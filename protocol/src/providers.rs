@@ -359,6 +359,28 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         ]),
     },
     ProviderSpec {
+        provider: Provider::Qwen,
+        id: "qwen",
+        label: "Alibaba Cloud Model Studio",
+        vendor: Some(Vendor::Qwen),
+        credential: Credential::ApiKey {
+            key_url: "https://bailian.console.aliyun.com/?tab=model#/api-key",
+        },
+        wire: Wire::Openai,
+        // The legacy Beijing endpoint remains supported and, unlike the newer
+        // workspace endpoint, can be configured without a Workspace ID.
+        api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        chat_url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        user_agent: "asale/1.0",
+        extra_headers: &[],
+        verify_hosts: &["https://dashscope.aliyuncs.com/compatible-mode/v1"],
+        window_cap: WindowCap::Fixed(CUSTOM_WINDOW_TOKENS),
+        quota: QuotaSource::None,
+        model_prefix: Some("qwen"),
+        fallback_models: &["qwen3.8-max", "qwen3.7-plus"],
+        native_models: None,
+    },
+    ProviderSpec {
         provider: Provider::Deepseek,
         id: "deepseek",
         label: "DeepSeek",

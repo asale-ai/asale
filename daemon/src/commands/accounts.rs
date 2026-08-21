@@ -1183,7 +1183,12 @@ mod tests {
         // DeepSeek is key-only, so the provider alone settles it — there is no
         // subscription flavour of it for the origin to disambiguate.
         assert!(is_key_credential("deepseek", "me@x.com", Some("oauth")));
+        assert!(is_key_credential("qwen", "me@x.com", Some("oauth")));
         assert_eq!(verify_hosts(Provider::Deepseek), &["https://api.deepseek.com/v1"]);
+        assert_eq!(
+            verify_hosts(Provider::Qwen),
+            &["https://dashscope.aliyuncs.com/compatible-mode/v1"]
+        );
 
         assert!(!is_key_credential("claude", "me@x.com", Some("import")));
         assert!(!is_key_credential("codex", "me@x.com", Some("oauth")));

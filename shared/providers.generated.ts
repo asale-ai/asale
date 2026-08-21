@@ -30,6 +30,7 @@ export const PROVIDERS: ProviderInfo[] = [
   { id: "kimi_api", label: "Moonshot API", credential: "api_key", keyUrl: "https://platform.moonshot.cn/console/api-keys", vendor: "moonshotai", connectable: true },
   { id: "xai", label: "Grok CLI", credential: "device_flow", keyUrl: "", vendor: "x-ai", connectable: true },
   { id: "xai_api", label: "xAI API", credential: "api_key", keyUrl: "https://console.x.ai", vendor: "x-ai", connectable: true },
+  { id: "qwen", label: "Alibaba Cloud Model Studio", credential: "api_key", keyUrl: "https://bailian.console.aliyun.com/?tab=model#/api-key", vendor: "qwen", connectable: true },
   { id: "deepseek", label: "DeepSeek", credential: "api_key", keyUrl: "https://platform.deepseek.com/api_keys", vendor: "deepseek", connectable: true },
   { id: "custom", label: "Custom endpoint", credential: "api_key", keyUrl: "", vendor: "", connectable: false },
 ];
@@ -40,6 +41,7 @@ export const VENDOR_LABELS: Record<string, string> = {
   "openai": "OpenAI",
   "google": "Google",
   "moonshotai": "Moonshot",
+  "qwen": "Qwen",
   "deepseek": "DeepSeek",
   "x-ai": "xAI",
 };

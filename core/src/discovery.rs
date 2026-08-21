@@ -856,7 +856,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_api_key_account_is_never_refreshed_and_says_why() {
-        for p in [Provider::KimiApi, Provider::XaiApi, Provider::Deepseek] {
+        for p in [Provider::KimiApi, Provider::XaiApi, Provider::Qwen, Provider::Deepseek] {
             let a = ApiKeyAdapter::for_provider(p).expect("api-key provider has an adapter");
             assert_eq!(a.provider(), p);
             // Stored with no expiry, so the refresh loop skips it outright —
@@ -879,6 +879,10 @@ mod tests {
         assert!(ApiKeyAdapter::kimi().upstream().base_url.contains("moonshot"));
         assert_eq!(DeviceFlowAdapter::xai(None).upstream().base_url, "https://cli-chat-proxy.grok.com/v1");
         assert_eq!(ApiKeyAdapter::xai().upstream().base_url, "https://api.x.ai/v1");
+        assert_eq!(
+            ApiKeyAdapter::for_provider(Provider::Qwen).unwrap().upstream().base_url,
+            "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        );
         // DeepSeek has only the one endpoint, and it is the vendor's own.
         assert_eq!(ApiKeyAdapter::deepseek().upstream().base_url, "https://api.deepseek.com/v1");
     }

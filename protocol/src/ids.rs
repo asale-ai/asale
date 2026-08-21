@@ -48,6 +48,8 @@ pub enum Provider {
     KimiApi,
     Xai,
     XaiApi,
+    /// Alibaba Cloud Model Studio (DashScope) API key.
+    Qwen,
     /// DeepSeek's platform API key. One flavour only — see the table above.
     Deepseek,
     /// An OpenAI-compatible endpoint reached with a pasted key and a base URL
@@ -91,7 +93,7 @@ impl Provider {
         crate::providers::spec(*self).label
     }
 
-    pub const ALL: [Provider; 10] = [
+    pub const ALL: [Provider; 11] = [
         Provider::Claude,
         Provider::ClaudeWork,
         Provider::Codex,
@@ -100,6 +102,7 @@ impl Provider {
         Provider::KimiApi,
         Provider::Xai,
         Provider::XaiApi,
+        Provider::Qwen,
         Provider::Deepseek,
         Provider::Custom,
     ];
@@ -190,6 +193,7 @@ pub enum Vendor {
     Openai,
     Google,
     Moonshotai,
+    Qwen,
     Deepseek,
     /// OpenRouter spells this one with a hyphen (`x-ai/grok-4.5`), which no
     /// `rename_all` rule produces — hence the explicit rename. The slug is the
@@ -206,6 +210,7 @@ impl Vendor {
             Vendor::Openai => "openai",
             Vendor::Google => "google",
             Vendor::Moonshotai => "moonshotai",
+            Vendor::Qwen => "qwen",
             Vendor::Deepseek => "deepseek",
             Vendor::Xai => "x-ai",
         }
@@ -221,6 +226,7 @@ impl Vendor {
             Vendor::Openai => "OpenAI",
             Vendor::Google => "Google",
             Vendor::Moonshotai => "Moonshot",
+            Vendor::Qwen => "Qwen",
             Vendor::Deepseek => "DeepSeek",
             Vendor::Xai => "xAI",
         }
@@ -232,6 +238,7 @@ impl Vendor {
             "openai" => Vendor::Openai,
             "google" => Vendor::Google,
             "moonshotai" => Vendor::Moonshotai,
+            "qwen" => Vendor::Qwen,
             "deepseek" => Vendor::Deepseek,
             "x-ai" => Vendor::Xai,
             _ => return None,
@@ -251,13 +258,21 @@ impl Vendor {
             Vendor::Openai => &[Provider::Codex],
             Vendor::Google => &[Provider::Gemini],
             Vendor::Moonshotai => &[Provider::Kimi, Provider::KimiApi],
+            Vendor::Qwen => &[Provider::Qwen],
             Vendor::Deepseek => &[Provider::Deepseek],
             Vendor::Xai => &[Provider::Xai, Provider::XaiApi],
         }
     }
 
-    pub const ALL: [Vendor; 6] =
-        [Vendor::Anthropic, Vendor::Openai, Vendor::Google, Vendor::Moonshotai, Vendor::Deepseek, Vendor::Xai];
+    pub const ALL: [Vendor; 7] = [
+        Vendor::Anthropic,
+        Vendor::Openai,
+        Vendor::Google,
+        Vendor::Moonshotai,
+        Vendor::Qwen,
+        Vendor::Deepseek,
+        Vendor::Xai,
+    ];
 }
 
 /// Every provider some catalog vendor maps to — i.e. the credential families a
@@ -371,6 +386,8 @@ mod tests {
         // Both credential kinds serve the same catalog rows; they differ in
         // which host the gateway sends the request to, not in what they can do.
         assert_eq!(Vendor::Moonshotai.providers(), &[Provider::Kimi, Provider::KimiApi]);
+        assert_eq!(Vendor::Qwen.providers(), &[Provider::Qwen]);
+        assert!(is_api_key_provider(Provider::Qwen));
         assert_eq!(Vendor::Xai.providers(), &[Provider::Xai, Provider::XaiApi]);
         // DeepSeek sells no coding subscription, so there is nothing for the
         // metered key to be told apart from: one vendor, one provider, and the
