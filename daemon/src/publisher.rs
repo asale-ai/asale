@@ -1227,6 +1227,13 @@ impl TokenProvider for PoolTokens {
                     let d = "upstream does not serve this model";
                     (pool.on_error(provider, account_id, model, UpstreamErrorKind::Unsupported, d, now), d.to_string())
                 }
+                // The pool treats it as the rate limit it is; the operator is
+                // told what it actually is, because waiting this one out does
+                // nothing — the allowance only comes back if they top it up.
+                TaskOutcome::QuotaExhausted { reset_at } => {
+                    let d = "extra usage exhausted — top up at claude.ai/settings/usage";
+                    (pool.on_error(provider, account_id, model, UpstreamErrorKind::RateLimited { reset_at }, d, now), d.to_string())
+                }
                 TaskOutcome::Blocked => {
                     let d = "upstream refused this machine (403 — region block or network filter)";
                     (pool.on_error(provider, account_id, model, UpstreamErrorKind::Blocked, d, now), d.to_string())

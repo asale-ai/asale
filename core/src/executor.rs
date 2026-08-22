@@ -144,6 +144,11 @@ pub enum TaskOutcome {
     Blocked,
     /// The upstream has never heard of this model id. See [`unsupported_model`].
     Unsupported,
+    /// The account's extra-usage allowance is spent. Cooled exactly like a 429,
+    /// because that is what it is; kept separate so the seller is told to top
+    /// up rather than to wait out a window that will never reset on its own.
+    /// See [`quota_exhausted`].
+    QuotaExhausted { reset_at: Option<i64> },
 }
 
 /// Which of the two very different things a 401/403 can mean.
@@ -217,6 +222,19 @@ pub fn unsupported_model(status: u16, body: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// Anthropic's third-party usage allowance running out, which arrives as a
+/// `400 invalid_request_error` instead of the 429 every other exhaustion uses:
+/// "Third-party apps now draw from your extra usage, not your plan limits."
+///
+/// Shape aside, it is a quota wall: the account cannot serve *anyone* until its
+/// owner tops up, and the catch-all below reads a 400 as the consumer's problem
+/// and leaves the lane on the market. On 2026-08-22 that is exactly what
+/// happened — one account kept winning matches and answering every one of them
+/// with this 400, so buyers saw a dead model rather than a failover.
+pub fn quota_exhausted(status: u16, body: &str) -> bool {
+    status == 400 && body.to_ascii_lowercase().contains("draw from your extra usage")
 }
 
 /// How to resolve the upstream bearer token for a provider.
@@ -597,8 +615,6 @@ pub async fn execute(
     }
 
     if status >= 400 {
-        let code = if status < 500 { "UPSTREAM_4XX" } else { "UPSTREAM_5XX" };
-        let retriable = status >= 500 || status == 429;
         let reset_at = retry_after_reset(&resp);
         // The upstream's own words never leave this process, but they are the
         // only way to tell a real quota exhaustion from a rejection wearing a
@@ -619,7 +635,22 @@ pub async fn execute(
             // the one 4xx that says something about this lane rather than about
             // the request, and it takes the lane off the market.
             s if unsupported_model(s, &detail) => TaskOutcome::Unsupported,
+            // A 400 that is really "out of credit" — cools the account like the
+            // 429 it should have been. See [`quota_exhausted`].
+            s if quota_exhausted(s, &detail) => TaskOutcome::QuotaExhausted { reset_at },
             _ => TaskOutcome::Success { tokens_used: 0 },
+        };
+        // What the gateway acts on is the code, not the status. A quota wall
+        // reported as a plain 4xx reads as the consumer's problem: the request
+        // dies here instead of moving to another seller, and this lane stays on
+        // the market until the client's own re-declaration catches up.
+        // `UPSTREAM_RATE_LIMIT` is retriable *and* pulls the supply entry
+        // (`Job::abandon`), which is the whole of what an exhausted account
+        // needs — see [`quota_exhausted`].
+        let (code, retriable) = match outcome {
+            TaskOutcome::QuotaExhausted { .. } => ("UPSTREAM_RATE_LIMIT", true),
+            _ if status >= 500 => ("UPSTREAM_5XX", true),
+            _ => ("UPSTREAM_4XX", status == 429),
         };
         tokens.report(&provider, &lease.account_id, &model, outcome);
         tracing::warn!(
@@ -2264,5 +2295,55 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
         let e = frames.iter().find(|f| f.msg_type == protocol::T_ERROR).unwrap();
         assert_eq!(e.payload["code"], "UPSTREAM_4XX");
         assert_eq!(e.payload["retriable"], true); // 429 is retriable
+    }
+
+    #[test]
+    fn third_party_usage_wall_cools_the_account() {
+        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"Third-party apps now draw from your extra usage, not your plan limits. Add more at claude.ai/settings/usage and keep going."}}"#;
+        assert!(quota_exhausted(400, body));
+        // Ordinary 400s stay the consumer's problem.
+        assert!(!quota_exhausted(400, r#"{"error":{"message":"max_tokens: 99999 > 32000"}}"#));
+        assert!(!quota_exhausted(429, body));
+    }
+
+    #[tokio::test]
+    async fn the_usage_wall_is_handed_to_another_seller_and_reported_as_a_limit() {
+        let url = spawn_http(
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 118\r\nConnection: close\r\n\r\n{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Third-party apps now draw from your extra usage.\"}}",
+        )
+        .await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tok = ReportingToken { outcomes: outcomes.clone() };
+        execute(&crate::http::plain(), &tok, req(&url, "claude", 0), &tx, None, &test_verifier(), never_canceled()).await;
+
+        let frames = drain(&mut rx);
+        let e = frames.iter().find(|f| f.msg_type == protocol::T_ERROR).unwrap();
+        // Not `UPSTREAM_4XX`: that code says "the consumer's request was bad",
+        // which strands the buyer on a seller that cannot answer anyone.
+        assert_eq!(e.payload["code"], "UPSTREAM_RATE_LIMIT");
+        assert_eq!(e.payload["retriable"], true, "the buyer must reach another seller");
+        assert_eq!(
+            outcomes.lock().unwrap().as_slice(),
+            [TaskOutcome::QuotaExhausted { reset_at: None }],
+            "and the account is cooled, not credited with a success"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_400_still_belongs_to_the_consumer() {
+        let url = spawn_http(
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 49\r\nConnection: close\r\n\r\n{\"error\":{\"message\":\"max_tokens: 99999 > 32000\"}}",
+        )
+        .await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tok = ReportingToken { outcomes: outcomes.clone() };
+        execute(&crate::http::plain(), &tok, req(&url, "claude", 0), &tx, None, &test_verifier(), never_canceled()).await;
+
+        let e = drain(&mut rx).into_iter().find(|f| f.msg_type == protocol::T_ERROR).unwrap();
+        assert_eq!(e.payload["code"], "UPSTREAM_4XX");
+        assert_eq!(e.payload["retriable"], false, "a bad request fails the same way everywhere");
+        assert_eq!(outcomes.lock().unwrap().as_slice(), [TaskOutcome::Success { tokens_used: 0 }]);
     }
 }
