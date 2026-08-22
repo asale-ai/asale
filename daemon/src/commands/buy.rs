@@ -122,9 +122,8 @@ pub async fn reconcile_configs(state: &AppState) -> Vec<String> {
             continue;
         }
         let t = tool.to_string();
-        let drifted = tokio::task::spawn_blocking(move || !tool_config::points_at_proxy(&t))
-            .await
-            .unwrap_or(false);
+        let drifted =
+            tokio::task::spawn_blocking(move || tool_config::needs_reapply(&t)).await.unwrap_or(false);
         if !drifted {
             continue;
         }

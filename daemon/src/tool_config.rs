@@ -450,6 +450,16 @@ pub fn points_at_proxy(tool: &str) -> bool {
     current_base_url(tool).is_some_and(|b| b == expected || b == base || b == format!("{base}/v1"))
 }
 
+/// Does this tool's config have to be re-applied before it will work?
+///
+/// Drift off the proxy is the usual reason. Codex has a second one: the model
+/// catalog we generate is a snapshot of an unversioned schema, and a Codex
+/// upgrade that adds a field to it takes *every* Codex command down until the
+/// catalog is rebuilt (see `codex_catalog::matches_installed_codex`).
+pub fn needs_reapply(tool: &str) -> bool {
+    !points_at_proxy(tool) || (tool == "codex" && !crate::codex_catalog::matches_installed_codex())
+}
+
 /// Is this tool buying right now?
 ///
 /// Either half is enough. The stored switch is what the user asked for; a
@@ -1488,6 +1498,12 @@ mod tests {
     /// Install a fake `codex debug models` that prints `slugs` as its catalog,
     /// most-preferred carrier first.
     fn codex_stub(slugs: &[&str]) {
+        codex_stub_versioned(slugs, "codex-cli 0.1.0")
+    }
+
+    /// The same stub, answering `--version` with `version` — which is what
+    /// decides whether the catalog it generated is still current.
+    fn codex_stub_versioned(slugs: &[&str], version: &str) {
         let entries: Vec<String> = slugs
             .iter()
             .enumerate()
@@ -1498,7 +1514,10 @@ mod tests {
         let path = home().join("codex-stub");
         std::fs::write(
             &path,
-            format!("#!/bin/sh\ncat <<'JSON'\n{{\"models\":[{}]}}\nJSON\n", entries.join(",")),
+            format!(
+                "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo '{version}'; exit 0; }}\ncat <<'JSON'\n{{\"models\":[{}]}}\nJSON\n",
+                entries.join(",")
+            ),
         )
         .unwrap();
         #[cfg(unix)]
@@ -1546,6 +1565,26 @@ mod tests {
             assert!(!backup.had_existing());
             restore("claude", &backup).unwrap();
             assert!(read_raw(&path).is_none(), "file removed since it never existed");
+        });
+    }
+
+    #[test]
+    fn a_codex_upgrade_makes_the_generated_catalog_need_reapplying() {
+        // The catalog entry schema is Codex's, unversioned, and a Codex that
+        // cannot deserialize the `model_catalog_json` it is pointed at refuses
+        // to run *anything* — so an upgrade that adds a field silently bricks
+        // every Codex command until the config is applied again.
+        with_temp_home(|| {
+            codex_stub_versioned(&["gpt-5.5"], "codex-cli 0.146.0");
+            std::fs::create_dir_all(config_paths("codex")[0].parent().unwrap()).unwrap();
+            apply("codex", "http://127.0.0.1:9787", "sk-a", &models(&["claude-opus-5"])).unwrap();
+            assert!(!needs_reapply("codex"), "freshly generated against this Codex");
+
+            codex_stub_versioned(&["gpt-5.5"], "codex-cli 0.147.0");
+            assert!(needs_reapply("codex"), "the catalog was built by a Codex that is no longer installed");
+
+            apply("codex", "http://127.0.0.1:9787", "sk-a", &models(&["claude-opus-5"])).unwrap();
+            assert!(!needs_reapply("codex"), "re-applying rebuilds it against the installed Codex");
         });
     }
 
