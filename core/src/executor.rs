@@ -647,10 +647,16 @@ pub async fn execute(
         // `UPSTREAM_RATE_LIMIT` is retriable *and* pulls the supply entry
         // (`Job::abandon`), which is the whole of what an exhausted account
         // needs — see [`quota_exhausted`].
+        // A plain 429 is the same news as a quota wall and needs the same code:
+        // sent as `UPSTREAM_4XX` it read to the gateway as "the buyer's request
+        // was bad", so the lane kept its supply entry, walked back into rotation
+        // and 429'd again — each round counted as a plain failure against the
+        // device's reputation until it fell below the matching floor — and the
+        // buyer was handed `invalid_request_error` for what is a rate limit.
         let (code, retriable) = match outcome {
-            TaskOutcome::QuotaExhausted { .. } => ("UPSTREAM_RATE_LIMIT", true),
+            TaskOutcome::QuotaExhausted { .. } | TaskOutcome::RateLimited { .. } => ("UPSTREAM_RATE_LIMIT", true),
             _ if status >= 500 => ("UPSTREAM_5XX", true),
-            _ => ("UPSTREAM_4XX", status == 429),
+            _ => ("UPSTREAM_4XX", false),
         };
         tokens.report(&provider, &lease.account_id, &model, outcome);
         tracing::warn!(
@@ -2287,14 +2293,16 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
     }
 
     #[tokio::test]
-    async fn upstream_4xx_reports_error() {
+    async fn a_plain_429_is_reported_as_a_rate_limit() {
         let url = spawn_http("HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
         let (tx, mut rx) = mpsc::unbounded_channel();
         execute(&crate::http::plain(), &StaticToken(Some("k".into())), req(&url, "claude", 0), &tx, None, &test_verifier(), never_canceled()).await;
         let frames = drain(&mut rx);
         let e = frames.iter().find(|f| f.msg_type == protocol::T_ERROR).unwrap();
-        assert_eq!(e.payload["code"], "UPSTREAM_4XX");
-        assert_eq!(e.payload["retriable"], true); // 429 is retriable
+        // Not `UPSTREAM_4XX`: that is the buyer's request being wrong, and it
+        // leaves the rate-limited lane advertised for the next buyer to hit.
+        assert_eq!(e.payload["code"], "UPSTREAM_RATE_LIMIT");
+        assert_eq!(e.payload["retriable"], true);
     }
 
     #[test]
