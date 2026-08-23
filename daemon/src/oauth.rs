@@ -326,10 +326,11 @@ pub async fn begin(p: &OAuthProvider) -> anyhow::Result<(String, AuthCodeFuture)
                 let _ = sock.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").await;
                 continue;
             }
+            let lang = pick_lang(&req);
             let body = if code.is_empty() {
-                landing_page("授权未完成", "授权被取消或已过期，请回到应用重试。", false)
+                landing_page(&AUTHORIZE_FAIL, lang, false)
             } else {
-                landing_page("授权成功", "账号已连接，可以关闭此页面并返回应用。", true)
+                landing_page(&AUTHORIZE_OK, lang, true)
             };
             write_page(&mut sock, &body).await;
             if let Some(sender) = tx.lock().unwrap().take() {
@@ -407,10 +408,11 @@ pub async fn begin_platform_loopback() -> anyhow::Result<PlatformCallback> {
             let req = String::from_utf8_lossy(&buf[..n]);
             let code = extract_query(&req, "code");
             let state = extract_query(&req, "state");
+            let lang = pick_lang(&req);
             let body = if code.is_empty() {
-                landing_page("登录未完成", "授权被取消或已过期，请回到应用重试。", false)
+                landing_page(&LOGIN_FAIL, lang, false)
             } else {
-                landing_page("登录成功", "可以关闭此页面并返回应用。", true)
+                landing_page(&LOGIN_OK, lang, true)
             };
             write_page(&mut sock, &body).await;
             if let Some(sender) = tx.lock().unwrap().take() {
@@ -483,6 +485,78 @@ pub fn id_token_claim(tokens: &serde_json::Value, claim: &str) -> Option<String>
     Some(json.get(claim)?.as_str()?.to_string())
 }
 
+/// Callback-page copy in the four languages the app itself ships, in the order
+/// `LANG_TAGS` indexes: en, zh, zh-TW, ja.
+struct Copy {
+    headline: [&'static str; 4],
+    sub: [&'static str; 4],
+}
+
+const LANG_TAGS: [&str; 4] = ["en", "zh", "zh-TW", "ja"];
+
+const AUTHORIZE_OK: Copy = Copy {
+    headline: ["Authorized", "授权成功", "授權成功", "認証が完了しました"],
+    sub: [
+        "Account connected. You can close this tab and return to the app.",
+        "账号已连接，可以关闭此页面并返回应用。",
+        "帳號已連接，可以關閉此頁面並返回應用。",
+        "アカウントを接続しました。このタブを閉じてアプリに戻ってください。",
+    ],
+};
+
+const AUTHORIZE_FAIL: Copy = Copy {
+    headline: ["Authorization incomplete", "授权未完成", "授權未完成", "認証が完了しませんでした"],
+    sub: [
+        "It was cancelled or has expired. Return to the app and try again.",
+        "授权被取消或已过期，请回到应用重试。",
+        "授權被取消或已過期，請回到應用重試。",
+        "キャンセルされたか有効期限が切れました。アプリに戻ってやり直してください。",
+    ],
+};
+
+const LOGIN_OK: Copy = Copy {
+    headline: ["Signed in", "登录成功", "登入成功", "ログインしました"],
+    sub: [
+        "You can close this tab and return to the app.",
+        "可以关闭此页面并返回应用。",
+        "可以關閉此頁面並返回應用。",
+        "このタブを閉じてアプリに戻ってください。",
+    ],
+};
+
+const LOGIN_FAIL: Copy = Copy {
+    headline: ["Sign-in incomplete", "登录未完成", "登入未完成", "ログインが完了しませんでした"],
+    sub: AUTHORIZE_FAIL.sub,
+};
+
+/// Index into `LANG_TAGS` for the browser's `Accept-Language`, mirroring the
+/// app's own `detect()`: zh (Traditional when the tag says so), ja, else
+/// English — which is also where every language we don't ship lands.
+fn pick_lang(req: &str) -> usize {
+    let header = req
+        .lines()
+        .find_map(|l| {
+            let (name, value) = l.split_once(':')?;
+            name.trim().eq_ignore_ascii_case("accept-language").then(|| value.to_ascii_lowercase())
+        })
+        .unwrap_or_default();
+    // q-values are ordered highest-first in practice, so the first tag we
+    // actually speak wins; the header's own weights are not worth parsing.
+    for tag in header.split(',') {
+        let tag = tag.split(';').next().unwrap_or("").trim();
+        if tag.starts_with("zh") {
+            return if ["tw", "hk", "mo", "hant"].iter().any(|s| tag.contains(s)) { 2 } else { 1 };
+        }
+        if tag.starts_with("ja") {
+            return 3;
+        }
+        if tag.starts_with("en") {
+            return 0;
+        }
+    }
+    0
+}
+
 /// The page the browser lands on after a provider (or the platform) redirects
 /// back. Both loopback listeners serve it, so the two flows look the same.
 ///
@@ -493,7 +567,8 @@ pub fn id_token_claim(tokens: &serde_json::Value, claim: &str) -> Option<String>
 /// The inline script rewrites the address bar to drop `?code=…`: the raw
 /// authorization code would otherwise sit in the URL bar, in history, and in
 /// whatever syncs that history.
-fn landing_page(headline: &str, sub: &str, tone_ok: bool) -> String {
+fn landing_page(copy: &Copy, lang: usize, tone_ok: bool) -> String {
+    let (headline, sub, lang) = (copy.headline[lang], copy.sub[lang], LANG_TAGS[lang]);
     let (mark, mark_fg, mark_bg) = if tone_ok {
         // A check, drawn rather than an emoji so it can't fall back to a glyph
         // the platform renders in its own colour.
@@ -502,7 +577,7 @@ fn landing_page(headline: &str, sub: &str, tone_ok: bool) -> String {
         ("M10 5v7M10 15.2v.1", "var(--bad)", "var(--bad-soft)")
     };
     format!(
-        r#"<!doctype html><html lang="zh"><head><meta charset="utf-8">
+        r#"<!doctype html><html lang="{lang}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>asale</title><style>
 :root {{
@@ -536,7 +611,6 @@ body {{
 }}
 h1 {{ margin:0 0 8px; font-size:17px; font-weight:600; letter-spacing:-.01em; }}
 p {{ margin:0; color:var(--muted); font-size:13px; }}
-.en {{ margin-top:4px; font-size:12px; opacity:.75; }}
 .brand {{
   margin-top:28px; padding-top:18px; border-top:1px solid var(--border);
   color:var(--muted); font-size:11px; letter-spacing:.14em; text-transform:uppercase;
@@ -548,7 +622,6 @@ p {{ margin:0; color:var(--muted); font-size:13px; }}
     aria-hidden="true"><path d="{mark}"/></svg></div>
   <h1>{headline}</h1>
   <p>{sub}</p>
-  <p class="en">You can close this tab and return to the app.</p>
   <div class="brand">asale</div>
 </div>
 <script>
@@ -681,14 +754,35 @@ mod tests {
 
     #[test]
     fn landing_page_renders_both_tones() {
-        let ok = landing_page("授权成功", "账号已连接。", true);
+        let ok = landing_page(&AUTHORIZE_OK, 1, true);
         assert!(ok.contains("授权成功") && ok.contains("var(--ok)"));
         // `format!` escaping mistakes show up as leftover doubled braces in CSS.
         assert!(!ok.contains("{{") && !ok.contains("}}"), "unescaped braces leaked into the page");
         // The code must never survive in the address bar.
         assert!(ok.contains("history.replaceState"));
-        let bad = landing_page("授权未完成", "已取消。", false);
+        let bad = landing_page(&AUTHORIZE_FAIL, 1, false);
         assert!(bad.contains("var(--bad)") && !bad.contains("var(--ok)"));
+        // Every language renders, and `<html lang>` follows the copy shown.
+        for (i, tag) in LANG_TAGS.iter().enumerate() {
+            let page = landing_page(&LOGIN_OK, i, true);
+            assert!(page.contains(&format!("<html lang=\"{tag}\"")), "{tag} lang attr");
+            assert!(page.contains(LOGIN_OK.headline[i]), "{tag} headline");
+        }
+    }
+
+    #[test]
+    fn accept_language_picks_the_shipped_locale() {
+        let req = |al: &str| format!("GET /callback HTTP/1.1\r\nHost: x\r\nAccept-Language: {al}\r\n\r\n");
+        assert_eq!(pick_lang(&req("zh-CN,zh;q=0.9,en;q=0.8")), 1);
+        assert_eq!(pick_lang(&req("zh-TW,zh-Hant;q=0.9")), 2);
+        assert_eq!(pick_lang(&req("zh-HK")), 2);
+        assert_eq!(pick_lang(&req("ja-JP,ja;q=0.9")), 3);
+        assert_eq!(pick_lang(&req("en-GB,en;q=0.9")), 0);
+        // Anything we don't ship — and a request with no header at all — is English.
+        assert_eq!(pick_lang(&req("ko-KR,ko;q=0.9")), 0);
+        assert_eq!(pick_lang("GET /callback HTTP/1.1\r\n\r\n"), 0);
+        // A language we do ship, listed after one we don't, still wins.
+        assert_eq!(pick_lang(&req("ko-KR,ja;q=0.8")), 3);
     }
 
     #[test]
