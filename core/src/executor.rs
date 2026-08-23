@@ -1140,9 +1140,9 @@ fn kimi_device_id(account_id: &str) -> String {
 /// built on its own.
 pub fn with_claude_code_system(body: &[u8], session_id: &str) -> Option<Vec<u8>> {
     let mut v: serde_json::Value = serde_json::from_slice(body).ok()?;
-    // Take the fingerprint's walk of the latest user message before borrowing
+    // Take the fingerprint's walk of the conversation opener before borrowing
     // obj, so the two do not overlap against the same root.
-    let fingerprint_hash = fingerprint_hash(latest_user_text(&v));
+    let fingerprint_hash = fingerprint_hash(first_user_text(&v));
     let obj = v.as_object_mut()?;
 
     // Snapshot the caller's system prompt before it is replaced with the
@@ -1280,17 +1280,25 @@ fn fingerprint_hash(message_text: String) -> String {
 /// Mirrors CLIProxyAPI's `fingerprintSalt`.
 const FINGERPRINT_SALT: &str = "59cf53e54c78";
 
-/// The latest user message's raw text, without wrapping wrappers. Mirrors
-/// CLIProxyAPI's `claudeBillingFingerprintMessageText`.
-fn latest_user_text(v: &serde_json::Value) -> String {
+/// The conversation opener's raw text, without wrapping wrappers. Feeds the
+/// billing fingerprint.
+///
+/// CLIProxyAPI's `claudeBillingFingerprintMessageText` hashes the *latest* user
+/// turn instead, and this mirrored it until 2026-08-23. The billing block is
+/// `system[0]` — the head of everything a `cache_control` breakpoint can cache —
+/// so a hash that moves with the latest turn rewrites the cached prefix on every
+/// request: over 482 production Claude-lane relays, 204 wrote a cache and *zero*
+/// ever read one back, each turn re-billing the whole prefix at the 1.25x write
+/// rate. Hashing the first user turn keeps the block's shape and its
+/// per-conversation variety while holding it byte-stable for the length of a
+/// conversation, which is what the cache needs.
+fn first_user_text(v: &serde_json::Value) -> String {
     let Some(msgs) = v.get("messages").and_then(|m| m.as_array()) else {
         return String::new();
     };
-    // The *last* user turn that actually carries text, and within it the last
-    // text part — not a join of them all, and not the last user turn whatever
-    // it holds. A trailing tool-result-only turn falls back to the one before
-    // it, which is the message the CLI hashes.
-    let mut text = String::new();
+    // The *first* user turn that actually carries text, and within it the last
+    // text part — a leading tool-result-only turn falls through to the next one
+    // rather than pinning the whole conversation to the empty string.
     for msg in msgs {
         if msg.get("role").and_then(|r| r.as_str()) != Some("user") {
             continue;
@@ -1307,10 +1315,10 @@ fn latest_user_text(v: &serde_json::Value) -> String {
             _ => String::new(),
         };
         if !candidate.is_empty() {
-            text = candidate;
+            return candidate;
         }
     }
-    text
+    String::new()
 }
 
 /// A device id for the metadata block, stable per daemon. 64 hex characters,
@@ -2810,7 +2818,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
     }
 
     /// The build hash behind `cc_version` is Claude Code's own algorithm, not a
-    /// plausible-looking one: salt, the 4th/7th/20th character of the latest
+    /// plausible-looking one: salt, the 4th/7th/20th character of the hashed
     /// user text, the version, sha256, first three hex digits. Anchored against
     /// CLIProxyAPI's `computeFingerprint`.
     #[test]
@@ -2825,14 +2833,41 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
             assert_eq!(fingerprint_hash(text.to_string()), expect(text), "text {text:?}");
         }
 
-        // The hashed text is the last user turn that *has* text, and within it
-        // the last text part — a trailing tool-result-only turn falls back.
+        // The hashed text is the *first* user turn that has text, and within it
+        // the last text part — a leading tool-result-only turn falls through.
         let body = json!({"messages": [
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "42"}]},
             {"role": "user", "content": [{"type": "text", "text": "first"}, {"type": "text", "text": "second"}]},
             {"role": "assistant", "content": "ok"},
-            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "42"}]},
+            {"role": "user", "content": [{"type": "text", "text": "third"}]},
         ]});
-        assert_eq!(latest_user_text(&body), "second");
+        assert_eq!(first_user_text(&body), "second");
+    }
+
+    /// What the cache actually needs: everything ahead of the last breakpoint
+    /// must be byte-identical from one turn of a conversation to the next.
+    /// Hashing the latest user turn into `system[0]` broke exactly this, and a
+    /// prefix that moves every turn is re-billed at the cache-*write* rate
+    /// forever — 482 production relays, 204 writes, zero reads.
+    #[test]
+    fn the_cached_prefix_survives_the_next_turn() {
+        let turn = |msgs: serde_json::Value| {
+            let body = json!({"model": "claude-fable-5", "system": "be terse", "messages": msgs});
+            let out = with_claude_code_system(&serde_json::to_vec(&body).unwrap(), "ses-1").unwrap();
+            serde_json::from_slice::<serde_json::Value>(&out).unwrap()["system"].clone()
+        };
+        let first = turn(json!([{"role": "user", "content": "how do I list files"}]));
+        let second = turn(json!([
+            {"role": "user", "content": "how do I list files"},
+            {"role": "assistant", "content": "ls"},
+            {"role": "user", "content": "and hidden ones"},
+        ]));
+        assert_eq!(first, second, "the cached system prefix moved between turns");
+
+        // Still per-conversation, not one global constant — a different opener
+        // is a different prefix, which is what the CLI's own hash gives.
+        let other = turn(json!([{"role": "user", "content": "write me a haiku"}]));
+        assert_ne!(first, other, "every conversation collapsed onto one fingerprint");
     }
 
     /// The beta list tracks what the body actually holds, and the identity beta
