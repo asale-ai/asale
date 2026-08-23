@@ -625,6 +625,10 @@ export interface AccountStatus {
   sell_enabled: boolean;
   /** This account's daily sell cap in tokens; 0 = unlimited. */
   sell_daily_limit: number;
+  /** The models this account sells. Empty — the default — means every model it
+   *  can serve, which is the only value that stays right as the catalog grows;
+   *  a non-empty list sells exactly those. */
+  sell_models: string[];
   /** The price floor this account sells at, in whole percent *of* list price: a
    *  model the market prices below it is withheld until it comes back. `10` is
    *  the default; `5` — the platform's own floor, and below every price the

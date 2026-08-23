@@ -19,20 +19,22 @@ export interface ProviderInfo {
   vendor: string;
   /** False for families the platform runs itself and never offers. */
   connectable: boolean;
+  /** Offered on the connect screen to platform operators only. */
+  adminOnly: boolean;
 }
 
 export const PROVIDERS: ProviderInfo[] = [
-  { id: "claude", label: "Claude Code", credential: "oauth", keyUrl: "", vendor: "anthropic", connectable: true },
-  { id: "claude_work", label: "Claude Work", credential: "oauth", keyUrl: "", vendor: "anthropic", connectable: true },
-  { id: "codex", label: "Codex / OpenAI", credential: "oauth", keyUrl: "", vendor: "openai", connectable: true },
-  { id: "gemini", label: "Gemini", credential: "oauth", keyUrl: "", vendor: "google", connectable: true },
-  { id: "kimi", label: "Kimi Code", credential: "device_flow", keyUrl: "", vendor: "moonshotai", connectable: true },
-  { id: "kimi_api", label: "Moonshot API", credential: "api_key", keyUrl: "https://platform.moonshot.cn/console/api-keys", vendor: "moonshotai", connectable: true },
-  { id: "xai", label: "Grok CLI", credential: "device_flow", keyUrl: "", vendor: "x-ai", connectable: true },
-  { id: "xai_api", label: "xAI API", credential: "api_key", keyUrl: "https://console.x.ai", vendor: "x-ai", connectable: true },
-  { id: "qwen", label: "Alibaba Cloud Model Studio", credential: "api_key", keyUrl: "https://bailian.console.aliyun.com/?tab=model#/api-key", vendor: "qwen", connectable: true },
-  { id: "deepseek", label: "DeepSeek", credential: "api_key", keyUrl: "https://platform.deepseek.com/api_keys", vendor: "deepseek", connectable: true },
-  { id: "custom", label: "Custom endpoint", credential: "api_key", keyUrl: "", vendor: "", connectable: false },
+  { id: "claude", label: "Claude Code", credential: "oauth", keyUrl: "", vendor: "anthropic", connectable: true, adminOnly: false },
+  { id: "claude_work", label: "Claude Work", credential: "oauth", keyUrl: "", vendor: "anthropic", connectable: true, adminOnly: false },
+  { id: "codex", label: "Codex / OpenAI", credential: "oauth", keyUrl: "", vendor: "openai", connectable: true, adminOnly: false },
+  { id: "gemini", label: "Gemini", credential: "oauth", keyUrl: "", vendor: "google", connectable: true, adminOnly: false },
+  { id: "kimi", label: "Kimi Code", credential: "device_flow", keyUrl: "", vendor: "moonshotai", connectable: true, adminOnly: false },
+  { id: "kimi_api", label: "Moonshot API", credential: "api_key", keyUrl: "https://platform.moonshot.cn/console/api-keys", vendor: "moonshotai", connectable: true, adminOnly: false },
+  { id: "xai", label: "Grok CLI", credential: "device_flow", keyUrl: "", vendor: "x-ai", connectable: true, adminOnly: false },
+  { id: "xai_api", label: "xAI API", credential: "api_key", keyUrl: "https://console.x.ai", vendor: "x-ai", connectable: true, adminOnly: false },
+  { id: "qwen", label: "Alibaba Cloud Model Studio", credential: "api_key", keyUrl: "https://bailian.console.aliyun.com/?tab=model#/api-key", vendor: "qwen", connectable: true, adminOnly: true },
+  { id: "deepseek", label: "DeepSeek", credential: "api_key", keyUrl: "https://platform.deepseek.com/api_keys", vendor: "deepseek", connectable: true, adminOnly: true },
+  { id: "custom", label: "Custom endpoint", credential: "api_key", keyUrl: "", vendor: "", connectable: false, adminOnly: false },
 ];
 
 /** Catalog vendor slug → brand casing. */

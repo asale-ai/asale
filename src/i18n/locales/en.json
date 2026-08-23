@@ -279,6 +279,12 @@
     "unitOfList": "of list price",
     "bandQuick": "Quick:",
     "bandHintFloor": "Only sells while the market pays at least {{lo}}% of the vendor's list price. Below that the model stops selling and comes back on its own.",
+    "sellModelsLabel": "Models on sale",
+    "sellModelsAll": "All {{n}} models",
+    "sellModelsSome": "{{n}} of {{total}} models",
+    "sellModelsAdd": "Choose models",
+    "sellModelsPick": "Models this account sells",
+    "sellModelsHint": "Pick nothing and this account sells every model it can serve, including ones the platform prices later. Pick some and it sells only those.",
     "lanesLabel": "Requests served at once",
     "lanesEdit": "Edit concurrency",
     "unitRequests": "at a time",
@@ -1140,7 +1146,8 @@
       "apiKeyRejected": "{{provider}} rejected this API key — check it was copied in full and has not been revoked.",
       "apiKeyEmpty": "Enter an API key.",
       "apiKeyHasWhitespace": "The API key contains spaces — paste just the key, not the whole command.",
-      "customEndpointsAdminOnly": "Selling through an endpoint of your own is available to platform operators only."
+      "customEndpointsAdminOnly": "Selling through an endpoint of your own is available to platform operators only.",
+      "providerAdminOnly": "This provider is available to platform operators only."
     },
     "settings": {
       "unknownProxyMode": "Unknown proxy mode: {{value}}.",

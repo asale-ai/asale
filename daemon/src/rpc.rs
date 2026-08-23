@@ -536,6 +536,9 @@ rpc_args! {
         #[serde(default, alias = "min_ratio")] min_ratio: Option<i64>,
         #[serde(default, alias = "max_ratio")] max_ratio: Option<i64>,
         #[serde(default)] concurrency: Option<i64>,
+        /// Which models this account sells: absent leaves the selection alone,
+        /// `[]` puts every model it can serve back on the market.
+        #[serde(default)] models: Option<Vec<String>>,
     }
     // Custom endpoints. Every term past the URL and key is optional and falls
     // back to the account's current value (or, on a first connect, to the
@@ -784,6 +787,7 @@ async fn rpc(
                 p.min_ratio,
                 p.max_ratio,
                 p.concurrency,
+                p.models,
             )
             .await?
         },

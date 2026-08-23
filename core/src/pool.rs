@@ -349,6 +349,14 @@ pub struct AccountRuntime {
     /// OpenAI schema — what every custom account spoke before this was a
     /// choice, and still what most of them do.
     pub upstream_wire: Option<Wire>,
+    /// Whether that same endpoint also serves the Responses route, as probed
+    /// when it was connected. `false` everywhere else: every other provider's
+    /// upstream has one route by definition, and a custom endpoint nobody has
+    /// asked keeps the route it already works on.
+    ///
+    /// What it buys is [`AccountRuntime::wire_for`] — a model that cannot be
+    /// served on chat/completions at all is offered on the route that can.
+    pub upstream_responses: bool,
     /// market model id -> the id this account's upstream knows it by.
     ///
     /// Only a `custom` account has any: an aggregator lists
@@ -381,6 +389,10 @@ pub struct AccountRuntime {
     pub used_today: u64,
     /// Per-account daily sell cap in tokens; 0 = unlimited.
     pub sell_daily_limit: i64,
+    /// The models this account is switched on to sell. Empty means all of them,
+    /// which is the default and what every account that predates the setting
+    /// keeps meaning — see `store::ToolRow::sell_models`.
+    pub sell_models: Vec<String>,
     /// The price band this account sells inside, in whole percent *of* list
     /// price. `(5, 100)` is the whole legal range and never withholds anything;
     /// a fresh account starts at the default floor of 10 instead.
@@ -400,6 +412,41 @@ pub struct AccountRuntime {
     pub lanes: BTreeMap<String, LaneState>,
 }
 
+/// Models whose upstream cannot serve a tool-carrying request on the chat
+/// route at all.
+///
+/// OpenAI's "responses lite" generation — `gpt-5.6-sol`, `-luna`, `-terra` —
+/// answers `/v1/chat/completions` with a `400` the moment `tools` and
+/// `reasoning_effort` arrive together:
+///
+/// ```text
+/// Function tools with reasoning_effort are not supported for gpt-5.6-luna in
+/// /v1/chat/completions. To use function tools, use /v1/responses or set
+/// reasoning_effort to 'none'.
+/// ```
+///
+/// Which is every agent request there is — the buyer sends a harness. Dropping
+/// the buyer's reasoning to satisfy the chat route would sell them a model that
+/// does not think; the route that takes both is `/responses`, and a custom
+/// endpoint proxying OpenAI almost always serves it.
+///
+/// Named one by one rather than matched on `gpt-5.6-`, because that generation
+/// is not uniform: `gpt-5.6-codex` is a full Responses model and serves the
+/// chat route like any other, so a prefix would drop it from every chat-only
+/// endpoint that can in fact sell it.
+///
+/// Codex's own catalog carries the authoritative answer as `use_responses_lite`
+/// (see `codex_catalog`), but only for an account holding a Codex credential —
+/// a custom endpoint is never told. So this list is what a custom endpoint has,
+/// and a later lite generation needs a line here.
+//
+// ponytail: the upgrade path is that same flag on `SellableCatalog`, which
+// would make this list a fallback rather than the source.
+pub fn needs_responses_wire(model: &str) -> bool {
+    const LITE: &[&str] = &["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra"];
+    LITE.contains(&model)
+}
+
 impl AccountRuntime {
     pub fn new(provider: &str, account_id: &str, keychain_ref: &str) -> AccountRuntime {
         AccountRuntime {
@@ -409,6 +456,7 @@ impl AccountRuntime {
             upstream_account_id: None,
             upstream_base: None,
             upstream_wire: None,
+            upstream_responses: false,
             model_aliases: BTreeMap::new(),
             plan: None,
             quota_remaining: 0,
@@ -418,6 +466,7 @@ impl AccountRuntime {
             origin: None,
             used_today: 0,
             sell_daily_limit: 0,
+            sell_models: Vec::new(),
             sell_min_ratio: crate::store::DEFAULT_SELL_MIN_RATIO,
             sell_max_ratio: crate::store::RATIO_BAND_FULL.1,
             cooldown_until: None,
@@ -443,6 +492,21 @@ impl AccountRuntime {
         self
     }
 
+    /// The dialect this account speaks *for one model*.
+    ///
+    /// Normally its own — one endpoint, one protocol. The exception is
+    /// [`needs_responses_wire`]: those models refuse the chat route outright
+    /// once a request carries tools, and an endpoint that proxies OpenAI
+    /// usually serves both routes, so they are offered on the one that works.
+    /// Every other model on the same account keeps chat/completions, which is
+    /// where their aliases and their tool schema already work.
+    pub fn wire_for(&self, model: &str) -> Option<Wire> {
+        match self.upstream_wire {
+            Some(Wire::Openai) if self.upstream_responses && needs_responses_wire(model) => Some(Wire::Responses),
+            w => w,
+        }
+    }
+
     /// UI/state label: available | cooldown | expired | exhausted.
     pub fn status(&self, now: i64) -> &'static str {
         if self.auth_failed || self.expires_at.is_some_and(|e| e <= now) {
@@ -460,10 +524,21 @@ impl AccountRuntime {
         self.status(now) == "available" && self.in_use < self.concurrency_max
     }
 
-    /// Whether this account may *sell* one model right now: the account has to
-    /// be healthy and the lane neither cooling nor paused.
+    /// Whether the operator has this model switched on for selling.
+    ///
+    /// Separate from `sell_enabled`, which is the whole account's switch: this
+    /// one is the per-model narrowing, and an empty selection means every model
+    /// rather than none (an account nobody has narrowed sells what it always
+    /// did).
+    pub fn sells_model(&self, model: &str) -> bool {
+        self.sell_models.is_empty() || self.sell_models.iter().any(|m| m == model)
+    }
+
+    /// Whether this account may *sell* one model right now: the model has to be
+    /// one the operator offers, the account has to be healthy, and the lane
+    /// neither cooling nor paused.
     fn lane_available(&self, model: &str, now: i64) -> bool {
-        self.available(now) && self.lanes.get(model).is_some_and(|l| l.servable(now))
+        self.sells_model(model) && self.available(now) && self.lanes.get(model).is_some_and(|l| l.servable(now))
     }
 
     /// Whether this account may serve one model *locally*.
@@ -516,6 +591,9 @@ pub struct AccountStatusView {
     pub expires_at: Option<i64>,
     pub cooldown_until: Option<i64>,
     pub sell_enabled: bool,
+    /// The models this account sells; empty = all of them. What the sell page
+    /// seeds its model picker with.
+    pub sell_models: Vec<String>,
     pub origin: Option<String>,
     pub used_today: u64,
     pub sell_daily_limit: i64,
@@ -700,7 +778,8 @@ impl AccountPool {
         self.accounts.iter().any(|a| {
             a.provider == provider
                 && a.sell_enabled
-                && !(wire.is_some() && a.upstream_wire.is_some() && a.upstream_wire != wire)
+                && a.sells_model(model)
+                && !(wire.is_some() && a.wire_for(model).is_some() && a.wire_for(model) != wire)
                 // Everything `lane_available` asks for except the free slot.
                 && a.status(now) == "available"
                 && a.in_use >= a.concurrency_max
@@ -723,7 +802,10 @@ impl AccountPool {
             }
             // Only ever narrows accounts that have a dialect of their own; a
             // provider whose upstream is the vendor's is not excluded by it.
-            if wire.is_some() && a.upstream_wire.is_some() && a.upstream_wire != wire {
+            // Asked per model, because one endpoint can speak two: see
+            // [`AccountRuntime::wire_for`].
+            let own_wire = model.map_or(a.upstream_wire, |m| a.wire_for(m));
+            if wire.is_some() && own_wire.is_some() && own_wire != wire {
                 continue;
             }
             let ok = match (model, sell_only) {
@@ -768,7 +850,7 @@ impl AccountPool {
             keychain_ref: a.keychain_ref.clone(),
             upstream_account_id: a.upstream_account_id.clone(),
             upstream_base: a.upstream_base.clone(),
-            upstream_wire: a.upstream_wire,
+            upstream_wire: model.map_or(a.upstream_wire, |m| a.wire_for(m)),
             // Only when this account spells the model differently from the
             // market. `pick` (the local, non-sale route) passes no model, and
             // there is nothing to translate for it either — a local caller is
@@ -1029,7 +1111,7 @@ impl AccountPool {
                     ("paused", Some(r))
                 } else if lane.cooldown_until.is_some_and(|c| c > now) {
                     ("cooldown", None)
-                } else if !a.sell_enabled {
+                } else if !a.sell_enabled || !a.sells_model(model) {
                     ("off", None)
                 } else if !a.available(now) {
                     // The account itself is expired/exhausted; the lane is fine.
@@ -1070,13 +1152,16 @@ impl AccountPool {
                     cooldown_until: lane.cooldown_until.filter(|c| *c > now),
                     fail_streak: lane.fail_streak,
                     last_error: lane.last_error.clone(),
-                    sell_enabled: a.sell_enabled,
+                    // The lane's own switch, not the account's: a model the
+                    // operator has left out of the selection is not for sale,
+                    // and this is the field the supply declaration reads.
+                    sell_enabled: a.sell_enabled && a.sells_model(model),
                     quota_remaining: a.quota_remaining,
                     ratio: lane.ratio,
                     min_ratio: a.sell_min_ratio,
                     max_ratio: a.sell_max_ratio,
                     concurrency_max: a.concurrency_max,
-                    upstream_wire: a.upstream_wire,
+                    upstream_wire: a.wire_for(model),
                     upstream_base: a.upstream_base.clone(),
                 });
             }
@@ -1099,8 +1184,9 @@ impl AccountPool {
     pub fn lane_wire(&self, provider: &str, model: &str, now: i64) -> Option<Wire> {
         let mut headroom: BTreeMap<&'static str, (i64, Wire)> = BTreeMap::new();
         let mut any: Option<Wire> = None;
+        let mut responses_seen = false;
         for a in self.accounts.iter().filter(|a| a.provider == provider) {
-            let (Some(w), true) = (a.upstream_wire, a.lanes.contains_key(model)) else {
+            let (Some(w), true) = (a.wire_for(model), a.lanes.contains_key(model)) else {
                 continue;
             };
             // Something to fall back on when every lane is paused: the offer is
@@ -1108,8 +1194,22 @@ impl AccountPool {
             // dialect for the day it comes back.
             any.get_or_insert(w);
             if a.sell_enabled && a.lane_available(model, now) {
+                responses_seen |= w == Wire::Responses;
                 headroom.entry(w.as_str()).or_insert((0, w)).0 += a.quota_remaining as i64;
             }
+        }
+        // Headroom decides between two dialects that both work. For a model
+        // that only one of them can serve (`needs_responses_wire`) there is
+        // nothing to weigh: declaring it on the chat route because a bigger
+        // endpoint speaks that one puts it back on the route that answers 400
+        // to every tool call. The chat-only endpoints drop out of this lane and
+        // keep selling every other model they have.
+        //
+        // Only counted among the endpoints actually serving right now: an
+        // offline Responses endpoint must not take the lane away from one that
+        // could serve it in a dialect of its own (a `claude`-wire relay, say).
+        if responses_seen && needs_responses_wire(model) {
+            return Some(Wire::Responses);
         }
         headroom
             .into_values()
@@ -1132,6 +1232,7 @@ impl AccountPool {
                 expires_at: a.expires_at,
                 cooldown_until: a.cooldown_until.filter(|c| *c > now),
                 sell_enabled: a.sell_enabled,
+                sell_models: a.sell_models.clone(),
                 origin: a.origin.clone(),
                 used_today: a.used_today,
                 sell_daily_limit: a.sell_daily_limit,
@@ -1170,6 +1271,71 @@ mod tests {
         a.sell_min_ratio = band.0;
         a.sell_max_ratio = band.1;
         a
+    }
+
+    const LUNA: &str = "gpt-5.6-luna";
+
+    /// A custom endpoint: OpenAI schema, selling one lite model and one
+    /// ordinary one. `responses` is whether its host serves the second route.
+    fn endpoint(id: &str, quota: u64, responses: bool) -> AccountRuntime {
+        let mut a = AccountRuntime::new("custom", id, &format!("custom:{id}")).with_models([LUNA, "gpt-5.5"]);
+        a.quota_remaining = quota;
+        a.sell_enabled = true;
+        a.concurrency_max = 4;
+        a.upstream_base = Some("https://relay.example/v1".into());
+        a.upstream_wire = Some(Wire::Openai);
+        a.upstream_responses = responses;
+        a
+    }
+
+    #[test]
+    fn one_endpoint_offers_the_lite_models_on_the_route_that_can_serve_them() {
+        let a = endpoint("mix", 1_000, true);
+        assert_eq!(a.wire_for(LUNA), Some(Wire::Responses));
+        // Everything else stays where its aliases and its tool schema work.
+        assert_eq!(a.wire_for("gpt-5.5"), Some(Wire::Openai));
+        // An endpoint without the second route claims nothing it cannot do.
+        assert_eq!(endpoint("chat-only", 1_000, false).wire_for(LUNA), Some(Wire::Openai));
+    }
+
+    /// The generation is not uniform, and the difference is the whole point of
+    /// naming them: `gpt-5.6-codex` is a full Responses model that serves the
+    /// chat route, so a chat-only endpoint may sell it.
+    #[test]
+    fn only_the_lite_models_are_kept_off_the_chat_route() {
+        for lite in ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra"] {
+            assert!(needs_responses_wire(lite), "{lite}");
+        }
+        for ok in ["gpt-5.6-codex", "gpt-5.5", "claude-opus-5", "gpt-5.6"] {
+            assert!(!needs_responses_wire(ok), "{ok} was wrongly kept off the chat route");
+        }
+    }
+
+    #[test]
+    fn a_lite_lane_is_declared_on_responses_even_against_more_chat_headroom() {
+        // Headroom is the tie-break between two dialects that both work. Here
+        // only one does, so the bigger chat-only endpoint must not drag the
+        // lane back onto the route that 400s every tool call.
+        let mut pool = AccountPool::new(Strategy::RoundRobin);
+        pool.set_accounts(vec![endpoint("small", 10, true), endpoint("big", 10_000, false)]);
+        assert_eq!(pool.lane_wire("custom", LUNA, 0), Some(Wire::Responses));
+        // The same two endpoints agree on every other model, so nothing there
+        // is left out.
+        assert_eq!(pool.lane_wire("custom", "gpt-5.5", 0), Some(Wire::Openai));
+    }
+
+    #[test]
+    fn a_lease_for_a_lite_model_carries_the_route_it_will_be_sent_on() {
+        let mut pool = AccountPool::new(Strategy::RoundRobin);
+        pool.set_accounts(vec![endpoint("mix", 1_000, true)]);
+        // What the executor reads to build the URL: a pick that said "openai"
+        // here would post a Responses body to /chat/completions.
+        let picked = pool.pick_for_sale("custom", LUNA, Some(Wire::Responses), 0).expect("a lane");
+        assert_eq!(picked.upstream_wire, Some(Wire::Responses));
+        // And the chat-only endpoint is not eligible for that declaration.
+        let mut pool = AccountPool::new(Strategy::RoundRobin);
+        pool.set_accounts(vec![endpoint("chat-only", 1_000, false)]);
+        assert!(pool.pick_for_sale("custom", LUNA, Some(Wire::Responses), 0).is_none());
     }
 
     fn prices(pairs: &[(&str, i32)]) -> BTreeMap<String, i32> {
@@ -1300,6 +1466,30 @@ mod tests {
         p.set_accounts(vec![banded("a", (20, 100))]);
         p.apply_prices(&prices(&[(OPUS, 38)]));
         assert!(p.pick_for_sale("claude", OPUS, None, now).is_some());
+    }
+
+    /// Narrowing which models an account sells takes exactly those lanes off
+    /// the market and leaves the rest of the subscription trading, while the
+    /// operator's own local use of it is untouched — a sale is not the same
+    /// thing as using the subscription you pay for.
+    #[test]
+    fn a_narrowed_account_sells_only_the_models_it_was_narrowed_to() {
+        let now = 1_000;
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        let mut a = acct("a", 1_000);
+        a.sell_enabled = true;
+        a.sell_models = vec![HAIKU.to_string()];
+        p.set_accounts(vec![a]);
+
+        assert!(p.pick_for_sale("claude", HAIKU, None, now).is_some());
+        assert!(p.pick_for_sale("claude", OPUS, None, now).is_none(), "left out of the selection");
+        // Still visible on the sell page, and switched off there rather than
+        // vanished: an invisible lane is one nobody can switch back on.
+        let opus = p.lane_views(now).into_iter().find(|v| v.model == OPUS).expect("still listed");
+        assert_eq!(opus.status, "off");
+        assert!(!opus.sell_enabled, "so the declaration leaves it out");
+        // The local route ignores the sell selection entirely.
+        assert!(p.pick_local("claude", OPUS, now).is_some());
     }
 
     #[test]

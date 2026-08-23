@@ -420,7 +420,7 @@ impl ToolAdapter for ClaudeAdapter {
         let ua = if self.work {
             "claude-work/1.0 (desktop)"
         } else {
-            "claude-cli/1.0 (external, cli)"
+            asale_protocol::providers::CLAUDE_CLI_USER_AGENT
         };
         UpstreamSpec {
             base_url: "https://api.anthropic.com/v1/messages".into(),
@@ -602,6 +602,46 @@ pub async fn custom_endpoint_models(base_url: &str, api_key: &str, wire: Wire) -
     models.sort();
     models.dedup();
     Ok(models)
+}
+
+/// Whether a custom endpoint serves the Responses route as well as the chat
+/// one.
+///
+/// Asked with one POST of an empty body: the route itself answers `400` (no
+/// model, no input), a host that does not have it answers `404`/`405`. Nothing
+/// is generated and nothing is billed either way — the request never gets as
+/// far as a model.
+///
+/// It is only worth asking of an endpoint already known to speak the OpenAI
+/// schema, and the answer only matters for [`crate::pool::needs_responses_wire`]
+/// models. Only a status that means "I read your request and it was malformed"
+/// counts as a yes, because the cost of the two mistakes is not symmetric: a
+/// false no drops those few models from one endpoint's offer, while a false yes
+/// routes every one of their requests into a 404 the buyer pays a turn for. So
+/// anything else — unreachable, `404`, an auth wall, a proxy that answers `500`
+/// to a body it could not parse — reads as no.
+///
+/// `200` reads as no for the same reason. A real `/responses` cannot succeed on
+/// an empty body; something that answers one is a catch-all — a landing page, a
+/// proxy that swallows every path — and believing it is exactly the false yes
+/// this asymmetry is written to avoid.
+pub async fn custom_endpoint_has_responses(base_url: &str, api_key: &str) -> bool {
+    let base = base_url.trim().trim_end_matches('/');
+    let url = match base.ends_with("/responses") {
+        true => base.to_string(),
+        false => format!("{base}/responses"),
+    };
+    let sent = crate::http::upstream()
+        .post(&url)
+        .timeout(Duration::from_secs(15))
+        .header("authorization", format!("Bearer {api_key}"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await;
+    match sent {
+        Ok(r) => matches!(r.status().as_u16(), 400 | 422),
+        Err(_) => false,
+    }
 }
 
 /// The dialect an endpoint answers on, found by asking.

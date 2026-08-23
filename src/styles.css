@@ -1036,7 +1036,10 @@ select.input {
 .acct-usage .au-head .mono { color: var(--fg); font-weight: 500; }
 .acct-usage .au-pct { color: var(--fg-3); font-weight: 400; }
 
-.acct-grid { display: grid; grid-template-columns: minmax(200px, 260px) minmax(0, 1fr); gap: var(--s20); align-items: start; }
+/* The settings run the whole height of the tile, the fact strip is two short
+   readings — so the settings take the elastic column and their hints get a
+   full line instead of wrapping at 260px against empty space. */
+.acct-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 300px); gap: var(--s20); align-items: start; }
 @media (max-width: 700px) { .acct-grid { grid-template-columns: 1fr; } }
 .acct-grid > .field { margin-bottom: 0; }
 .acct-sub-label { font-size: var(--fs-meta); color: var(--fg-2); margin-bottom: var(--s8); }

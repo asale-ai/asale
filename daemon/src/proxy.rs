@@ -213,16 +213,11 @@ fn direct_upstream(provider: &str, path: &str, path_and_query: &str) -> Option<(
     match provider {
         "claude" | "claude_work" => Some((
             format!("https://api.anthropic.com{path}"),
-            vec![
-                ("anthropic-version", ANTHROPIC_VERSION.to_string()),
-                // OAuth (subscription) tokens require the oauth beta flag.
-                ("anthropic-beta", "oauth-2025-04-20".to_string()),
-                (
-                    "user-agent",
-                    if provider == "claude_work" { "claude-work/1.0 (desktop)" } else { "claude-cli/1.0 (external, cli)" }
-                        .to_string(),
-                ),
-            ],
+            // Only `anthropic-version` here: the rest of Claude Code's identity
+            // (user-agent, the beta list, the SDK headers) depends on the body
+            // and is applied below next to the cloaked payload, so the direct
+            // hop and the relay hop cannot drift apart.
+            vec![("anthropic-version", ANTHROPIC_VERSION.to_string())],
         )),
         "gemini" => Some((
             format!("https://generativelanguage.googleapis.com{path_and_query}"),
@@ -371,13 +366,28 @@ async fn forward_direct(
         req = req.header(k, v);
     }
     // Same OAuth requirement the relay executor applies: Anthropic refuses
-    // subscription traffic that does not open with Claude Code's preamble, and
-    // dresses the refusal as a 429. Claude Code's own body already carries it
-    // (this is a no-op then); any other Anthropic-dialect caller would not.
+    // subscription traffic that does not read like Claude Code, and dresses the
+    // refusal as a 429. Claude Code's own body already carries the preamble and
+    // its own `metadata.user_id`, both of which are kept — what this adds there
+    // is the billing header; any other Anthropic-dialect caller needs the lot.
     let mut out_body = bytes.to_vec();
     if provider == "claude" || provider == "claude_work" {
-        if let Some(patched) = asale_client_core::executor::with_claude_code_system(&out_body) {
+        let session = crate::session::claude_session_for(&picked.account_id).unwrap_or_default();
+        if let Some(patched) = asale_client_core::executor::with_claude_code_system(&out_body, &session) {
             out_body = patched;
+        }
+        // count_tokens takes the inference profile's smaller sibling; every
+        // other Anthropic route takes the full one.
+        req = req.header(
+            "anthropic-beta",
+            if path.ends_with("/count_tokens") {
+                asale_client_core::executor::claude_code_count_tokens_betas(true)
+            } else {
+                asale_client_core::executor::claude_code_betas(&out_body, true)
+            },
+        );
+        for (k, v) in asale_client_core::executor::claude_identity_headers(&session) {
+            req = req.header(k, v);
         }
     }
     let resp = match req.body(out_body).send().await {

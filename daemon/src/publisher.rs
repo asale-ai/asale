@@ -149,13 +149,39 @@ fn produces_text(modality: &str) -> bool {
 /// `Some(&[])` means the account is granted nothing and must advertise nothing —
 /// which is why the caller, not this function, decides what an unknown
 /// entitlement means.
+/// What an endpoint may advertise out of what it serves.
+///
+/// `chat_only` is a custom endpoint on the OpenAI schema whose host has no
+/// `/responses` route. It still lists the responses-only models — an aggregator
+/// lists everything it proxies — but it cannot serve one: the moment a buyer's
+/// request carries a tool the upstream answers 400, which costs that buyer a
+/// turn and this device its reputation. So they are not offered. An endpoint
+/// that does have the route offers them there instead
+/// (`AccountRuntime::wire_for`).
+fn offerable(served: Vec<String>, chat_only: bool) -> Vec<String> {
+    match chat_only {
+        false => served,
+        true => served.into_iter().filter(|m| !asale_client_core::pool::needs_responses_wire(m)).collect(),
+    }
+}
+
 fn sellable_models(catalog: &Option<SellableCatalog>, provider: &str, entitled: Option<&[String]>) -> Vec<String> {
     let listed: Vec<String> = match catalog {
         // A custom endpoint is not tied to one vendor's credential family, so
         // the catalog has no column for it: what it *may* sell is everything the
         // platform trades, and what it *can* sell is narrowed by the endpoint's
         // own model list, which arrives as `entitled` below.
-        Some(c) if provider == CUSTOM_PROVIDER => {
+        //
+        // Alibaba's Model Studio is the same shape wearing a vendor's name. One
+        // key there serves DeepSeek, Kimi, GLM and the rest alongside Alibaba's
+        // own models, so filing it under `qwen/*` — the vendor its *credential*
+        // belongs to — hid every model it resells. Each of those keeps the
+        // vendor the catalog files it under, so a DeepSeek model sold through a
+        // Model Studio key is still a DeepSeek row on the board; only the lane's
+        // credential family is `qwen`. What stops this widening into models the
+        // key cannot serve is the same thing that stops it for a custom
+        // endpoint: `entitled` is the vendor's own `/models`.
+        Some(c) if provider == CUSTOM_PROVIDER || provider == Provider::Qwen.as_str() => {
             let mut all: Vec<String> = c.by_provider.values().flatten().cloned().collect();
             all.sort();
             all.dedup();
@@ -300,6 +326,16 @@ pub fn custom_wire_key(account_id: &str) -> String {
     format!("customwire:{account_id}")
 }
 
+/// Settings key recording whether one custom endpoint also serves `/responses`.
+///
+/// Beside the dialect and for the same reason — one endpoint can serve both
+/// OpenAI routes, and which models need which is not a property of the account
+/// but of the model (`pool::needs_responses_wire`). Absent means nobody has
+/// asked yet, which is what triggers the probe below; `0` is an answer.
+pub fn custom_responses_key(account_id: &str) -> String {
+    format!("customresponses:{account_id}")
+}
+
 /// The dialect this custom account's endpoint speaks, as recorded.
 pub async fn custom_wire(store: &LocalStore, account_id: &str) -> Wire {
     store
@@ -309,6 +345,18 @@ pub async fn custom_wire(store: &LocalStore, account_id: &str) -> Wire {
         .flatten()
         .and_then(|w| Wire::from_str_opt(&w))
         .unwrap_or_default()
+}
+
+/// Whether this custom endpoint's host serves the Responses route, as recorded
+/// by the probe. Unknown reads as "no": the account keeps the one route it is
+/// already known to work on.
+pub async fn custom_has_responses(store: &LocalStore, account_id: &str) -> bool {
+    store
+        .get_setting(&custom_responses_key(account_id))
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|v| v == "1")
 }
 
 /// Settings key holding the model list one custom endpoint last reported.
@@ -375,6 +423,14 @@ fn market_candidates(endpoint_id: &str) -> Vec<String> {
     if bare.contains('.') {
         out.push(bare.replace('.', "-"));
     }
+    // And the same forms lowercased, last so a literal match still wins. Model
+    // Studio lists the models it resells under the reseller's own casing
+    // (`ZHIPU/GLM-5.3`, `MiniMax/MiniMax-M3`) while the catalog — like every
+    // vendor's own API — spells them lower. Without this the newest GLM and
+    // MiniMax flagships matched nothing and were silently unsellable.
+    let lowered: Vec<String> =
+        out.iter().map(|c| c.to_lowercase()).filter(|c| !out.contains(c)).collect();
+    out.extend(lowered);
     out.dedup();
     out
 }
@@ -517,6 +573,16 @@ async fn custom_endpoint_models(store: &LocalStore, tool: &asale_client_core::st
         }
     };
     let wire = custom_wire(store, &tool.account_id).await;
+    // Backfill for an account connected before the second route was a question.
+    // Runs once — the answer, either way, is stored — and only for the schema
+    // that has two routes to choose between.
+    if wire == Wire::Openai && store.get_setting(&custom_responses_key(&tool.account_id)).await.ok().flatten().is_none() {
+        if let Some(key) = keychain::get(&tool.keychain_ref).ok().flatten() {
+            let has = asale_client_core::discovery::custom_endpoint_has_responses(&base, &key).await;
+            tracing::info!(account = %tool.account_id, "endpoint {} the responses route", if has { "serves" } else { "does not serve" });
+            let _ = store.set_setting(&custom_responses_key(&tool.account_id), if has { "1" } else { "0" }).await;
+        }
+    }
     endpoint_models(store, tool, &base, wire).await
 }
 
@@ -1157,6 +1223,10 @@ impl TokenProvider for PoolTokens {
         self.acquire(provider, "").map(|l| l.token)
     }
 
+    fn session_for(&self, account_id: &str) -> Option<String> {
+        crate::session::claude_session_for(account_id)
+    }
+
     fn acquire(&self, provider: &str, model: &str) -> Option<LeasedToken> {
         // Sale traffic may only ever be served by an account the user switched
         // on for selling, on a lane that is not cooling or paused —
@@ -1176,6 +1246,7 @@ impl TokenProvider for PoolTokens {
             Some(token) => Some(LeasedToken {
                 token,
                 account_id: picked.account_id,
+                session_id: None,
                 upstream_account_id: picked.upstream_account_id,
                 upstream_base: picked.upstream_base,
                 upstream_wire: picked.upstream_wire,
@@ -1388,14 +1459,24 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
             }
             _ => None,
         };
+        // An OpenAI-schema endpoint with no `/responses` route cannot serve the
+        // responses-only models at all: every request that carries a tool comes
+        // back 400, which costs a buyer a turn and this device its reputation
+        // for a lane that could never have worked. With the route,
+        // `AccountRuntime::wire_for` offers them there instead. Read after the
+        // listing, which is what probes and records the answer.
+        let lite_unsellable = tool.provider == CUSTOM_PROVIDER
+            && custom_wire(store, &tool.account_id).await == Wire::Openai
+            && !custom_has_responses(store, &tool.account_id).await;
         let entitled = match tool.provider.as_str() {
             "codex" => Some(codex_entitlement(store, tool).await),
             // Same contract as Codex's entitlement: an empty answer means
             // advertise nothing, because a model the endpoint will refuse costs a
             // consumer a failed turn and this device its reputation.
-            p if p == CUSTOM_PROVIDER || p == Provider::Qwen.as_str() => {
-                Some(listing.as_ref().map(|l| l.market_ids()).unwrap_or_default())
-            }
+            p if p == CUSTOM_PROVIDER || p == Provider::Qwen.as_str() => Some(offerable(
+                listing.as_ref().map(|l| l.market_ids()).unwrap_or_default(),
+                lite_unsellable,
+            )),
             _ => None,
         };
         let mut a = AccountRuntime::new(&tool.provider, &tool.account_id, &tool.keychain_ref)
@@ -1417,6 +1498,7 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
         a.origin = tool.origin.clone();
         a.used_today = used_today;
         a.sell_daily_limit = tool.sell_daily_limit;
+        a.sell_models = tool.sell_models.clone();
         a.sell_min_ratio = tool.sell_min_ratio;
         a.sell_max_ratio = tool.sell_max_ratio;
         a.concurrency_max = tool.sell_concurrency as u32;
@@ -1435,6 +1517,9 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
             true => Some(custom_wire(store, &tool.account_id).await),
             false => None,
         };
+        // Same read, same reason: it is what lets one endpoint offer the
+        // responses-only models on the route that can serve them.
+        a.upstream_responses = custom_has_responses(store, &tool.account_id).await;
         // Empty for every other provider: their model ids are the market's
         // already, so there is nothing to translate on the way out.
         a.model_aliases = listing.map(|l| l.aliases).unwrap_or_default();
@@ -1697,7 +1782,10 @@ pub async fn start(state: &AppState) -> anyhow::Result<PublisherHandle> {
     // and the cost of guessing wrong is the user's own subscription.
     let deps = PublisherDeps::with_pinned_quota_key(
         state.identity.clone(),
-        Arc::new(PoolTokens { pool: state.pool.clone(), lanes: Some(lane_tx.clone()) }),
+        Arc::new(PoolTokens {
+            pool: state.pool.clone(),
+            lanes: Some(lane_tx.clone()),
+        }),
         Arc::new(PoolSupplySource { store: state.store.clone(), pool: state.pool.clone() }),
         Some(Arc::new(StoreRecordSink { store: state.store.clone() })),
         Some(Arc::new(GatewayLaneControl { pool: state.pool.clone(), lanes: Some(lane_tx) })),
@@ -1907,6 +1995,19 @@ mod tests {
     }
 
     #[test]
+    fn a_chat_only_endpoint_does_not_offer_the_responses_only_models() {
+        let served = ["gpt-5.5", "gpt-5.6-luna", "claude-opus-5"].map(String::from).to_vec();
+        // No `/responses` on this host: luna is listed by the aggregator and
+        // still unsellable, because every tool-carrying request 400s.
+        assert_eq!(
+            offerable(served.clone(), true),
+            vec!["gpt-5.5".to_string(), "claude-opus-5".to_string()]
+        );
+        // With the route it is sold like anything else, on that route.
+        assert_eq!(offerable(served.clone(), false), served);
+    }
+
+    #[test]
     fn a_custom_endpoint_that_serves_nothing_advertises_nothing() {
         // Same contract as Codex's entitlement: an empty answer is a real one,
         // and a lane the upstream will refuse costs a buyer a turn and this
@@ -1917,19 +2018,27 @@ mod tests {
         assert!(sellable_models(&None, CUSTOM_PROVIDER, Some(&["gpt-5.5".to_string()])).is_empty());
     }
 
+    /// Two rules meet on a Model Studio key, and both have to hold.
+    ///
     /// OpenRouter prices 50 `qwen/*` ids; DashScope answers to 30 of them. The
     /// gap is not cosmetic — `qwen-2.5-72b-instruct` (Alibaba writes it without
     /// the hyphen) and the whole `qwen3-vl-*` family are third-party re-hosts
     /// Alibaba has never served — and a lane behind one of them 404s on its
     /// first request. The vendor's own `/models` is what narrows the catalog
     /// down, and it reaches this function as `entitled`.
+    ///
+    /// The other way round, one key there serves far more than Alibaba's own
+    /// models. Filing the account under `qwen/*` — the vendor its *credential*
+    /// belongs to — hid every model it resells, which is capacity the platform
+    /// prices and nobody was selling.
     #[test]
-    fn a_qwen_key_sells_only_what_alibaba_actually_serves() {
+    fn a_qwen_key_sells_every_vendor_alibaba_serves_and_nothing_it_does_not() {
         let mut by_provider = std::collections::BTreeMap::new();
         by_provider.insert(
             "qwen".to_string(),
             ["qwen3-max", "qwen3-vl-8b-instruct", "qwen3.8-max"].iter().map(|s| s.to_string()).collect(),
         );
+        by_provider.insert("deepseek".to_string(), vec!["deepseek-v3.2".to_string()]);
         let catalog = Some(SellableCatalog { fetched_at: 1, by_provider, ..Default::default() });
         // What `/compatible-mode/v1/models` answers, trimmed to the point: it
         // is wider than this vendor's own rows, because DashScope resells other
@@ -1937,12 +2046,18 @@ mod tests {
         let served = ["qwen3-max".to_string(), "qwen3.8-max".to_string(), "deepseek-v3.2".to_string()];
         let mut sold = sellable_models(&catalog, Provider::Qwen.as_str(), Some(&served));
         sold.sort();
-        assert_eq!(sold, vec!["qwen3-max".to_string(), "qwen3.8-max".to_string()]);
+        assert_eq!(
+            sold,
+            vec!["deepseek-v3.2".to_string(), "qwen3-max".to_string(), "qwen3.8-max".to_string()],
+            "a model the key serves sells, whichever vendor made it"
+        );
         // Priced here, never served there: advertising it would cost a buyer a
         // turn and this device its reputation.
         assert!(!sold.contains(&"qwen3-vl-8b-instruct".to_string()));
-        // Served there but filed under another vendor: not this lane's to sell.
-        assert!(!sold.contains(&"deepseek-v3.2".to_string()));
+        // And an id the platform does not price at all stays out, however
+        // willingly the endpoint would serve it.
+        let unpriced = ["moonshot-v1-8k".to_string()];
+        assert!(sellable_models(&catalog, Provider::Qwen.as_str(), Some(&unpriced)).is_empty());
     }
 
     /// What the platform prices, in the catalog's own spelling.
@@ -1966,6 +2081,27 @@ mod tests {
         // An id the vendor already publishes dotted is left alone — OpenAI's
         // real API id *is* `gpt-5.2`.
         assert_eq!(idx.get("gpt-5.2").map(String::as_str), Some("gpt-5.2"));
+    }
+
+    /// Model Studio resells other vendors' models under the reseller's own
+    /// casing. The catalog — like every vendor's own API — spells them lower,
+    /// so without folding the case the newest GLM and MiniMax flagships matched
+    /// nothing and were quietly unsellable on a key that serves them.
+    #[test]
+    fn a_resellers_capitalised_id_finds_its_lowercase_catalog_row() {
+        let ids: Vec<String> = ["ZHIPU/GLM-5.3", "MiniMax/MiniMax-M3", "MiniMax-M2.5"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let catalog: Vec<String> =
+            ["glm-5.3", "minimax-m3", "minimax-m2.5"].iter().map(|s| s.to_string()).collect();
+        let idx = index_custom_models(&ids, &catalog);
+        assert_eq!(idx.get("glm-5.3").map(String::as_str), Some("ZHIPU/GLM-5.3"));
+        assert_eq!(idx.get("minimax-m3").map(String::as_str), Some("MiniMax/MiniMax-M3"));
+        assert_eq!(idx.get("minimax-m2.5").map(String::as_str), Some("MiniMax-M2.5"));
+        // The request still goes out under the endpoint's own spelling — only
+        // the market id is folded.
+        assert!(idx.values().all(|v| v.contains(char::is_uppercase)));
     }
 
     #[test]

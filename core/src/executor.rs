@@ -11,6 +11,7 @@ use base64::Engine;
 use futures_util::StreamExt;
 use serde_json::json;
 use std::collections::BTreeMap;
+use sha2::Digest as _Sha2Digest;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -40,6 +41,18 @@ fn with_model(body: &[u8], model_id: &str) -> Option<Vec<u8>> {
 /// built is what carries the request and only the origin is ours to replace.
 fn custom_url(base: &str, wire: Wire, built: &str) -> String {
     let base = base.trim().trim_end_matches('/');
+    // Between the two OpenAI routes the gateway's path wins over the recorded
+    // dialect. It built the *body* for one of them and `custom_placeholder`
+    // keeps that path, while this side's record can be a rebuild stale — and
+    // posting a Responses body to `/chat/completions` is a 400 nobody can read.
+    // Both routes take the same bearer, so nothing else moves with it, and the
+    // other two dialects have no second route to confuse this way.
+    let path = built.split('?').next().unwrap_or(built);
+    let wire = match wire {
+        Wire::Openai | Wire::Responses if path.ends_with("/responses") => Wire::Responses,
+        Wire::Openai | Wire::Responses if path.ends_with("/chat/completions") => Wire::Openai,
+        w => w,
+    };
     let join = |suffix: &str| {
         if base.ends_with(suffix) {
             base.to_string()
@@ -102,12 +115,129 @@ const CLAUDE_CODE_SYSTEM: &str = "You are Claude Code, Anthropic's official CLI 
 /// Beta flag Claude Code sends with OAuth tokens.
 const CLAUDE_OAUTH_BETA: &str = "oauth-2025-04-20";
 
+/// The beta that makes Anthropic read the request as Claude Code at all. Its
+/// absence — not the system prompt's — is what put subscription traffic on the
+/// "third-party apps draw from your extra usage" path.
+const CLAUDE_CODE_BETA: &str = "claude-code-20250219";
+
+/// The betas Claude Code declares on every `/v1/messages` call, in wire order.
+/// Mirrors CLIProxyAPI's `claudeCodeCLIBetas`.
+///
+/// `oauth` says the bearer is a subscription rather than an API key; the three
+/// credential-scoped entries ride on it.
+///
+/// One deliberate departure from the CLI profile: `redact-thinking-2026-02-12`
+/// is only declared when the body has no thinking enabled. Anthropic honours
+/// the redaction by returning thinking blocks with an empty `thinking` field,
+/// and on this path the reasoning is content a buyer paid for. The CLI itself
+/// drops the beta whenever it asks for thinking summaries, so the shape is one
+/// a real client does send.
+pub fn claude_code_betas(body: &[u8], oauth: bool) -> String {
+    let v: serde_json::Value = serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
+    let mut betas: Vec<&str> = Vec::with_capacity(12);
+    betas.push(CLAUDE_CODE_BETA);
+    if oauth {
+        betas.push(CLAUDE_OAUTH_BETA);
+    }
+    betas.push("interleaved-thinking-2025-05-14");
+    let thinking_on = v.pointer("/thinking/type").and_then(|t| t.as_str()) == Some("enabled")
+        || v.pointer("/thinking/budget_tokens").is_some();
+    if !thinking_on {
+        betas.push("redact-thinking-2026-02-12");
+    }
+    betas.push("thinking-token-count-2026-05-13");
+    betas.push("context-management-2025-06-27");
+    betas.push("prompt-caching-scope-2026-01-05");
+    if v.get("tools").and_then(|t| t.as_array()).is_some_and(|t| !t.is_empty()) {
+        betas.push("advanced-tool-use-2025-11-20");
+    }
+    betas.push("effort-2025-11-24");
+    if oauth {
+        betas.push("fallback-credit-2026-06-01");
+    }
+    // `speed` is rejected outright as an unknown field unless this is declared.
+    if v.get("speed").and_then(|s| s.as_str()).is_some_and(|s| s.eq_ignore_ascii_case("fast")) {
+        betas.push("fast-mode-2026-02-01");
+    }
+    if oauth {
+        betas.push("extended-cache-ttl-2025-04-11");
+    }
+    betas.join(",")
+}
+
+/// The much smaller beta profile Claude Code sends to
+/// `/v1/messages/count_tokens`: no redact-thinking, no prompt-caching-scope, no
+/// effort, and none of the body-dependent flags. Mirrors CLIProxyAPI's
+/// `claudeCountTokensBetasForCredential`.
+pub fn claude_code_count_tokens_betas(oauth: bool) -> String {
+    let mut betas = vec![CLAUDE_CODE_BETA];
+    if oauth {
+        betas.push(CLAUDE_OAUTH_BETA);
+    }
+    betas.extend(["interleaved-thinking-2025-05-14", "context-management-2025-06-27", "token-counting-2024-11-01"]);
+    betas.join(",")
+}
+
+/// Header names a Claude subscription request owns outright, so whatever the
+/// gateway put there is dropped before [`claude_identity_headers`] re-emits it.
+const CLAUDE_IDENTITY_HEADERS: &[&str] = &[
+    "anthropic-beta",
+    "anthropic-dangerous-direct-browser-access",
+    "user-agent",
+    "x-app",
+    "x-stainless-retry-count",
+    "x-stainless-runtime",
+    "x-stainless-lang",
+    "x-stainless-timeout",
+    "x-stainless-package-version",
+    "x-stainless-runtime-version",
+    "x-stainless-os",
+    "x-stainless-arch",
+    "x-claude-code-session-id",
+    "x-client-request-id",
+];
+
+/// The fixed header identity Claude Code 2.1.220 (`@anthropic-ai/sdk` 0.94.0)
+/// puts on every Messages call. Mirrors CLIProxyAPI's `identityHeader` block.
+///
+/// The body fingerprint alone is not what Anthropic reads: a request claiming
+/// `cc_version=2.1.220` from a `claude-cli/1.0` user-agent with none of the SDK
+/// headers is exactly the mismatch that reads as a third-party client.
+pub fn claude_identity_headers(session_id: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("user-agent", asale_protocol::spec(Provider::Claude).user_agent.to_string()),
+        ("anthropic-dangerous-direct-browser-access", "true".into()),
+        ("x-app", "cli".into()),
+        ("x-stainless-retry-count", "0".into()),
+        ("x-stainless-runtime", "node".into()),
+        ("x-stainless-lang", "js".into()),
+        ("x-stainless-timeout", "600".into()),
+        ("x-stainless-package-version", CLAUDE_SDK_VERSION.into()),
+        ("x-stainless-runtime-version", CLAUDE_NODE_VERSION.into()),
+        ("x-stainless-os", "MacOS".into()),
+        ("x-stainless-arch", "arm64".into()),
+        ("x-claude-code-session-id", session_uuid(session_id)),
+        ("x-client-request-id", uuid::Uuid::new_v4().to_string()),
+    ]
+}
+
+/// The `@anthropic-ai/sdk` and Node versions Claude Code 2.1.220 ships with.
+const CLAUDE_SDK_VERSION: &str = "0.94.0";
+const CLAUDE_NODE_VERSION: &str = "v26.3.0";
+
 /// A leased token: the bearer plus the pool account it came from (empty
 /// account_id when the provider has no pool semantics).
 #[derive(Debug, Clone, Default)]
 pub struct LeasedToken {
     pub token: String,
     pub account_id: String,
+    /// The session id the upstream knows this account by, where clinging is
+    /// part of the bargain. Only Claude uses it so far: the executor derives
+    /// one stable id per serving account the first time it leases that
+    /// account, so every request the account serves is attributed to one
+    /// long-running Claude Code session rather than to a fresh third-party
+    /// client each call.
+    pub session_id: Option<String>,
     /// The id the vendor knows this subscription by, when its upstream demands
     /// that id next to the bearer. Only Codex uses it so far — see the
     /// `chatgpt-account-id` block in [`execute`].
@@ -245,6 +375,14 @@ pub fn quota_exhausted(status: u16, body: &str) -> bool {
 pub trait TokenProvider: Send + Sync {
     /// Return the bearer token for a provider (e.g. "claude"), or None.
     fn token_for(&self, provider: &str) -> Option<String>;
+
+    /// The id the provider's upstream knows one of this account's sessions
+    /// by. Default: empty, which fingerprints anonymously — acceptable for
+    /// providers that never ask for a session, and worse than useless for
+    /// Claude, for which a rotating one sticks out more than none at all.
+    fn session_for(&self, _account_id: &str) -> Option<String> {
+        None
+    }
 
     /// Lease a token for one lane. Pool-backed implementations pick an account
     /// whose lane for `model` is serving (spec §4); the default wraps
@@ -463,6 +601,10 @@ pub async fn execute(
         }
     };
     let token = lease.token.clone();
+    let session_id = match lease.session_id.clone().filter(|s| !s.is_empty()) {
+        Some(s) => s,
+        None => tokens.session_for(&lease.account_id).unwrap_or_default(),
+    };
 
     let method = reqwest::Method::from_bytes(req.upstream.method.as_bytes()).unwrap_or(reqwest::Method::POST);
     // A `custom` account's endpoint belongs to whoever configured it, so the
@@ -481,8 +623,16 @@ pub async fn execute(
         None => req.upstream.url.clone(),
     };
     let mut builder = http.request(method, &url);
+    // A subscription request rebuilds Claude Code's own header identity below,
+    // so the gateway's guesses at those names are dropped rather than sent
+    // alongside — `reqwest` appends, and two `anthropic-beta` headers is a
+    // shape no first-party client ever puts on the wire.
+    let claude_identity = is_claude(&provider) && custom.is_none();
     for (k, v) in &req.upstream.headers {
         if let Some(s) = v.as_str() {
+            if claude_identity && CLAUDE_IDENTITY_HEADERS.iter().any(|h| k.eq_ignore_ascii_case(h)) {
+                continue;
+            }
             builder = builder.header(k, s);
         }
     }
@@ -491,15 +641,34 @@ pub async fn execute(
         None => builder.header("authorization", format!("Bearer {token}")),
     };
     let mut body = B64.decode(req.upstream.body_b64.as_bytes()).unwrap_or_default();
-    // The token we just injected is a Claude Code subscription credential, and
-    // the server that built this body does not know that — so the OAuth-only
-    // requirements are applied here, where the credential is known.
+    // The token we just injected is a Claude Code subscription credential.
+    // Anthropic decides "plan vs extra usage" from how much the request reads
+    // like the official CLI, so the whole fingerprint is built here, where the
+    // credential is known: without this the account answered 400
+    // "Third-party apps now draw from your extra usage, not your plan limits",
+    // which the gateway misread as a 429 and took the lane off the market
+    // (2026-08-23).
+    // Whether the fingerprint above actually went on. A body it could not parse
+    // is relayed as it arrived — the lane still has Claude Code's own traffic to
+    // serve, so this is not worth failing over — but that request is the one
+    // shape Anthropic bills to extra usage, and the 400 it earns costs the whole
+    // account a cooldown. Recording it is what tells the two cases apart after
+    // the fact: without this, "was it cloaked?" can only be guessed from the
+    // `system=NNNB` in the shape string.
+    let mut cloaked = false;
     if is_claude(&provider) {
-        if !req.upstream.headers.keys().any(|k| k.eq_ignore_ascii_case("anthropic-beta")) {
-            builder = builder.header("anthropic-beta", CLAUDE_OAUTH_BETA);
-        }
-        if let Some(patched) = with_claude_code_system(&body) {
+        if let Some(patched) = with_claude_code_system(&body, &session_id) {
             body = patched;
+            cloaked = true;
+        }
+        if claude_identity {
+            // Read off the *patched* body: the beta set is per-request — tools,
+            // thinking and the model all move it — so it can only be assembled
+            // once the body is final.
+            builder = builder.header("anthropic-beta", claude_code_betas(&body, true));
+            for (k, v) in claude_identity_headers(&session_id) {
+                builder = builder.header(k, v);
+            }
         }
     }
     // A custom endpoint may know this model by another name — an aggregator
@@ -616,10 +785,13 @@ pub async fn execute(
 
     if status >= 400 {
         let reset_at = retry_after_reset(&resp);
-        // The upstream's own words never leave this process, but they are the
-        // only way to tell a real quota exhaustion from a rejection wearing a
-        // 429 (Anthropic masks OAuth policy failures as `rate_limit_error`), so
-        // keep them in the log rather than dropping them on the floor.
+        // The upstream's own words are the only way to tell a real quota
+        // exhaustion from a rejection wearing a 429 (Anthropic masks OAuth
+        // policy failures as `rate_limit_error`) — and, for the operator on the
+        // other end, the only way to tell "this seller's key is out of credit"
+        // from a bare `UPSTREAM_4XX`. Logged here and sent on as the error
+        // frame's `detail`, which the gateway records against the task and does
+        // not forward to the buyer.
         //
         // Read *before* the pool is told anything, because on a 403 the body is
         // the only thing that says whether the credential or the machine was
@@ -660,10 +832,10 @@ pub async fn execute(
         };
         tokens.report(&provider, &lease.account_id, &model, outcome);
         tracing::warn!(
-            task = %task_id, provider = %provider, model = %model, status, sent = %shape,
+            task = %task_id, provider = %provider, model = %model, status, cloaked, sent = %shape,
             "upstream rejected: {}", detail.chars().take(400).collect::<String>()
         );
-        send_error(out, &task_id, code, &format!("upstream {status}"), retriable);
+        send_error_detail(out, &task_id, code, &format!("upstream {status}"), &detail, retriable);
         if let Some(r) = records {
             r.record(&task_id, &provider, &lease.account_id, &model, &Usage::default(), &format!("upstream_{status}")).await;
         }
@@ -926,49 +1098,415 @@ fn kimi_device_id(account_id: &str) -> String {
     format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
 }
 
-/// Put Claude Code's own preamble back at the head of the system prompt.
+/// Build the full Claude Code fingerprint into an upstream request body.
 ///
-/// Anthropic only accepts subscription (OAuth) traffic that identifies itself
-/// as Claude Code: a request whose system prompt does not open with this line
-/// is refused with `429 {"type":"rate_limit_error"}` — a masked policy failure,
-/// not an exhausted window. Relayed market requests carry the *consumer's*
-/// system prompt (or none at all), so without this every sale 429s, and the
-/// pool then cools the whole account for a limit it never actually hit.
+/// Anthropic draws "plan limits" only for requests it recognises as Claude
+/// Code; anything else taps "extra usage". A bare system preamble is not
+/// enough — the checks are layered, modelled on CLIProxyAPI's cloaking
+/// (`claude_executor_cloaking.go`):
 ///
-/// The caller's own prompt is kept as the block behind the preamble, so what
-/// the buyer asked for still reaches the model. Returns `None` when the body is
-/// not JSON or already complies, i.e. when there is nothing to rewrite.
-pub fn with_claude_code_system(body: &[u8]) -> Option<Vec<u8>> {
+///  * a first system block carrying `x-anthropic-billing-header` with the
+///    same version attribution the CLI puts there (`cc_version=2.1.220.xxx`),
+///  * a second block with the `You are Claude Code…` preamble and the
+///    ephemeral cache breakpoint the CLI sets,
+///  * `metadata.user_id` as the CLI's own JSON blob
+///    (`{device_id, account_uuid, session_id}`) — one stable session per account
+///    rather than a one-request client (empty session id for an account that
+///    cannot be named yields metadata that is simply skipped),
+///  * a `# currentDate` reminder at the head of the first user turn, like the
+///    CLI itself injects,
+///  * the caller's own system prompt, relocated into the conversation with
+///    the provider's own authority rather than stamped into the system slot
+///    where a third-party request would dump it.
+///
+/// Fully compliant bodies are returned unchanged. Anything that is not JSON
+/// object-shaped returns `None`, so the caller falls back to what the gateway
+/// built on its own.
+pub fn with_claude_code_system(body: &[u8], session_id: &str) -> Option<Vec<u8>> {
     let mut v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    // Take the fingerprint's walk of the latest user message before borrowing
+    // obj, so the two do not overlap against the same root.
+    let fingerprint_hash = fingerprint_hash(latest_user_text(&v));
     let obj = v.as_object_mut()?;
-    let preamble = json!({"type": "text", "text": CLAUDE_CODE_SYSTEM});
-    let system = match obj.get("system") {
-        // No system prompt at all — the preamble is the whole of it.
-        None | Some(serde_json::Value::Null) => json!([preamble]),
-        Some(serde_json::Value::String(s)) => {
-            if s.starts_with(CLAUDE_CODE_SYSTEM) {
-                return None;
-            }
-            json!([preamble, json!({"type": "text", "text": s})])
-        }
-        Some(serde_json::Value::Array(blocks)) => {
-            let first_ok = blocks
-                .first()
-                .and_then(|b| b.get("text"))
-                .and_then(|t| t.as_str())
-                .is_some_and(|t| t.starts_with(CLAUDE_CODE_SYSTEM));
-            if first_ok {
-                return None;
-            }
-            let mut out = vec![preamble];
-            out.extend(blocks.iter().cloned());
-            json!(out)
-        }
-        // Anything else is a shape Anthropic would reject anyway; leave it.
-        Some(_) => return None,
+
+    // Snapshot the caller's system prompt before it is replaced with the
+    // fingerprint blocks.
+    let caller_system: Vec<String> = match obj.get("system") {
+        Some(serde_json::Value::String(s)) => vec![s.clone()],
+        Some(serde_json::Value::Array(blocks)) => blocks
+            .iter()
+            .filter_map(|b| b.get("text").and_then(serde_json::Value::as_str))
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
     };
-    obj.insert("system".into(), system);
+    let caller_system: Vec<String> = caller_system
+        .into_iter()
+        // Our own billing header is ours to re-emit, so the whole block goes.
+        .filter(|t| !t.starts_with(BILLING_PREFIX))
+        // The preamble is *not*: Claude Code's own traffic carries it at the
+        // head of the same block as its real system prompt, so dropping the
+        // block on the prefix threw the caller's actual instructions — tools,
+        // environment, CLAUDE.md — away and sent the model a bare preamble.
+        // Only the preamble is re-emitted below; the tail is still the
+        // caller's.
+        .map(|t| match t.strip_prefix(CLAUDE_CODE_SYSTEM) {
+            Some(rest) => rest.trim_start().to_string(),
+            None => t,
+        })
+        .filter(|t| !t.trim().is_empty())
+        .collect();
+
+    // metadata.user_id, one stable session per serving account — but only when
+    // the caller has none. A local Claude Code request arrives with the real
+    // one the CLI minted, and replacing a genuine id with a synthetic one is
+    // the opposite of what this block is for. The gateway drops `metadata`, so
+    // on the sale path there is never one to keep.
+    if !session_id.is_empty() {
+        if let Some(m) = obj.entry("metadata").or_insert_with(|| json!({})).as_object_mut() {
+            let keep = m.get("user_id").and_then(|u| u.as_str()).is_some_and(is_claude_code_user_id);
+            if !keep {
+                m.insert("user_id".into(), json!(claude_code_user_id(session_id)));
+            }
+        }
+    }
+
+    // The `# currentDate` reminder that the CLI stamps into every request,
+    // kept out of the first user message's tool-result lead-in.
+    inject_current_date(&mut v);
+
+    // system := [billing header, Claude Code preamble, the caller's own blocks].
+    //
+    // Leading with a Claude Code marker is the *whole* of what buys plan usage
+    // rather than extra usage — measured against a live max20 subscription on
+    // 2026-08-23, bisecting an 83KB / 10-tool body one property at a time:
+    // dropping the metadata block, the billing line, the preamble, the
+    // `# currentDate` reminder or every `cache_control` breakpoint each still
+    // answered 200, and so did the same body with none of the CLI's headers.
+    // The one shape that was refused, twice and reproducibly, is a `system`
+    // whose first block is the caller's own prompt. So the caller's prompt does
+    // not have to leave the system slot at all; it only has to come second.
+    //
+    // Which retires a mid-conversation `role: system` turn, the beta flag that
+    // unlocked it, and the versioned list of models that refuse it — machinery
+    // built to clear a wall that turns out not to look there, at the cost of
+    // demoting the caller's instructions from system authority to a chat turn.
+    let billing = format!(
+        "{prefix} cc_version={version}.{hash}; cc_entrypoint=cli;",
+        prefix = BILLING_PREFIX,
+        version = CLAUDE_CODE_VERSION,
+        hash = fingerprint_hash
+    );
+    let mut system = vec![
+        json!({"type": "text", "text": billing}),
+        json!({"type": "text", "text": CLAUDE_CODE_SYSTEM}),
+    ];
+    system.extend(caller_system.into_iter().map(|t| json!({"type": "text", "text": t})));
+    v.as_object_mut().unwrap().insert("system".to_string(), json!(system));
+    // One ephemeral breakpoint, on the last block, so the caller's prompt is
+    // inside the cached prefix rather than after it — but only if the relayed
+    // body has not already spent the four Anthropic allows.
+    if spent_breakpoints(&v) < MAX_BREAKPOINTS {
+        if let Some(last) =
+            v.get_mut("system").and_then(|s| s.as_array_mut()).and_then(|a| a.last_mut()).and_then(|b| b.as_object_mut())
+        {
+            last.insert("cache_control".into(), json!({"type": "ephemeral"}));
+        }
+    }
+
     serde_json::to_vec(&v).ok()
+}
+
+/// Cache breakpoints Anthropic accepts on one request. A fifth is a `400`, and
+/// the whole turn with it.
+const MAX_BREAKPOINTS: usize = 4;
+
+/// How many breakpoints a body already spends outside the system slot.
+///
+/// The system slot is excluded because [`with_claude_code_system`] rebuilds it
+/// and re-emits the caller's blocks as plain text, so whatever it carried is
+/// gone by the time this matters. What is left — the caller's tools and
+/// messages — is not ours to drop, so it is the two breakpoints this file adds
+/// that give way: a missed one re-reads a prefix, a fifth one costs the turn.
+fn spent_breakpoints(v: &serde_json::Value) -> usize {
+    fn walk(v: &serde_json::Value) -> usize {
+        match v {
+            serde_json::Value::Object(o) => {
+                usize::from(o.contains_key("cache_control")) + o.values().map(walk).sum::<usize>()
+            }
+            serde_json::Value::Array(a) => a.iter().map(walk).sum(),
+            _ => 0,
+        }
+    }
+    match v.as_object() {
+        Some(o) => o.iter().filter(|(k, _)| k.as_str() != "system").map(|(_, x)| walk(x)).sum(),
+        None => 0,
+    }
+}
+
+/// The line Claude Code prepends to its system prompt.
+const BILLING_PREFIX: &str = "x-anthropic-billing-header:";
+/// The version the fingerprint claims. Bumped together with the UA the
+/// gateway stamps for this provider.
+const CLAUDE_CODE_VERSION: &str = "2.1.220";
+/// The fingerprint hash Claude Code puts behind the billing version, derived
+/// from the latest user message's text so it tracks the request. Mirrors
+/// CLIProxyAPI's `computeFingerprint`.
+fn fingerprint_hash(message_text: String) -> String {
+    let chars: Vec<char> = message_text.chars().collect();
+    let picked: String = [4usize, 7, 20].iter().map(|&i| chars.get(i).copied().unwrap_or('0')).collect();
+    let input = format!("{FINGERPRINT_SALT}{picked}{CLAUDE_CODE_VERSION}");
+    let hash = format!("{:x}", sha2::Sha256::digest(input.as_bytes()));
+    hash[..3].to_string()
+}
+
+/// The salt Claude Code mixes into its build fingerprint before hashing.
+/// Mirrors CLIProxyAPI's `fingerprintSalt`.
+const FINGERPRINT_SALT: &str = "59cf53e54c78";
+
+/// The latest user message's raw text, without wrapping wrappers. Mirrors
+/// CLIProxyAPI's `claudeBillingFingerprintMessageText`.
+fn latest_user_text(v: &serde_json::Value) -> String {
+    let Some(msgs) = v.get("messages").and_then(|m| m.as_array()) else {
+        return String::new();
+    };
+    // The *last* user turn that actually carries text, and within it the last
+    // text part — not a join of them all, and not the last user turn whatever
+    // it holds. A trailing tool-result-only turn falls back to the one before
+    // it, which is the message the CLI hashes.
+    let mut text = String::new();
+    for msg in msgs {
+        if msg.get("role").and_then(|r| r.as_str()) != Some("user") {
+            continue;
+        }
+        let candidate = match msg.get("content") {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Array(parts)) => parts
+                .iter()
+                .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("text"))
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .next_back()
+                .unwrap_or_default()
+                .to_string(),
+            _ => String::new(),
+        };
+        if !candidate.is_empty() {
+            text = candidate;
+        }
+    }
+    text
+}
+
+/// A device id for the metadata block, stable per daemon. 64 hex characters,
+/// which is the shape Claude Code writes and the only one Anthropic's own
+/// clients ever send.
+fn claude_device_id() -> String {
+    use std::sync::OnceLock;
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| {
+        format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple())
+    })
+    .clone()
+}
+
+/// `metadata.user_id` in the shape Claude Code 2.1.78 and newer send: a JSON
+/// *string* holding `{device_id, account_uuid, session_id}`. Mirrors
+/// CLIProxyAPI's `generateFakeUserIDWithSessionID`.
+///
+/// The old `user_<device>_session_<session>` spelling this replaced was retired
+/// by the CLI years before the 2.1.220 the billing header claims, so sending it
+/// alongside that version was itself a third-party tell.
+fn claude_code_user_id(session_id: &str) -> String {
+    json!({
+        "device_id": claude_device_id(),
+        "account_uuid": "",
+        "session_id": session_uuid(session_id),
+    })
+    .to_string()
+}
+
+/// The session id as a uuid, which is the only shape Claude Code's
+/// `metadata.user_id` and `x-claude-code-session-id` carry. An id this side
+/// minted in some other spelling is hashed into one rather than replaced by a
+/// fresh one each call — the whole value of the id is that it does not move.
+fn session_uuid(session_id: &str) -> String {
+    if let Ok(u) = uuid::Uuid::parse_str(session_id) {
+        return u.to_string();
+    }
+    let d = sha2::Sha256::digest(format!("asale-claude-session:{session_id}").as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&d[..16]);
+    uuid::Uuid::from_bytes(bytes).to_string()
+}
+
+/// Whether a caller's own `metadata.user_id` is one Claude Code would have
+/// written — the only kind worth keeping. Mirrors CLIProxyAPI's `isValidUserID`.
+fn is_claude_code_user_id(user_id: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(user_id) else { return false };
+    let device = v.get("device_id").and_then(|d| d.as_str()).unwrap_or_default();
+    if device.len() != 64 || !device.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+        return false;
+    }
+    if uuid::Uuid::parse_str(v.get("session_id").and_then(|s| s.as_str()).unwrap_or_default()).is_err() {
+        return false;
+    }
+    match v.get("account_uuid").and_then(|a| a.as_str()).unwrap_or_default() {
+        "" => true,
+        a => uuid::Uuid::parse_str(a).is_ok(),
+    }
+}
+
+/// Index of the first message whose `role` is `user`. A body with no user
+/// turn is one the fingerprint leaves alone — Anthropic cannot read a
+/// membership in a body without one regardless.
+fn first_user_index(v: &serde_json::Value) -> Result<usize, ()> {
+    let msgs = v.get("messages").and_then(|m| m.as_array());
+    msgs.and_then(|msgs| {
+        msgs.iter()
+            .position(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+    })
+    .ok_or(())
+}
+
+/// Stamp the current-date reminder at the head of the first user turn.
+///
+// ponytail: UTC, not the caller's timezone. The CLI stamps a local date, so
+// this is off by a day for part of each day east/west of Greenwich; making it
+// local needs a tz database, which is a dependency for a cosmetic field.
+// Upgrade path: `chrono`/`jiff` if the date ever has to match exactly.
+fn inject_current_date(v: &mut serde_json::Value) {
+    let Ok(index) = first_user_index(v) else { return };
+    // Whether there is room for the breakpoint below. A body that already
+    // spends all four keeps its own; adding a fifth is a `400` on the turn.
+    let room = spent_breakpoints(v) < MAX_BREAKPOINTS;
+    let Some(msgs) = v.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+        return;
+    };
+    let Some(msg) = msgs.get_mut(index) else { return };
+    let now = std::time::SystemTime::now();
+    let secs = now.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let date = current_date_string(secs);
+    let reminder_text = current_date_reminder(&date);
+
+    match msg.get_mut("content") {
+        None => {}
+        Some(c @ serde_json::Value::String(_)) => {
+            // A bare string becomes the array form the CLI itself sends,
+            // with the date marker ahead of the user's own block.
+            let body = c.as_str().unwrap().to_string();
+            // A prior marker can be appended to the same block in the
+            // unusual shape — drop the duplicate rather than stack it.
+            let body = strip_prior_date_marker(&body);
+            let mut block = json!({"type": "text", "text": body});
+            if room {
+                block.as_object_mut().unwrap().insert("cache_control".into(), json!({"type": "ephemeral"}));
+            }
+            *c = json!([{"type": "text", "text": reminder_text.clone()}, block]);
+        }
+        Some(serde_json::Value::Array(parts)) => {
+            // Strip any prior date markers so re-cloaking a body does not
+            // stack two reminders.
+            let mut kept: Vec<serde_json::Value> = parts
+                .iter()
+                .filter(|p| !p.get("text").and_then(|t| t.as_str()).map(is_current_date_marker).unwrap_or(false))
+                .cloned()
+                .collect();
+            // Claude Code puts a cache breakpoint on the user's first real text
+            // block — the one that is not another `<system-reminder>` wrapper —
+            // so the prefix ahead of it is read back instead of re-billed every
+            // turn. Without it a seller pays full input price on every request
+            // of a long conversation.
+            if room {
+                if let Some(first_text) = kept.iter_mut().find(|p| {
+                    p.get("type").and_then(|t| t.as_str()) == Some("text")
+                        && !p.get("text").and_then(|t| t.as_str()).unwrap_or_default().starts_with("<system-reminder>")
+                }) {
+                    if let Some(o) = first_text.as_object_mut() {
+                        o.entry("cache_control").or_insert(json!({"type": "ephemeral"}));
+                    }
+                }
+            }
+            let insert_at = kept
+                .iter()
+                .position(|p| p.get("type").and_then(|t| t.as_str()) != Some("tool_result"))
+                .unwrap_or(kept.len());
+            *parts = kept;
+            parts.splice(
+                usize::min(insert_at, parts.len())..usize::min(insert_at, parts.len()),
+                vec![json!({"type": "text", "text": reminder_text})],
+            );
+        }
+        Some(_) => {}
+    }
+}
+
+/// The `# currentDate` block Claude Code stamps into the first user turn,
+/// byte-for-byte — the trailing IMPORTANT paragraph and the two closing
+/// newlines included. Mirrors CLIProxyAPI's `claudeCodeCurrentDateReminder`;
+/// a shortened copy is a different string, which is the whole point of it.
+fn current_date_reminder(date: &str) -> String {
+    format!(
+        "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is {date}.\n\n      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>\n\n"
+    )
+}
+
+fn is_current_date_marker(t: &str) -> bool {
+    t.starts_with("<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is ")
+}
+
+/// Drop any prior date marker from a string that is about to be re-cloaked,
+/// so a second pass does not stack two reminders onto the one block.
+fn strip_prior_date_marker(s: &str) -> String {
+    match s.find("</system-reminder>") {
+        // Only strip when the string actually opens with the marker shape.
+        Some(end) if is_current_date_marker(s) => s[end + "</system-reminder>".len()..].trim_start_matches('\n').to_string(),
+        _ => s.to_string(),
+    }
+}
+
+/// The date baked into the reminder, as UTC civil time. Off-by-one-day at the
+/// boundaries against a caller in another timezone, which is fine because the
+/// date is only a fingerprint.
+fn current_date_string(unix_secs: u64) -> String {
+    // std has no civil-from-unix converter, and the format needs no library.
+    // Do a plain Gregorian rolling: a year is either 365 or 366 days.
+    let days = unix_secs / 86_400;
+    let mut year = 1970u64;
+    let mut remainder = days;
+    loop {
+        let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+        let done = if leap { 366 } else { 365 };
+        if remainder < done {
+            break;
+        }
+        remainder -= done;
+        year += 1;
+    }
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let month_days = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut month = 1;
+    for len in month_days {
+        if remainder < len {
+            break;
+        }
+        remainder -= len;
+        month += 1;
+    }
+    let day = remainder + 1;
+    format!("{year}-{month:02}-{day:02}")
 }
 
 /// Parse a Retry-After header into an absolute unix-seconds reset, if present.
@@ -1220,15 +1758,55 @@ fn merge_usage(usage: &mut Usage, v: &serde_json::Value) {
 }
 
 fn send_error(out: &mpsc::UnboundedSender<Envelope>, task_id: &str, code: &str, message: &str, retriable: bool) {
+    send_error_detail(out, task_id, code, message, "", retriable);
+}
+
+/// The same, plus the upstream's own body.
+///
+/// `message` is what the buyer is shown, so it stays the short summary it has
+/// always been. `detail` is the provider's verbatim answer, which is the only
+/// thing that separates "this lane failed" from "this lane's account is out of
+/// credit" — the gateway writes it to the task row for the operator console and
+/// never forwards it. Capped here rather than there: a provider that answers an
+/// error with a megabyte of HTML should not be relayed a megabyte of HTML.
+fn send_error_detail(
+    out: &mpsc::UnboundedSender<Envelope>,
+    task_id: &str,
+    code: &str,
+    message: &str,
+    detail: &str,
+    retriable: bool,
+) {
+    let detail: String = detail.trim().chars().take(1000).collect();
     let _ = out.send(Envelope::with_id(
         task_id,
         protocol::T_ERROR,
-        json!({"id": task_id, "task_id": task_id, "code": code, "message": message, "retriable": retriable}),
+        json!({
+            "id": task_id, "task_id": task_id, "code": code, "message": message,
+            "detail": detail, "retriable": retriable,
+        }),
     ));
 }
 
 #[cfg(test)]
 mod tests {
+    /// The buyer's half and the operator's half of an upstream rejection travel
+    /// in different fields, and the operator's half is bounded.
+    #[test]
+    fn an_upstream_body_rides_along_as_detail_and_is_capped() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let body = format!(r#"{{"error":{{"message":"{}"}}}}"#, "x".repeat(4000));
+        super::send_error_detail(&tx, "t1", "UPSTREAM_4XX", "upstream 402", &body, false);
+        let env = rx.try_recv().unwrap();
+        assert_eq!(env.payload["message"], "upstream 402", "this is what the buyer is shown");
+        let detail = env.payload["detail"].as_str().unwrap();
+        assert_eq!(detail.chars().count(), 1000, "a megabyte of HTML is not relayed");
+        assert!(detail.starts_with(r#"{"error""#));
+        // The plain sender keeps its shape: nothing to say, nothing sent.
+        super::send_error(&tx, "t2", "TOKEN_EXPIRED", "no local token", true);
+        assert_eq!(rx.try_recv().unwrap().payload["detail"], "");
+    }
+
     #[test]
     fn a_geo_refusal_is_not_a_dead_login() {
         use super::{refusal_outcome, TaskOutcome};
@@ -1323,6 +1901,29 @@ mod tests {
         assert_eq!(
             custom_url("https://host/v1/chat/completions", Wire::Openai, built),
             "https://host/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn the_built_route_outranks_a_stale_recorded_dialect() {
+        use super::custom_url;
+        // One endpoint, two OpenAI routes. The lane's recorded dialect is a
+        // snapshot; the path is what the body was actually built for, so a
+        // Responses body reaches /responses even on an account still recorded
+        // as speaking chat — and the reverse holds too.
+        assert_eq!(
+            custom_url("https://relay.example/v1", Wire::Openai, "https://custom.invalid/v1/responses"),
+            "https://relay.example/v1/responses"
+        );
+        assert_eq!(
+            custom_url("https://relay.example/v1", Wire::Responses, "https://custom.invalid/v1/chat/completions"),
+            "https://relay.example/v1/chat/completions"
+        );
+        // Not a licence to follow any path: the other two dialects have one
+        // endpoint each and keep it.
+        assert_eq!(
+            custom_url("https://relay.example/v1", Wire::Claude, "https://custom.invalid/v1/responses"),
+            "https://relay.example/v1/messages"
         );
     }
 
@@ -2012,44 +2613,232 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
     #[test]
     fn claude_code_preamble_leads_the_system_prompt() {
         let patched = |body: serde_json::Value| -> serde_json::Value {
-            let out = with_claude_code_system(&serde_json::to_vec(&body).unwrap())
+            let out = with_claude_code_system(&serde_json::to_vec(&body).unwrap(), "")
                 .expect("body rewritten");
             serde_json::from_slice(&out).unwrap()
         };
 
         // No system prompt at all (what a bare relayed body carries).
-        assert_eq!(
-            patched(json!({"model": "m"}))["system"],
-            json!([{"type": "text", "text": CLAUDE_CODE_SYSTEM}])
-        );
-        // The consumer's own prompt survives, behind the preamble.
-        assert_eq!(
-            patched(json!({"system": "be terse"}))["system"],
-            json!([
-                {"type": "text", "text": CLAUDE_CODE_SYSTEM},
-                {"type": "text", "text": "be terse"},
-            ])
-        );
-        assert_eq!(
-            patched(json!({"system": [{"type": "text", "text": "be terse"}]}))["system"],
-            json!([
-                {"type": "text", "text": CLAUDE_CODE_SYSTEM},
-                {"type": "text", "text": "be terse"},
-            ])
-        );
-        // Already compliant (Claude Code's own traffic) — left untouched, in
-        // either shape, so the direct route never doubles the preamble.
-        for body in [
-            json!({"system": CLAUDE_CODE_SYSTEM}),
-            json!({"system": [{"type": "text", "text": format!("{CLAUDE_CODE_SYSTEM} More rules.")}]}),
-        ] {
+        let out = patched(json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]}));
+        let system = out["system"].as_array().unwrap();
+        assert_eq!(system.len(), 2, "exactly the billing header and the preamble: {system:?}");
+        assert!(system[0]["text"].as_str().unwrap().starts_with(BILLING_PREFIX));
+        assert_eq!(system[1]["text"], json!(CLAUDE_CODE_SYSTEM));
+        assert_eq!(system[1]["cache_control"]["type"], "ephemeral");
+
+        // The consumer's own prompt keeps its system authority; it only loses
+        // the *first* block, which is the one Anthropic reads for the identity.
+        // Every model takes the same path — there is no mid-conversation turn
+        // to refuse, so no legacy split.
+        for model in ["claude-opus-5", "claude-opus-4", "claude-sonnet-4-5-20250929"] {
+            let out = patched(json!({
+                "model": model,
+                "system": "be terse",
+                "messages": [{"role": "user", "content": "hi"}],
+            }));
+            let system = out["system"].as_array().unwrap();
+            assert!(system[0]["text"].as_str().unwrap().starts_with(BILLING_PREFIX), "{model}: {system:?}");
+            assert_eq!(system[1]["text"], json!(CLAUDE_CODE_SYSTEM), "{model}");
+            assert_eq!(system[2]["text"], "be terse", "{model}: caller prompt must stay in the system slot");
+            // The breakpoint rides the last block so the caller's prompt is
+            // inside the cached prefix, not stranded after it.
+            assert!(system[1].get("cache_control").is_none(), "{model}: {system:?}");
+            assert_eq!(system[2]["cache_control"]["type"], "ephemeral", "{model}");
             assert!(
-                with_claude_code_system(&serde_json::to_vec(&body).unwrap()).is_none(),
-                "compliant body must not be rewritten: {body}"
+                !out["messages"].as_array().unwrap().iter().any(|m| m["role"] == "system"),
+                "{model}: no body should get a mid-conversation system turn any more"
             );
         }
+
+        // A body with no user turn still gets the system slot; there is just no
+        // conversation to stamp the date into.
+        let out = with_claude_code_system(&serde_json::to_vec(&json!({"model": "m"})).unwrap(), "").unwrap();
+        let out: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(out["system"].as_array().unwrap().len(), 2);
+        assert!(out.get("messages").is_none());
         // Not JSON: nothing to rewrite, and nothing to break.
-        assert!(with_claude_code_system(b"not json").is_none());
+        assert!(with_claude_code_system(b"not json", "").is_none());
+    }
+
+    /// Claude Code's own traffic — the local direct route, and any buyer whose
+    /// harness is the CLI — puts the preamble at the head of the *same* block as
+    /// its real system prompt. Only the preamble is ours to re-emit; the rest is
+    /// the caller's instructions, and losing them sends the model a bare
+    /// "you are Claude Code" and nothing else.
+    #[test]
+    fn a_compliant_callers_own_instructions_survive_the_preamble_strip() {
+        let body = json!({
+            "model": "claude-opus-5",
+            "system": [{"type": "text", "text": format!("{CLAUDE_CODE_SYSTEM}\n\nNever edit files without reading them.")}],
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let out = with_claude_code_system(&serde_json::to_vec(&body).unwrap(), "ses-1").unwrap();
+        let out: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let raw = serde_json::to_string(&out).unwrap();
+        assert!(raw.contains("Never edit files without reading them."), "caller instructions lost: {raw}");
+        // The preamble is re-emitted as its own leading block and the caller's
+        // tail follows it, rather than the two sharing one block as the CLI
+        // sends them — same text, same order, one block boundary more.
+        let system = out["system"].as_array().unwrap();
+        assert_eq!(system.len(), 3, "{system:?}");
+        assert_eq!(system[2]["text"], "Never edit files without reading them.");
+    }
+
+    /// Anthropic refuses a request carrying a fifth cache breakpoint, and the
+    /// relayed body's own are not ours to drop — so the two this file adds are
+    /// the ones that give way. A missed breakpoint re-reads a prefix; a `400`
+    /// costs the turn and cools the lane.
+    #[test]
+    fn a_body_that_already_spends_every_breakpoint_gets_no_more() {
+        let bp = json!({"type": "ephemeral"});
+        let body = json!({
+            "model": "claude-opus-5",
+            "system": [{"type": "text", "text": "be terse", "cache_control": bp}],
+            "tools": [{"name": "t", "cache_control": bp}],
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "one", "cache_control": bp}]},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": [{"type": "text", "text": "two", "cache_control": bp}]},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": [{"type": "text", "text": "three", "cache_control": bp}]},
+            ],
+        });
+        let out = with_claude_code_system(&serde_json::to_vec(&body).unwrap(), "ses-1").unwrap();
+        let out: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        // Four already spent by tools and messages, so the system slot — whose
+        // own was dropped with the caller's blocks — gets none back.
+        assert_eq!(super::spent_breakpoints(&out), 4, "the caller's own were kept");
+        assert!(
+            out["system"].as_array().unwrap().iter().all(|b| b.get("cache_control").is_none()),
+            "a fifth breakpoint would 400 the whole turn: {}",
+            out["system"]
+        );
+
+        // One slot free: the system prefix is worth caching, so it is taken.
+        let body = json!({
+            "model": "claude-opus-5",
+            "tools": [{"name": "t", "cache_control": bp}],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        });
+        let out = with_claude_code_system(&serde_json::to_vec(&body).unwrap(), "ses-1").unwrap();
+        let out: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert!(super::spent_breakpoints(&out) <= 4);
+        assert!(
+            serde_json::to_string(&out["system"]).unwrap().contains("cache_control"),
+            "room to spare and the prefix went uncached: {}",
+            out["system"]
+        );
+    }
+
+    /// A caller's own `metadata.user_id` is kept only when it is one Claude
+    /// Code would have written. Anything else — including the old
+    /// `user_x_session_y` spelling the CLI retired long before the 2.1.220 the
+    /// billing header claims — is a third-party tell, so it is replaced.
+    #[test]
+    fn only_a_claude_code_shaped_user_id_survives() {
+        let with = |user_id: &str| -> String {
+            let body = json!({
+                "model": "claude-opus-5",
+                "metadata": {"user_id": user_id},
+                "messages": [{"role": "user", "content": "hi"}],
+            });
+            let out = with_claude_code_system(&serde_json::to_vec(&body).unwrap(), "ses-1").unwrap();
+            let out: serde_json::Value = serde_json::from_slice(&out).unwrap();
+            out["metadata"]["user_id"].as_str().unwrap().to_string()
+        };
+
+        // A real one from the CLI: kept verbatim.
+        let native = json!({
+            "device_id": "a".repeat(64),
+            "account_uuid": "",
+            "session_id": "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+        })
+        .to_string();
+        assert_eq!(with(&native), native);
+
+        // The retired shape: replaced with one that parses.
+        let replaced = with("user_real_session_abc");
+        assert_ne!(replaced, "user_real_session_abc");
+        assert!(is_claude_code_user_id(&replaced), "replacement is not CLI-shaped: {replaced}");
+    }
+
+    #[test]
+    fn claude_code_metadata_keeps_a_stable_session() {
+        let body = json!({"model": "claude-opus-5", "messages": [{"role": "user", "content": "hi"}]});
+        let (a, b) = (
+            with_claude_code_system(&serde_json::to_vec(&body).unwrap(), "ses-1").unwrap(),
+            with_claude_code_system(&serde_json::to_vec(&body).unwrap(), "ses-1").unwrap(),
+        );
+        let (a, b): (serde_json::Value, serde_json::Value) = (serde_json::from_slice(&a).unwrap(), serde_json::from_slice(&b).unwrap());
+        let ua = a.pointer("/metadata/user_id").and_then(|v| v.as_str());
+        let ub = b.pointer("/metadata/user_id").and_then(|v| v.as_str());
+        assert_eq!(ua, ub, "the same account must keep the same session");
+        let ua = ua.unwrap();
+        assert!(is_claude_code_user_id(ua), "user_id is not the shape Claude Code sends: {ua}");
+        assert!(ua.contains(&session_uuid("ses-1")), "the account's own session must be the one carried: {ua}");
+    }
+
+    /// The build hash behind `cc_version` is Claude Code's own algorithm, not a
+    /// plausible-looking one: salt, the 4th/7th/20th character of the latest
+    /// user text, the version, sha256, first three hex digits. Anchored against
+    /// CLIProxyAPI's `computeFingerprint`.
+    #[test]
+    fn the_billing_fingerprint_matches_the_cli() {
+        let expect = |text: &str| {
+            let chars: Vec<char> = text.chars().collect();
+            let picked: String = [4usize, 7, 20].iter().map(|&i| chars.get(i).copied().unwrap_or('0')).collect();
+            let h = format!("{:x}", sha2::Sha256::digest(format!("59cf53e54c78{picked}2.1.220").as_bytes()));
+            h[..3].to_string()
+        };
+        for text in ["", "hi", "the quick brown fox jumps over the lazy dog"] {
+            assert_eq!(fingerprint_hash(text.to_string()), expect(text), "text {text:?}");
+        }
+
+        // The hashed text is the last user turn that *has* text, and within it
+        // the last text part — a trailing tool-result-only turn falls back.
+        let body = json!({"messages": [
+            {"role": "user", "content": [{"type": "text", "text": "first"}, {"type": "text", "text": "second"}]},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "42"}]},
+        ]});
+        assert_eq!(latest_user_text(&body), "second");
+    }
+
+    /// The beta list tracks what the body actually holds, and the identity beta
+    /// leads it whatever that is.
+    #[test]
+    fn the_beta_list_follows_the_body() {
+        let betas = |body: serde_json::Value| claude_code_betas(&serde_json::to_vec(&body).unwrap(), true);
+
+        let modern = betas(json!({"model": "claude-opus-5", "tools": [{"name": "t"}]}));
+        assert!(modern.starts_with("claude-code-20250219,oauth-2025-04-20,"), "{modern}");
+        assert!(modern.contains("advanced-tool-use-2025-11-20"), "{modern}");
+
+        // No body writes a mid-conversation `role: system` turn any more, so
+        // declaring the flag that unlocks one is a claim about a shape this
+        // client no longer sends.
+        for model in ["claude-opus-5", "claude-opus-4", "claude-sonnet-4-5-20250929"] {
+            assert!(!betas(json!({"model": model})).contains("mid-conversation-system"), "{model}");
+        }
+
+        // Reasoning the buyer paid for is never redacted away.
+        let thinking = betas(json!({"model": "claude-opus-5", "thinking": {"type": "enabled", "budget_tokens": 2048}}));
+        assert!(!thinking.contains("redact-thinking"), "{thinking}");
+
+        // An API-key credential drops the three OAuth-scoped flags.
+        let api_key = claude_code_betas(&serde_json::to_vec(&json!({"model": "claude-opus-5"})).unwrap(), false);
+        for flag in ["oauth-2025-04-20", "fallback-credit-2026-06-01", "extended-cache-ttl-2025-04-11"] {
+            assert!(!api_key.contains(flag), "{flag} leaked onto an api-key request: {api_key}");
+        }
+    }
+
+    /// The version in the billing header and the one in the user-agent are the
+    /// same claim; a request that makes them disagree is the mismatch the whole
+    /// fingerprint exists to avoid.
+    #[test]
+    fn the_user_agent_and_the_billing_version_agree() {
+        let ua = asale_protocol::spec(Provider::Claude).user_agent;
+        assert!(ua.contains(CLAUDE_CODE_VERSION), "{ua} does not claim {CLAUDE_CODE_VERSION}");
     }
 
     #[tokio::test]
@@ -2079,7 +2868,13 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
 
         let raw = seen.lock().unwrap().clone();
         assert!(raw.contains(CLAUDE_CODE_SYSTEM), "system preamble missing from the wire: {raw}");
-        assert!(raw.to_lowercase().contains("anthropic-beta: oauth-2025-04-20"), "oauth beta flag missing: {raw}");
+        let lower = raw.to_lowercase();
+        for beta in ["claude-code-20250219", "oauth-2025-04-20"] {
+            assert!(lower.contains(beta), "{beta} missing from the wire: {raw}");
+        }
+        assert_eq!(lower.matches("anthropic-beta:").count(), 1, "one beta header, not two: {raw}");
+        assert!(lower.contains("x-app: cli"), "SDK identity headers missing: {raw}");
+        assert!(lower.contains(&format!("user-agent: {}", asale_protocol::spec(Provider::Claude).user_agent.to_lowercase())), "{raw}");
     }
 
     /// A leased Codex token whose account id is known.
@@ -2092,6 +2887,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
             Some(LeasedToken {
                 token: "k".into(),
                 account_id: "dev@example.com".into(),
+                session_id: None,
                 upstream_account_id: self.0.map(String::from),
                 upstream_base: None,
                 upstream_wire: None,
@@ -2126,6 +2922,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
             Some(LeasedToken {
                 token: self.0.clone(),
                 account_id: "dev@example.com".into(),
+                session_id: None,
                 upstream_account_id: None,
                 upstream_base: None,
                 upstream_wire: None,
@@ -2190,6 +2987,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
                 Some(LeasedToken {
                     token: self.0.clone(),
                     account_id: "dev@example.com".into(),
+                    session_id: None,
                     upstream_account_id: Some("acc-stored".into()),
                 upstream_base: None,
                 upstream_wire: None,

@@ -404,8 +404,9 @@ pub async fn list_accounts(state: &AppState) -> R<Value> {
 }
 
 /// Turn one account's sell switch on/off and set its selling terms: the daily
-/// token cap (0 = unlimited), the market discount band it will sell inside, and
-/// how many requests it serves at once. Selling is per account, never per
+/// token cap (0 = unlimited), the market discount band it will sell inside, how
+/// many requests it serves at once, and which of its models are for sale
+/// (`[]` = all of them). Selling is per account, never per
 /// provider: switching one Claude account on leaves your other Claude accounts
 /// untouched.
 ///
@@ -421,6 +422,7 @@ pub async fn set_account_sell(
     min_ratio: Option<i64>,
     max_ratio: Option<i64>,
     concurrency: Option<i64>,
+    models: Option<Vec<String>>,
 ) -> R<Value> {
     let tools = state.store.list_tools().await.map_err(err)?;
     let existing = tools
@@ -466,6 +468,15 @@ pub async fn set_account_sell(
         .set_tool_concurrency(&provider, &account_id, lanes)
         .await
         .map_err(err)?;
+    // Absent leaves the selection alone; `[]` is how the UI says "sell them
+    // all again" — the same three-valued convention as the buy switch.
+    let sell_models = match models {
+        Some(m) => {
+            state.store.set_tool_sell_models(&provider, &account_id, &m).await.map_err(err)?;
+            m
+        }
+        None => existing.sell_models.clone(),
+    };
     // Rebuilds the pool and nudges the live session, which is what re-declares
     // the lane — a concurrency change the market has not been told about would
     // only take effect at the next periodic re-declaration.
@@ -479,6 +490,7 @@ pub async fn set_account_sell(
         "sell_min_ratio": band_lo,
         "sell_max_ratio": band_hi,
         "sell_concurrency": lanes,
+        "sell_models": sell_models,
     }))
 }
 
@@ -637,9 +649,13 @@ pub async fn platform_operator(state: &AppState) -> Option<bool> {
 /// is the server's rule — `wsrelay::session::declare_supply` drops a `custom`
 /// lane from anyone else — mirrored here so an ordinary seller is not offered a
 /// form whose every result would be silently refused.
+/// `operator` rides along on the same poll rather than in a command of its own:
+/// the connect screen needs the verdict twice — for this tile and for the
+/// families the table marks `admin_only` — and the daemon has already paid for
+/// it here.
 pub async fn custom_endpoints_status(state: &AppState) -> R<Value> {
-    let enabled = custom_endpoints_enabled() && platform_operator(state).await == Some(true);
-    Ok(json!({"enabled": enabled}))
+    let operator = platform_operator(state).await == Some(true);
+    Ok(json!({"enabled": custom_endpoints_enabled() && operator, "operator": operator}))
 }
 
 /// Gate a custom-endpoint command on the server's own rule.
@@ -917,6 +933,19 @@ pub async fn connect_custom_endpoint(
         .set_setting(&publisher::custom_wire_key(&account_id), wire.as_str())
         .await
         .map_err(err)?;
+    // An OpenAI-schema endpoint is asked one more thing while its operator is
+    // still here: whether it also serves `/responses`. Some models cannot be
+    // sold on the chat route at all (`pool::needs_responses_wire`), and this is
+    // the answer that decides whether this endpoint may offer them — see
+    // `AccountRuntime::wire_for`. Only meaningful for that schema: the other
+    // three have one route, and an operator who named `responses` outright is
+    // already there.
+    let responses = wire == Wire::Openai && discovery::custom_endpoint_has_responses(&base, &key).await;
+    state
+        .store
+        .set_setting(&publisher::custom_responses_key(&account_id), if responses { "1" } else { "0" })
+        .await
+        .map_err(err)?;
     // The probe's answer is the freshest there is; storing it here means the
     // account is sellable immediately instead of after the first rebuild goes
     // and asks the endpoint again.
@@ -943,6 +972,7 @@ pub async fn connect_custom_endpoint(
         floor,
         None,
         concurrency,
+        None,
     )
     .await?;
 
@@ -1057,6 +1087,15 @@ pub async fn connect_api_key(
              `providers::PROVIDERS` marks `Credential::ApiKey`"
         ));
     };
+    // A family still being trialled is offered to platform operators only, the
+    // same rule custom endpoints follow — and checked here as well as in the UI
+    // so the CLI cannot walk past a tile the desktop app does not draw.
+    if asale_protocol::spec(p).admin_only && platform_operator(state).await != Some(true) {
+        return Err(cmd_err!(
+            "errors.cli.providerAdminOnly",
+            "this provider is available to platform operators only"
+        ));
+    }
     // The same two shape checks `api_key_cred` makes, restated here so they can
     // carry a translation key: this is a form the user typed into, and "paste
     // just the key, not the whole command" is the one message on this screen

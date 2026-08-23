@@ -279,6 +279,12 @@
     "unitOfList": "（占原价）",
     "bandQuick": "快捷：",
     "bandHintFloor": "仅当市场价不低于原价的 {{lo}}% 时卖出；低于该价格自动停售，价格回升后自动恢复。",
+    "sellModelsLabel": "卖出的模型",
+    "sellModelsAll": "全部 {{n}} 个模型",
+    "sellModelsSome": "{{total}} 个中的 {{n}} 个",
+    "sellModelsAdd": "选择模型",
+    "sellModelsPick": "该账号卖出的模型",
+    "sellModelsHint": "不选就是默认：该账号能服务的模型全部卖出，包括平台之后新上架的。选中之后只卖勾选的那些。",
     "lanesLabel": "同时服务的请求数",
     "lanesEdit": "修改并发上限",
     "unitRequests": "个并发",
@@ -1140,7 +1146,8 @@
       "apiKeyRejected": "{{provider}} 拒绝了该 API Key，请确认已完整复制且未被吊销。",
       "apiKeyEmpty": "请输入 API Key。",
       "apiKeyHasWhitespace": "API Key 中包含空格，请只粘贴密钥本身，而不是整条命令。",
-      "customEndpointsAdminOnly": "自定义端点卖出仅面向平台管理员开放。"
+      "customEndpointsAdminOnly": "自定义端点卖出仅面向平台管理员开放。",
+      "providerAdminOnly": "该供应商暂仅面向平台管理员开放。"
     },
     "settings": {
       "unknownProxyMode": "未知的代理模式：{{value}}。",

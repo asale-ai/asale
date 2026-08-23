@@ -188,8 +188,8 @@ async fn selling_needs_a_session_to_start_but_not_to_stop() {
         .await
         .unwrap();
 
-    let on = || commands::set_account_sell(&state, "claude".into(), "a@x.com".into(), true, None, None, None, None);
-    let off = || commands::set_account_sell(&state, "claude".into(), "a@x.com".into(), false, None, None, None, None);
+    let on = || commands::set_account_sell(&state, "claude".into(), "a@x.com".into(), true, None, None, None, None, None);
+    let off = || commands::set_account_sell(&state, "claude".into(), "a@x.com".into(), false, None, None, None, None, None);
 
     keychain::delete("access_token").unwrap();
     let e = on().await.expect_err("signed out: refused");
@@ -203,7 +203,7 @@ async fn selling_needs_a_session_to_start_but_not_to_stop() {
     // Session lapses while selling: stopping still works, and so does editing
     // the terms of an account that is already on.
     keychain::delete("access_token").unwrap();
-    commands::set_account_sell(&state, "claude".into(), "a@x.com".into(), true, Some(500_000), None, None, None)
+    commands::set_account_sell(&state, "claude".into(), "a@x.com".into(), true, Some(500_000), None, None, None, None)
         .await
         .expect("terms of an already-selling account stay editable");
     off().await.expect("stopping never needs a session");
@@ -294,7 +294,7 @@ async fn selling_intent_follows_the_account_switches() {
 
     // Switching the first account on is the whole gesture: nothing else has to
     // be armed for this device to want to be selling.
-    commands::set_account_sell(&state, "claude".into(), "a@x.com".into(), true, None, None, None, None).await.unwrap();
+    commands::set_account_sell(&state, "claude".into(), "a@x.com".into(), true, None, None, None, None, None).await.unwrap();
     assert!(commands::publish_wanted(&state).await);
     assert_eq!(commands::proxy_status(&state).await.unwrap()["publish_wanted"], true);
     assert_eq!(
@@ -304,7 +304,7 @@ async fn selling_intent_follows_the_account_switches() {
 
     // Switching the last one off takes the device back off the market, session
     // included — a device with nothing to sell must not hold a live session.
-    commands::set_account_sell(&state, "claude".into(), "a@x.com".into(), false, None, None, None, None).await.unwrap();
+    commands::set_account_sell(&state, "claude".into(), "a@x.com".into(), false, None, None, None, None, None).await.unwrap();
     assert!(!commands::publish_wanted(&state).await);
     assert_eq!(commands::client_status(&state).await.unwrap()["publish_state"], "offline");
 }
@@ -337,10 +337,10 @@ async fn selling_is_per_account_and_isolated_from_the_local_cli() {
     );
 
     // Switch on exactly one, with its own daily cap; leave the other off.
-    commands::set_account_sell(&state, "claude".into(), "owned@x.com".into(), true, Some(500_000), None, None, None)
+    commands::set_account_sell(&state, "claude".into(), "owned@x.com".into(), true, Some(500_000), None, None, None, None)
         .await
         .unwrap();
-    commands::set_account_sell(&state, "claude".into(), "shared@x.com".into(), false, None, None, None, None)
+    commands::set_account_sell(&state, "claude".into(), "shared@x.com".into(), false, None, None, None, None, None)
         .await
         .unwrap();
 
@@ -569,7 +569,7 @@ async fn a_tool_that_is_buying_is_not_a_source_of_sellable_accounts() {
 
     let r = commands::import_from_cli(&state, "claude".into()).await.expect("import");
     assert_eq!(r["accounts"].as_array().unwrap().len(), 1);
-    commands::set_account_sell(&state, "claude".into(), "me@x.com".into(), true, Some(500_000), None, None, None)
+    commands::set_account_sell(&state, "claude".into(), "me@x.com".into(), true, Some(500_000), None, None, None, None)
         .await
         .unwrap();
 
@@ -639,7 +639,7 @@ async fn daily_cap_stops_only_the_account_that_hit_it() {
             .await
             .unwrap();
         state.store.set_setting(&format!("plan:claude:{account}"), "max_20x").await.unwrap();
-        commands::set_account_sell(&state, "claude".into(), account.into(), true, Some(1_000), None, None, None).await.unwrap();
+        commands::set_account_sell(&state, "claude".into(), account.into(), true, Some(1_000), None, None, None, None).await.unwrap();
     }
 
     // Account "a" blows through its 1k daily cap.
@@ -714,7 +714,7 @@ async fn invalid_input_is_rejected_before_touching_anything() {
     assert!(commands::set_buy_tool(&state, "claude".into(), true, None).await.is_err());
     assert!(!path.exists(), "a refused buy-on never creates a config file");
     // Unknown account.
-    assert!(commands::set_account_sell(&state, "claude".into(), "nobody@x".into(), true, None, None, None, None)
+    assert!(commands::set_account_sell(&state, "claude".into(), "nobody@x".into(), true, None, None, None, None, None)
         .await
         .is_err());
 
@@ -739,7 +739,7 @@ async fn a_broken_model_stops_selling_and_waits_for_the_operator() {
         .await
         .unwrap();
     state.store.set_setting(&format!("plan:claude:{account}"), "max_20x").await.unwrap();
-    commands::set_account_sell(&state, "claude".into(), account.into(), true, None, None, None, None).await.unwrap();
+    commands::set_account_sell(&state, "claude".into(), account.into(), true, None, None, None, None, None).await.unwrap();
 
     let opus = "claude-opus-5";
     let haiku = "claude-haiku-4-5";
@@ -939,7 +939,7 @@ async fn a_model_priced_outside_the_band_leaves_the_market() {
         .unwrap();
 
     // Sell, but never below 60% of list price.
-    commands::set_account_sell(&state, "claude".into(), account.into(), true, None, Some(60), Some(100), None)
+    commands::set_account_sell(&state, "claude".into(), account.into(), true, None, Some(60), Some(100), None, None)
         .await
         .unwrap();
 
@@ -971,7 +971,7 @@ async fn a_model_priced_outside_the_band_leaves_the_market() {
 
     // Widening the band puts it straight back on: raising your own floor is a
     // decision, not a market move, so it does not wait out the re-entry dwell.
-    commands::set_account_sell(&state, "claude".into(), account.into(), true, None, Some(20), Some(100), None)
+    commands::set_account_sell(&state, "claude".into(), account.into(), true, None, Some(20), Some(100), None, None)
         .await
         .unwrap();
     let items = asale_daemon::publisher::build_supply_items(&state.store, &state.pool).await;
@@ -1295,7 +1295,7 @@ async fn an_endpoint_can_be_re_read_switched_and_removed() {
     // The switch is the ordinary per-account one, and an endpoint that is off
     // keeps its terms rather than losing them.
     commands::set_account_sell(
-        &state, "custom".into(), "house".into(), false, None, None, None, None,
+        &state, "custom".into(), "house".into(), false, None, None, None, None, None,
     )
     .await
     .unwrap();
@@ -1486,6 +1486,7 @@ async fn the_declaration_carries_the_cheapest_floor_of_the_serving_accounts() {
             None,
             Some(min_ratio),
             Some(100),
+            None,
             None,
         )
         .await

@@ -59,6 +59,12 @@ pub struct ToolRow {
     pub sell_enabled: bool,
     /// Per-account daily sell cap in tokens; 0 = unlimited.
     pub sell_daily_limit: i64,
+    /// The models this account sells, when the operator has narrowed the set.
+    /// Empty — the default — means every model the account can serve, which is
+    /// what an account that has never been narrowed must keep meaning: an
+    /// upgrade cannot silently take a subscription's other models off the
+    /// market. Same convention as `buy_tools.models_json` on the buy side.
+    pub sell_models: Vec<String>,
     /// The price band this account will sell inside, as whole percent **of the
     /// vendor's list price** — 100 is list price, 60 is "six-tenths off list".
     /// A model the market currently prices outside `[min, max]` is withheld
@@ -161,6 +167,7 @@ CREATE TABLE IF NOT EXISTS tools (
   sell_min_ratio INTEGER NOT NULL DEFAULT 10,
   sell_max_ratio INTEGER NOT NULL DEFAULT 100,
   sell_concurrency INTEGER NOT NULL DEFAULT 5,
+  sell_models_json TEXT NOT NULL DEFAULT '[]',
   UNIQUE(provider, account_id)
 );
 CREATE TABLE IF NOT EXISTS publish_config (
@@ -244,6 +251,9 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE tools ADD COLUMN sell_concurrency INTEGER NOT NULL DEFAULT 5",
     // JSON array of every local store holding this account's token.
     "ALTER TABLE tools ADD COLUMN sources TEXT",
+    // The models the account sells; `[]` (the default an older row lands on)
+    // means all of them.
+    "ALTER TABLE tools ADD COLUMN sell_models_json TEXT NOT NULL DEFAULT '[]'",
     "ALTER TABLE provider_records ADD COLUMN provider TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE provider_records ADD COLUMN account_id TEXT NOT NULL DEFAULT ''",
     "CREATE INDEX IF NOT EXISTS idx_provider_records_acct ON provider_records(provider, account_id, ts)",
@@ -472,13 +482,29 @@ impl LocalStore {
         Ok(row.map(|r| r.0))
     }
 
+    /// Every setting whose key starts with `prefix`, as `(key, value)`.
+    ///
+    /// For the families of keys this table holds one row per account of —
+    /// `customwire:*`, `claudesession:*` — where reading them one account at a
+    /// time means knowing the account list first.
+    pub async fn settings_with_prefix(&self, prefix: &str) -> anyhow::Result<Vec<(String, String)>> {
+        // `\` escapes the LIKE wildcards, so a prefix containing `%` or `_`
+        // matches itself rather than everything.
+        let pattern = format!("{}%", prefix.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+        let rows = sqlx::query_as("SELECT k, v FROM settings WHERE k LIKE ? ESCAPE '\\'")
+            .bind(pattern)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows)
+    }
+
     /// List imported tool accounts (keychain refs only; no plaintext).
     pub async fn list_tools(&self) -> anyhow::Result<Vec<ToolRow>> {
         #[allow(clippy::type_complexity)]
-        let rows: Vec<(String, String, String, Option<String>, Option<String>, Option<String>, Option<String>, i64, i64, i64, i64, i64)> =
+        let rows: Vec<(String, String, String, Option<String>, Option<String>, Option<String>, Option<String>, i64, i64, i64, i64, i64, String)> =
             sqlx::query_as(
                 "SELECT provider, account_id, keychain_ref, plan, origin, source, sources, sell_enabled, sell_daily_limit,
-                        sell_min_ratio, sell_max_ratio, sell_concurrency
+                        sell_min_ratio, sell_max_ratio, sell_concurrency, sell_models_json
                  FROM tools ORDER BY provider, account_id",
             )
             .fetch_all(&self.pool)
@@ -487,7 +513,7 @@ impl LocalStore {
             .into_iter()
             .map(
                 |(provider, account_id, keychain_ref, plan, origin, source, sources, sell_enabled, sell_daily_limit,
-                  sell_min_ratio, sell_max_ratio, sell_concurrency)| {
+                  sell_min_ratio, sell_max_ratio, sell_concurrency, sell_models_json)| {
                     // Rows written before the `sources` column existed carry
                     // only the single `source`; present that as a one-element
                     // list so callers never special-case the old shape.
@@ -505,6 +531,10 @@ impl LocalStore {
                         sources,
                         sell_enabled: sell_enabled != 0,
                         sell_daily_limit,
+                        // Unparseable JSON reads as "not narrowed" for the same
+                        // reason an absent column does: the safe answer is the
+                        // whole subscription on the market, not none of it.
+                        sell_models: serde_json::from_str(&sell_models_json).unwrap_or_default(),
                         // A row written before the band existed reads as the
                         // full range, never as an empty one: an upgrade must
                         // not silently take a subscription off the market.
@@ -580,6 +610,26 @@ impl LocalStore {
     ) -> anyhow::Result<bool> {
         let res = sqlx::query("UPDATE tools SET sell_concurrency=? WHERE provider=? AND account_id=?")
             .bind(normalise_concurrency(concurrency))
+            .bind(provider)
+            .bind(account_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Narrow (or widen) the set of models one account sells.
+    ///
+    /// An empty list is not "sell nothing" — that is what the sell switch is
+    /// for — but "sell everything this account can serve", which is the default
+    /// and the only value that stays correct as the catalog grows.
+    pub async fn set_tool_sell_models(
+        &self,
+        provider: &str,
+        account_id: &str,
+        models: &[String],
+    ) -> anyhow::Result<bool> {
+        let res = sqlx::query("UPDATE tools SET sell_models_json=? WHERE provider=? AND account_id=?")
+            .bind(serde_json::to_string(models)?)
             .bind(provider)
             .bind(account_id)
             .execute(&self.pool)

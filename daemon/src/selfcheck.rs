@@ -259,6 +259,7 @@ async fn fix_sell_all_off(state: &crate::state::AppState) -> crate::commands::R<
             None,
             None,
             None,
+            None,
         )
         .await?;
         turned_on += 1;

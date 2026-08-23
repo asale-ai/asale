@@ -142,6 +142,13 @@ pub struct ProviderSpec {
     /// Either way an unlisted id is matched, preauthorized, routed — and only
     /// then refused, with the publisher wearing a failure it did not cause.
     pub native_models: Option<&'static [&'static str]>,
+    /// Offered on the connect screen to platform operators only.
+    ///
+    /// Not a boundary — the gateway does not refuse these lanes, and a fork can
+    /// skip the check — but the same rule `custom` follows: a family the
+    /// platform is still trialling is not put in front of every seller. Clearing
+    /// the flag is what opens it to everyone.
+    pub admin_only: bool,
 }
 
 impl ProviderSpec {
@@ -155,6 +162,16 @@ impl ProviderSpec {
 }
 
 /// Anthropic's Messages endpoint, shared by both Claude families.
+/// The user-agent Claude Code puts on the wire.
+///
+/// Versioned on purpose and not decorative: the request body carries an
+/// `x-anthropic-billing-header: cc_version=2.1.220…` line, and a bearer that
+/// claims one version in the body while announcing another in the user-agent is
+/// the mismatch Anthropic reads as a third-party client. Bump it together with
+/// `asale_client_core::executor::CLAUDE_CODE_VERSION`, which a test in that
+/// crate holds to this string.
+pub const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.220 (external, cli)";
+
 const ANTHROPIC_MESSAGES: &str = "https://api.anthropic.com/v1/messages";
 
 /// Every credential family, in the order the UI offers them.
@@ -172,7 +189,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         wire: Wire::Claude,
         api_base: "https://api.anthropic.com",
         chat_url: ANTHROPIC_MESSAGES,
-        user_agent: "claude-cli/1.0 (external, cli)",
+        user_agent: CLAUDE_CLI_USER_AGENT,
         extra_headers: &[("anthropic-version", "2023-06-01")],
         verify_hosts: &[],
         window_cap: WindowCap::Plan,
@@ -180,6 +197,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         model_prefix: Some("claude"),
         fallback_models: &["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
         native_models: None,
+        admin_only: false,
     },
     ProviderSpec {
         provider: Provider::ClaudeWork,
@@ -197,7 +215,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         // is actually sent, and it has always sent the one below for both. The
         // table states what goes on the wire; making the two differ is a
         // deliberate change to upstream traffic, not a transcription.
-        user_agent: "claude-cli/1.0 (external, cli)",
+        user_agent: CLAUDE_CLI_USER_AGENT,
         extra_headers: &[("anthropic-version", "2023-06-01")],
         verify_hosts: &[],
         window_cap: WindowCap::Plan,
@@ -205,6 +223,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         model_prefix: Some("claude"),
         fallback_models: &["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
         native_models: None,
+        admin_only: false,
     },
     ProviderSpec {
         provider: Provider::Codex,
@@ -236,6 +255,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         // what the account is actually granted as soon as it answers.
         fallback_models: &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
         native_models: None,
+        admin_only: false,
     },
     ProviderSpec {
         provider: Provider::Gemini,
@@ -256,6 +276,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         model_prefix: Some("gemini"),
         fallback_models: &["gemini-2.5-pro", "gemini-2.5-flash"],
         native_models: None,
+        admin_only: false,
     },
     ProviderSpec {
         provider: Provider::Kimi,
@@ -277,6 +298,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         model_prefix: Some("kimi"),
         fallback_models: &["kimi-k2.7-code", "kimi-k2-thinking", "kimi-k3"],
         native_models: None,
+        admin_only: false,
     },
     ProviderSpec {
         provider: Provider::KimiApi,
@@ -298,6 +320,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         model_prefix: Some("kimi"),
         fallback_models: &["kimi-k2.7-code", "kimi-k2-thinking", "kimi-k3"],
         native_models: None,
+        admin_only: false,
     },
     ProviderSpec {
         provider: Provider::Xai,
@@ -329,6 +352,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
             "grok-3-mini-fast",
             "grok-composer-2.5-fast",
         ]),
+        admin_only: false,
     },
     ProviderSpec {
         provider: Provider::XaiApi,
@@ -357,6 +381,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
             "grok-3-mini-fast",
             "grok-composer-2.5-fast",
         ]),
+        admin_only: false,
     },
     ProviderSpec {
         provider: Provider::Qwen,
@@ -379,6 +404,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         model_prefix: Some("qwen"),
         fallback_models: &["qwen3.8-max", "qwen3.7-plus"],
         native_models: None,
+        admin_only: true,
     },
     ProviderSpec {
         provider: Provider::Deepseek,
@@ -406,6 +432,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         // `deepseek-v4-pro` to access the latest version" —
         // <https://api-docs.deepseek.com/quick_start/models>).
         native_models: Some(&["deepseek-v4-flash", "deepseek-v4-pro"]),
+        admin_only: true,
     },
     ProviderSpec {
         provider: Provider::Custom,
@@ -436,6 +463,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         // advertises nothing rather than guessing.
         fallback_models: &[],
         native_models: None,
+        admin_only: false,
     },
 ];
 
@@ -575,6 +603,22 @@ mod tests {
         }
     }
 
+    /// Which families are operator-only, written down so opening one to every
+    /// seller is a deliberate edit rather than a flag flipped in passing.
+    ///
+    /// Both are pasted-key vendors the platform is still trialling: the sell
+    /// page draws no tile for them, and `connect_api_key` refuses one, unless
+    /// the signed-in account is a platform operator.
+    #[test]
+    fn only_the_families_still_being_trialled_are_operator_only() {
+        let gated: Vec<&str> = PROVIDERS.iter().filter(|s| s.admin_only).map(|s| s.id).collect();
+        assert_eq!(gated, ["qwen", "deepseek"]);
+        // A family nobody can connect cannot be gated *into* being connectable:
+        // `custom` is hidden by `connectable`, and marking it here too would
+        // read as though clearing the flag were enough to offer it.
+        assert!(PROVIDERS.iter().all(|s| !(s.admin_only && s.vendor.is_none())));
+    }
+
     /// The frontends render this table rather than retyping it, so the file
     /// they render has to still match the table it was rendered from.
     #[test]
@@ -643,6 +687,8 @@ pub fn render_typescript() -> String {
          \x20 vendor: string;\n\
          \x20 /** False for families the platform runs itself and never offers. */\n\
          \x20 connectable: boolean;\n\
+         \x20 /** Offered on the connect screen to platform operators only. */\n\
+         \x20 adminOnly: boolean;\n\
          }\n\
          \n\
          export const PROVIDERS: ProviderInfo[] = [\n",
@@ -655,13 +701,14 @@ pub fn render_typescript() -> String {
         };
         let connectable = s.vendor.is_some();
         out.push_str(&format!(
-            "  {{ id: {:?}, label: {:?}, credential: {:?}, keyUrl: {:?}, vendor: {:?}, connectable: {} }},\n",
+            "  {{ id: {:?}, label: {:?}, credential: {:?}, keyUrl: {:?}, vendor: {:?}, connectable: {}, adminOnly: {} }},\n",
             s.id,
             s.label,
             credential,
             s.key_url(),
             s.vendor.map(|v| v.as_str()).unwrap_or(""),
             connectable,
+            s.admin_only,
         ));
     }
     out.push_str("];\n\n/** Catalog vendor slug → brand casing. */\nexport const VENDOR_LABELS: Record<string, string> = {\n");

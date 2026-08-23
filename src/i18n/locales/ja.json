@@ -279,6 +279,12 @@
     "unitOfList": "（定価比）",
     "bandQuick": "クイック:",
     "bandHintFloor": "市場価格が定価の {{lo}}% 以上のときだけ販売します。下回ると販売を停止し、戻れば自動で再開します。",
+    "sellModelsLabel": "販売するモデル",
+    "sellModelsAll": "全 {{n}} モデル",
+    "sellModelsSome": "{{total}} 件中 {{n}} 件",
+    "sellModelsAdd": "モデルを選ぶ",
+    "sellModelsPick": "このアカウントが販売するモデル",
+    "sellModelsHint": "何も選ばなければ既定どおり、このアカウントが提供できるモデルをすべて販売します（今後追加されるものも含む）。選ぶとそのモデルだけを販売します。",
     "lanesLabel": "同時に処理するリクエスト数",
     "lanesEdit": "同時実行数を編集",
     "unitRequests": "並列",
@@ -1140,7 +1146,8 @@
       "apiKeyRejected": "{{provider}} がこの API キーを拒否しました。全文をコピーしたか、失効していないか確認してください。",
       "apiKeyEmpty": "API キーを入力してください。",
       "apiKeyHasWhitespace": "API キーにスペースが含まれています。コマンド全体ではなくキーだけを貼り付けてください。",
-      "customEndpointsAdminOnly": "独自エンドポイントでの販売はプラットフォーム管理者のみが利用できます。"
+      "customEndpointsAdminOnly": "独自エンドポイントでの販売はプラットフォーム管理者のみが利用できます。",
+      "providerAdminOnly": "このプロバイダーはプラットフォーム管理者のみが利用できます。"
     },
     "settings": {
       "unknownProxyMode": "不明なプロキシモード：{{value}}。",

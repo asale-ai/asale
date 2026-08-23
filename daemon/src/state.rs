@@ -113,6 +113,10 @@ impl AppState {
 
         // Seed the account pool from the store; kept fresh by the refresh loop
         // and rebuilt on every account change.
+        // Before that, the Claude session ids this install has already
+        // presented: an account that comes back with a new one has rotated in
+        // the upstream's eyes, which is the whole thing `session` avoids.
+        crate::session::warm(store.clone()).await;
         let pool = Arc::new(std::sync::Mutex::new(AccountPool::new(Strategy::RoundRobin)));
         crate::publisher::rebuild_pool(&store, &pool).await;
 

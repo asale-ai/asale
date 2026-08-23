@@ -5,13 +5,15 @@ import { groupModelsByFamily } from "@shared/model-groups";
 import {
   invoke, inTauri, realTauri, runOAuthFlow, submitOAuthCode, fmtTokens,
   isSignedOut, gotoSignIn, requireSignIn, DaemonError, toDaemonError,
-  type AccountStatus, type ClientStatus, type ImportAllResult, type Lane, type SupplyTest,
+  type AccountStatus, type ClientStatus, type ImportAllResult, type Lane, type MarketModel,
+  type SupplyTest,
 } from "../lib";
 import { Card, Ok, Err, SkeletonRows, PageHead, IconAction, Empty, Mark, CopyChip, FoldToggle } from "../ui";
 import {
   IconTrash, IconShield, IconChip, IconRefresh, IconPlus, IconPencil, IconInfo,
   IconZap, IconX, IconCheck, IconAlert,
 } from "../icons";
+import { ModelMultiSelect, type ModelOption } from "../components/ModelPicker";
 import { errText } from "../errors";
 import { formatAge } from "./Limits";
 import {
@@ -25,6 +27,8 @@ interface SellTerms {
   minRatio?: number;
   maxRatio?: number;
   concurrency?: number;
+  /** Which of the account's models are for sale; `[]` puts all of them back. */
+  models?: string[];
 }
 
 /**
@@ -878,6 +882,16 @@ export function Publish() {
   const [slotsSaved, setSlotsSaved] = useState("");
   const [slotsEditing, setSlotsEditing] = useState("");
 
+  // Which of an account's models it sells. No draft: the picker's own dialog
+  // has the confirm step, so what comes back is already the decision.
+  const [modelsSaved, setModelsSaved] = useState("");
+  /** Vendor and display name per market id, so the picker can group an
+   *  account's models by the vendor that made them rather than by the
+   *  credential family they happen to be sold through — one Model Studio key
+   *  serves Alibaba's, DeepSeek's and Moonshot's models alike. Best-effort: an
+   *  id the board does not carry still appears, under its bare id. */
+  const [marketModels, setMarketModels] = useState<Record<string, { vendor: string; label: string }>>({});
+
   // The code a device-code login is waiting on, shown until it completes.
   const [deviceCode, setDeviceCode] = useState<{ provider: string; code: string; url: string } | null>(null);
   /** The in-flight loopback login, so its code can be pasted back when the
@@ -888,6 +902,10 @@ export function Publish() {
   // Platform endpoints: whether this account may use them at all, which
   // endpoint's form is open, and the terms being typed into it.
   const [endpointsOn, setEndpointsOn] = useState(false);
+  /** Whether the signed-in account is a platform operator. Rides on the same
+   *  poll as the endpoint tile, and gates the families the provider table marks
+   *  `adminOnly` — ones the platform is still trialling. */
+  const [operator, setOperator] = useState(false);
   const [epProvider, setEpProvider] = useState("");
   const [epBase, setEpBase] = useState("");
   const [epWire, setEpWire] = useState("");
@@ -924,12 +942,30 @@ export function Publish() {
   // The failure case keeps the last answer instead of hiding the tile: a
   // momentarily unreachable daemon is not a demotion, and a tile that
   // disappears mid-edit takes the half-typed form with it.
+  // Read once, not polled: the catalog's vendor per model changes when the
+  // platform lands a new model, not while this page is open, and it is only
+  // used to label and group the sell-model picker.
+  useEffect(() => {
+    if (!inTauri) return;
+    invoke<{ models: MarketModel[] }>("market_models")
+      .then((r) => {
+        const map: Record<string, { vendor: string; label: string }> = {};
+        for (const m of r.models) map[m.model] = { vendor: m.provider, label: m.display_name || m.model };
+        setMarketModels(map);
+      })
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     if (!inTauri) return;
     let alive = true;
     const poll = () =>
-      invoke<{ enabled: boolean }>("custom_endpoints_status")
-        .then((r) => { if (alive) setEndpointsOn(r.enabled); })
+      invoke<{ enabled: boolean; operator?: boolean }>("custom_endpoints_status")
+        .then((r) => {
+          if (!alive) return;
+          setEndpointsOn(r.enabled);
+          setOperator(!!r.operator);
+        })
         .catch(() => {});
     poll();
     const id = setInterval(poll, 8000);
@@ -1129,7 +1165,7 @@ export function Publish() {
    *  same RPC. Terms left out are kept as they are by the daemon. */
   async function setSell(a: AccountStatus, enabled: boolean, terms: SellTerms = {}) {
     const k = keyOf(a);
-    const { dailyLimit, minRatio, maxRatio, concurrency } = terms;
+    const { dailyLimit, minRatio, maxRatio, concurrency, models } = terms;
     setAcctErr("");
     // Going on the market needs a session — check before the switch moves, so a
     // signed-out user lands on the sign-in form instead of watching the switch
@@ -1161,6 +1197,7 @@ export function Publish() {
             sell_min_ratio: minRatio ?? x.sell_min_ratio,
             sell_max_ratio: maxRatio ?? x.sell_max_ratio,
             sell_concurrency: concurrency ?? x.sell_concurrency,
+            sell_models: models ?? x.sell_models,
           }
         : x)),
     );
@@ -1173,6 +1210,7 @@ export function Publish() {
         ...(minRatio === undefined ? {} : { minRatio }),
         ...(maxRatio === undefined ? {} : { maxRatio }),
         ...(concurrency === undefined ? {} : { concurrency }),
+        ...(models === undefined ? {} : { models }),
       });
       loadAccounts();
       // Decided on a *fresh* reading, not the polled one. The overview is
@@ -1240,6 +1278,18 @@ export function Publish() {
     await setSell(a, a.sell_enabled, { concurrency });
     setSlotsSaved(keyOf(a));
     setTimeout(() => setSlotsSaved(""), 2000);
+  }
+
+  /** Save which of an account's models are for sale.
+   *
+   *  An empty list is not "sell nothing" — that is what the account switch is
+   *  for — but "sell everything this subscription can serve", which is the
+   *  default and the only choice that keeps working as the catalog grows. So
+   *  clearing the picks restores the default rather than emptying the account. */
+  async function saveModels(a: AccountStatus, models: string[]) {
+    await setSell(a, a.sell_enabled, { models });
+    setModelsSaved(keyOf(a));
+    setTimeout(() => setModelsSaved(""), 2000);
   }
 
   /** Open the concurrency editor on the value currently in force, for the same
@@ -1423,10 +1473,16 @@ export function Publish() {
   // check failing on something the form could see for itself.
   const epBaseOk = /^https?:\/\/\S+$/i.test(epBase.trim());
 
+  /** A family the platform is still trialling is offered to operators only —
+   *  the same rule as the endpoint tile, read off the generated table so opening
+   *  one up is a flag in `providers.rs` rather than an edit here. */
+  const offered = <T extends { adminOnly: boolean }>(list: T[]) =>
+    list.filter((p) => operator || !p.adminOnly);
+
   const connectGrid = (
     <>
       <div className="pick-grid">
-        {PROVIDERS.map((p) => (
+        {offered(PROVIDERS).map((p) => (
           <button key={p.id} className="pick" onClick={() => connect(p.id)} disabled={busy || !inTauri}>
             <span className="pick-ico"><Mark id={p.id} /></span>
             <span>
@@ -1435,7 +1491,7 @@ export function Publish() {
             </span>
           </button>
         ))}
-        {DEVICE_PROVIDERS.map((p) => (
+        {offered(DEVICE_PROVIDERS).map((p) => (
           <button
             key={p.id}
             className={`pick ${deviceCode?.provider === p.id ? "active" : ""}`}
@@ -1449,7 +1505,7 @@ export function Publish() {
             </span>
           </button>
         ))}
-        {KEY_PROVIDERS.map((p) => (
+        {offered(KEY_PROVIDERS).map((p) => (
           <button
             key={p.id}
             className={`pick ${keyProvider === p.id ? "active" : ""}`}
@@ -1805,6 +1861,12 @@ export function Publish() {
               // "what would I be selling, and at what discount" is a question
               // worth being able to answer *before* flipping the switch.
               const own = lanes.filter((l) => l.provider === a.provider && l.account_id === a.account_id);
+              // Every model this account *could* sell — the lanes are built
+              // before the selection narrows anything, so the ones switched off
+              // are still here to be switched back on.
+              const modelOptions: ModelOption[] = own
+                .map((l) => ({ id: l.model, label: marketModels[l.model]?.label, vendor: marketModels[l.model]?.vendor }))
+                .sort((x, y) => (x.vendor ?? "").localeCompare(y.vendor ?? "") || x.id.localeCompare(y.id));
               const floor = floorOf(a);
               // How many requests this subscription serves at once, as declared
               // to the market. Named `slots` here because `lanes` in this scope
@@ -2118,6 +2180,30 @@ export function Publish() {
                         </div>
                       )}
                       <div className="hint">{t("publish.lanesHint", { n: slots })}</div>
+
+                      {/* Which of this subscription's models are for sale. No
+                          picks means all of them, which is the default and the
+                          only answer that stays right as the platform prices
+                          new models — narrowing is a decision, and it has to be
+                          made again for anything new. */}
+                      <label className="acct-sub-label after">{t("publish.sellModelsLabel")}</label>
+                      <div className="value-row">
+                        <span className="value-strong">
+                          {a.sell_models.length > 0
+                            ? t("publish.sellModelsSome", { n: a.sell_models.length, total: modelOptions.length })
+                            : t("publish.sellModelsAll", { n: modelOptions.length })}
+                        </span>
+                        {modelsSaved === k && <span className="value-note ok">{t("publish.limitSaved")}</span>}
+                      </div>
+                      <ModelMultiSelect
+                        options={modelOptions}
+                        value={a.sell_models}
+                        onChange={(next) => saveModels(a, next)}
+                        disabled={!inTauri || !!pending[k]}
+                        title={t("publish.sellModelsPick")}
+                        addLabel={t("publish.sellModelsAdd")}
+                      />
+                      <div className="hint">{t("publish.sellModelsHint")}</div>
                     </div>
 
                     {/* No expiry here: the only timestamp we hold is the access
