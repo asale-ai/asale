@@ -501,7 +501,7 @@ pub fn merge_by_account(items: Vec<(String, SourcedCred)>, now: i64) -> Vec<Merg
 /// are currently set (non-empty) via `get`.
 pub fn env_conflicts(provider: &str, get: impl Fn(&str) -> Option<String>) -> Vec<String> {
     let names: &[&str] = match provider {
-        "claude" | "claude_work" => &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"],
+        p if asale_protocol::ids::is_claude_family(p) => &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"],
         "codex" => &["OPENAI_API_KEY", "OPENAI_BASE_URL"],
         "gemini" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         _ => &[],

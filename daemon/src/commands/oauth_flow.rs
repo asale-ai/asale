@@ -289,7 +289,7 @@ fn account_plan(tokens: &Value) -> Option<String> {
 /// logged at debug because the usual cause is a region-blocked upstream, which
 /// this device already complains about everywhere else it matters.
 async fn claude_plan_from_profile_call(provider: &str, access: &str) -> Option<String> {
-    if provider != "claude" && provider != "claude_work" {
+    if !asale_protocol::ids::is_claude_family(provider) {
         return None;
     }
     match asale_client_core::discovery::fetch_claude_profile(access).await {

@@ -376,28 +376,33 @@ pub async fn fetch_claude_profile(access_token: &str) -> anyhow::Result<serde_js
 
 // ── Claude / Claude Work adapter ────────────────────────────────────────────
 
-/// Claude adapter (also the base for ClaudeWork, which only differs in the UA
-/// profile; both share the same Anthropic OAuth client_id — confirmed against
-/// CLIProxyAPI `internal/auth/claude/anthropic_auth.go`).
+/// Claude adapter, shared by every family that signs in with the same Anthropic
+/// OAuth client: Claude Code, Claude Work, and an extra-usage account. They
+/// differ in the UA profile and in what a buyer may be served from, not in how
+/// the token is obtained or refreshed — confirmed against CLIProxyAPI
+/// `internal/auth/claude/anthropic_auth.go`.
+///
+/// Carries the provider rather than a `work` flag: the flag had exactly two
+/// states and there are three families, so adding one to a bool would have meant
+/// picking which of the other two it got to impersonate.
 pub struct ClaudeAdapter {
-    pub work: bool,
+    pub provider: Provider,
     pub client_id: String,
 }
 
 impl ClaudeAdapter {
-    pub fn new(work: bool, client_id: impl Into<String>) -> ClaudeAdapter {
-        ClaudeAdapter { work, client_id: client_id.into() }
+    /// `provider` must be a Claude family (`Provider::is_claude_family`);
+    /// anything else is a caller bug and is treated as plain `claude`.
+    pub fn new(provider: Provider, client_id: impl Into<String>) -> ClaudeAdapter {
+        let provider = if provider.is_claude_family() { provider } else { Provider::Claude };
+        ClaudeAdapter { provider, client_id: client_id.into() }
     }
 }
 
 #[async_trait]
 impl ToolAdapter for ClaudeAdapter {
     fn provider(&self) -> Provider {
-        if self.work {
-            Provider::ClaudeWork
-        } else {
-            Provider::Claude
-        }
+        self.provider
     }
 
     async fn refresh(&self, refresh_token: &str) -> anyhow::Result<RefreshedToken> {
@@ -417,7 +422,7 @@ impl ToolAdapter for ClaudeAdapter {
     fn upstream(&self) -> UpstreamSpec {
         // Distinct UA profiles so the same account family's two supply kinds are
         // distinguishable upstream (§3.2).
-        let ua = if self.work {
+        let ua = if self.provider == Provider::ClaudeWork {
             "claude-work/1.0 (desktop)"
         } else {
             asale_protocol::providers::CLAUDE_CLI_USER_AGENT

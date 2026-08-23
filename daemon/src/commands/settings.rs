@@ -202,7 +202,7 @@ pub async fn consume_get_mode(state: &AppState) -> R<Value> {
     let (claude, gemini) = {
         let pool = state.pool.lock().map_err(|_| "pool lock poisoned".to_string())?;
         (
-            pool.any_available("claude", now) || pool.any_available("claude_work", now),
+            asale_protocol::ids::Provider::ALL.iter().filter(|p| p.is_claude_family()).any(|p| pool.any_available(p.as_str(), now)),
             pool.any_available("gemini", now),
         )
     };

@@ -184,7 +184,6 @@ export function WorldMap({ region = "", children }: { region?: string; children?
     <Card
       icon={<IconGlobe />}
       title={t("dashboard.map.title")}
-      desc={t("dashboard.map.desc")}
       className="map-card"
     >
       {/* Totals on the left, key on the right, one row above the drawing — the

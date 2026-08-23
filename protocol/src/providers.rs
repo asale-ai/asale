@@ -226,6 +226,32 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         admin_only: false,
     },
     ProviderSpec {
+        provider: Provider::ClaudeExtra,
+        id: "claude_extra",
+        label: "Claude Extra Usage",
+        vendor: Some(Vendor::Anthropic),
+        // The same Anthropic OAuth client and the same sign-in: what makes this
+        // a family of its own is the billing behind the account, which nothing
+        // on the wire announces. The seller states it by connecting here.
+        credential: Credential::OAuth,
+        wire: Wire::Claude,
+        api_base: "https://api.anthropic.com",
+        chat_url: ANTHROPIC_MESSAGES,
+        user_agent: CLAUDE_CLI_USER_AGENT,
+        extra_headers: &[("anthropic-version", "2023-06-01")],
+        verify_hosts: &[],
+        // Metered, not windowed. Extra usage is what an account spends *after*
+        // its plan window is gone, so reading the plan window would take a lane
+        // off the market at exactly the point it starts being worth something —
+        // and `QuotaSource::None` is what keeps the quota gate from doing that.
+        window_cap: WindowCap::Fixed(CUSTOM_WINDOW_TOKENS),
+        quota: QuotaSource::None,
+        model_prefix: Some("claude"),
+        fallback_models: &["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
+        native_models: None,
+        admin_only: false,
+    },
+    ProviderSpec {
         provider: Provider::Codex,
         id: "codex",
         // Names the account, not just the CLI: what a person connects here is
@@ -483,6 +509,46 @@ pub fn spec(p: Provider) -> &'static ProviderSpec {
         .expect("every Provider has a row in PROVIDERS (enforced by test)")
 }
 
+/// Whether this credential family serves models the catalog files under *other*
+/// vendors.
+///
+/// Two of them do. A `custom` endpoint belongs to no vendor at all, and one
+/// Model Studio key serves GLM, MiniMax, MiMo, DeepSeek and Kimi alongside
+/// Alibaba's own models — which is why `Vendor::providers` may map a vendor to
+/// a family whose own `vendor` field names someone else. Nothing widens on the
+/// strength of this alone: what such a lane may advertise is still narrowed to
+/// the endpoint's own `/models`, so a model the key cannot serve is never put
+/// on the market.
+pub fn resells_other_vendors(p: Provider) -> bool {
+    matches!(p, Provider::Qwen | Provider::Custom)
+}
+
+/// Credential families that must not serve a buyer arriving from this tool.
+///
+/// The buy side has always been the same question for every caller — is anyone
+/// selling this model — and for one tool it is not. Anthropic confines a Claude
+/// subscription bearer to its own products: the API fingerprints the request
+/// body (the Claude Code system prompt, its exact tool set, its headers) and
+/// refuses what does not match, and its terms make the attempt a bannable
+/// offence for the account holder. opencode removed its own Claude OAuth support
+/// under a legal request rather than argue the point. Matching an opencode buyer
+/// to a subscription lane therefore buys a refusal, charges the seller a failure
+/// they did not cause, and — if it ever does get through — risks their account.
+///
+/// `claude_extra` is deliberately not on the list: extra usage is metered and
+/// billed per token, which is the same footing an API key is on and the footing
+/// Anthropic itself points third-party tools at.
+///
+/// A source nothing is written down for is unrestricted, which is what every
+/// tool but this one is and what a request that names no source has to be —
+/// see `H_TOOL`.
+pub fn denied_providers(source: &str) -> &'static [Provider] {
+    match source {
+        "opencode" => &[Provider::Claude, Provider::ClaudeWork],
+        _ => &[],
+    }
+}
+
 /// The record for a wire string, or `None` if nothing answers to it.
 pub fn spec_of(id: &str) -> Option<&'static ProviderSpec> {
     PROVIDERS.iter().find(|s| s.id == id)
@@ -576,7 +642,14 @@ mod tests {
         }
         for v in Vendor::ALL {
             for p in v.providers() {
-                assert_eq!(spec(*p).vendor, Some(v), "`{v}` maps to `{p}`, which claims another vendor");
+                // A reseller is the exception, and it is the point: `z-ai`,
+                // `minimax` and `xiaomi` have no credential family of their own
+                // here, so what can serve their rows is the Model Studio key
+                // their models are resold through.
+                assert!(
+                    spec(*p).vendor == Some(v) || resells_other_vendors(*p),
+                    "`{v}` maps to `{p}`, which claims another vendor and resells nobody"
+                );
             }
         }
     }

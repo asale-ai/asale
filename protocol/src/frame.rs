@@ -140,6 +140,22 @@ pub const H_CLIENT_VERSION: &str = "x-asale-client-version";
 /// subscription window, which is exactly what they are trying to measure.
 pub const H_TARGET_DEVICE: &str = "x-asale-target-device";
 
+/// Buy-side request header naming the tool the request came from.
+///
+/// Every buy used to be the same request whoever sent it, and one thing broke
+/// that: a vendor may refuse traffic from a client that is not its own. A Claude
+/// subscription bearer is confined to Anthropic's own products, so serving an
+/// opencode buyer from a subscription lane buys a refusal and risks the seller's
+/// account — see `providers::denied_providers`, which is the whole rule and the
+/// only thing this header feeds.
+///
+/// Set by the buy proxy from its own `/{tool}` addressing, which is how it
+/// already knows whose switch and model list to enforce. It is a routing hint
+/// and never an identity claim: the request is authorized by the api key, an
+/// unrecognised value means the same as no value, and the worst a caller can do
+/// by lying is narrow the supply *they* are matched against.
+pub const H_TOOL: &str = "x-asale-tool";
+
 /// The exact bytes both sides sign and verify. Defined once so the two can
 /// never disagree about field order or separator.
 pub fn handshake_signing_body(

@@ -26,6 +26,7 @@ export interface ProviderInfo {
 export const PROVIDERS: ProviderInfo[] = [
   { id: "claude", label: "Claude Code", credential: "oauth", keyUrl: "", vendor: "anthropic", connectable: true, adminOnly: false },
   { id: "claude_work", label: "Claude Work", credential: "oauth", keyUrl: "", vendor: "anthropic", connectable: true, adminOnly: false },
+  { id: "claude_extra", label: "Claude Extra Usage", credential: "oauth", keyUrl: "", vendor: "anthropic", connectable: true, adminOnly: false },
   { id: "codex", label: "Codex / OpenAI", credential: "oauth", keyUrl: "", vendor: "openai", connectable: true, adminOnly: false },
   { id: "gemini", label: "Gemini", credential: "oauth", keyUrl: "", vendor: "google", connectable: true, adminOnly: false },
   { id: "kimi", label: "Kimi Code", credential: "device_flow", keyUrl: "", vendor: "moonshotai", connectable: true, adminOnly: false },
@@ -46,4 +47,7 @@ export const VENDOR_LABELS: Record<string, string> = {
   "qwen": "Qwen",
   "deepseek": "DeepSeek",
   "x-ai": "xAI",
+  "z-ai": "Z.ai",
+  "minimax": "MiniMax",
+  "xiaomi": "Xiaomi",
 };

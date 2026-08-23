@@ -57,7 +57,6 @@
     },
     "map": {
       "title": "あなたのいるネットワーク",
-      "desc": "国は各ユーザーが自身で登録したもので、IP アドレスは一切参照しません。",
       "legendUsers": "ユーザー",
       "legendFlow": "Token の流れ",
       "legendLess": "少ない",

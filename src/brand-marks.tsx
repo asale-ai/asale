@@ -127,7 +127,7 @@ const GLYPHS: Record<string, ReactNode> = {
  *  answers for all of them and every page would otherwise need its own table:
  *
  *  * `asale-protocol::ids::Provider` — a subscription/credential family
- *    (`claude`, `claude_work`, `codex`, `gemini`, `kimi`, `kimi_api`, `xai`,
+ *    (`claude`, `claude_work`, `claude_extra`, `codex`, `gemini`, `kimi`, `kimi_api`, `xai`,
  *    `xai_api`, `deepseek`).
  *  * a *tool* — a locally installed CLI whose config the buy switch rewrites
  *    (`claude`, `codex`, `gemini`), which reuses the provider ids.
@@ -140,7 +140,7 @@ const GLYPHS: Record<string, ReactNode> = {
  *  Claude mark. */
 const MARK_OF: Record<string, string> = {
   // Anthropic
-  claude: "claude", claude_work: "claude", anthropic: "anthropic",
+  claude: "claude", claude_work: "claude", claude_extra: "claude", anthropic: "anthropic",
   // OpenAI — Codex ships under the OpenAI mark.
   codex: "openai", openai: "openai",
   // Google

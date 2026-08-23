@@ -181,7 +181,7 @@ fn sellable_models(catalog: &Option<SellableCatalog>, provider: &str, entitled: 
         // credential family is `qwen`. What stops this widening into models the
         // key cannot serve is the same thing that stops it for a custom
         // endpoint: `entitled` is the vendor's own `/models`.
-        Some(c) if provider == CUSTOM_PROVIDER || provider == Provider::Qwen.as_str() => {
+        Some(c) if Provider::from_str_opt(provider).is_some_and(asale_protocol::providers::resells_other_vendors) => {
             let mut all: Vec<String> = c.by_provider.values().flatten().cloned().collect();
             all.sort();
             all.dedup();
@@ -449,15 +449,24 @@ fn market_candidates(endpoint_id: &str) -> Vec<String> {
 /// leave a freshly connected endpoint advertising nothing until the next hourly
 /// refresh.
 ///
-/// Collisions are possible in principle — two endpoint ids normalising to one
-/// market id — and the first wins, sorted, so the choice is stable across
-/// rebuilds rather than depending on the endpoint's ordering.
+/// Collisions are real, not hypothetical, and which side wins matters. Model
+/// Studio lists the models it resells twice — `glm-5.2` *and* `ZHIPU/GLM-5.2`,
+/// `MiniMax-M2.5` *and* `MiniMax/MiniMax-M2.5` — and the two are not
+/// interchangeable: the bare id is the product Alibaba hosts, while the
+/// prefixed one is a marketplace listing that answers `400 ... product is not
+/// activated` until the account subscribes to it separately. Sorting plain
+/// ASCII put the uppercase reseller spelling first and picked the id most
+/// accounts cannot call.
+///
+/// So an unprefixed id wins, and ties below that are broken by name, which
+/// keeps the choice stable across rebuilds rather than dependent on the
+/// endpoint's ordering.
 pub fn index_custom_models(
     endpoint_ids: &[String],
     tradable: &[String],
 ) -> std::collections::BTreeMap<String, String> {
     let mut sorted: Vec<&String> = endpoint_ids.iter().collect();
-    sorted.sort();
+    sorted.sort_by_key(|id| (id.contains('/'), id.as_str()));
     let mut out = std::collections::BTreeMap::new();
     for id in sorted {
         let market = match market_candidates(id).into_iter().find(|c| tradable.iter().any(|t| t == c)) {
@@ -820,8 +829,10 @@ pub async fn store_policy(store: &LocalStore, policy: &PublishPolicy) -> anyhow:
 /// Build the adapter for a provider using the resolved public client ids.
 pub fn adapter_for(provider: &str) -> Option<Box<dyn ToolAdapter>> {
     match provider {
-        "claude" => Some(Box::new(discovery::ClaudeAdapter::new(false, crate::oauth::claude_client_id()))),
-        "claude_work" => Some(Box::new(discovery::ClaudeAdapter::new(true, crate::oauth::claude_client_id()))),
+        p if asale_protocol::ids::is_claude_family(p) => Some(Box::new(discovery::ClaudeAdapter::new(
+            Provider::from_str_opt(p)?,
+            crate::oauth::claude_client_id(),
+        ))),
         "codex" => Some(Box::new(discovery::CodexAdapter::new(crate::oauth::codex_client_id()))),
         "gemini" => Some(Box::new(discovery::GeminiAdapter::new(
             crate::oauth::gemini_client_id(),
@@ -1473,7 +1484,7 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
             // Same contract as Codex's entitlement: an empty answer means
             // advertise nothing, because a model the endpoint will refuse costs a
             // consumer a failed turn and this device its reputation.
-            p if p == CUSTOM_PROVIDER || p == Provider::Qwen.as_str() => Some(offerable(
+            p if Provider::from_str_opt(p).is_some_and(asale_protocol::providers::resells_other_vendors) => Some(offerable(
                 listing.as_ref().map(|l| l.market_ids()).unwrap_or_default(),
                 lite_unsellable,
             )),
@@ -2142,6 +2153,25 @@ mod tests {
     }
 
     #[test]
+    fn the_directly_hosted_id_beats_the_resellers_spelling() {
+        // Model Studio lists the models it resells under both spellings, and
+        // only the bare one answers without a separate subscription. Taken from
+        // its live `/models`, with the catalog ids the platform trades.
+        let ids: Vec<String> = ["ZHIPU/GLM-5.2", "glm-5.2", "MiniMax/MiniMax-M3", "xiaomi/mimo-v2.5-pro"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let catalog: Vec<String> =
+            ["glm-5.2", "minimax-m3", "mimo-v2.5-pro"].iter().map(|s| s.to_string()).collect();
+        let idx = index_custom_models(&ids, &catalog);
+        assert_eq!(idx.get("glm-5.2").map(String::as_str), Some("glm-5.2"));
+        // The other two are listed only as marketplace entries, so the prefixed
+        // id is the only one there is — and it still maps to its market row.
+        assert_eq!(idx.get("minimax-m3").map(String::as_str), Some("MiniMax/MiniMax-M3"));
+        assert_eq!(idx.get("mimo-v2.5-pro").map(String::as_str), Some("xiaomi/mimo-v2.5-pro"));
+    }
+
+    #[test]
     fn an_unprefixed_id_is_already_a_market_id() {
         // A vendor's own API — and most self-hosted gateways — list models
         // without a vendor prefix, and those ids need no translation at all.
@@ -2164,7 +2194,7 @@ mod tests {
     fn only_the_vendors_a_subscription_can_serve_are_mapped() {
         assert_eq!(
             providers_for_vendor("anthropic"),
-            &[Provider::Claude, Provider::ClaudeWork]
+            &[Provider::Claude, Provider::ClaudeWork, Provider::ClaudeExtra]
         );
         assert_eq!(providers_for_vendor("openai"), &[Provider::Codex]);
         assert_eq!(providers_for_vendor("google"), &[Provider::Gemini]);

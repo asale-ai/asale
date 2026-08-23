@@ -42,6 +42,22 @@ use serde::{Deserialize, Serialize};
 pub enum Provider {
     Claude,
     ClaudeWork,
+    /// A Claude subscription whose owner has turned on pay-as-you-go **extra
+    /// usage**, declared as a lane of its own rather than folded into
+    /// [`Provider::Claude`].
+    ///
+    /// Same account, same OAuth client, same upstream — and deliberately a
+    /// separate credential family, because what a buyer may be served from is
+    /// not the same for the two. Anthropic's terms confine a plain subscription
+    /// bearer to its own products; the overflow an extra-usage account serves is
+    /// metered and billed per token, which is the footing every third-party tool
+    /// is entitled to be on. See [`crate::providers::denied_providers`].
+    ///
+    /// Splitting it also keeps the window honest: the subscription lane sells
+    /// against a plan window that runs out, and this one bills against a
+    /// balance, so folding them together would take a paying account off the
+    /// market for a limit it is no longer under.
+    ClaudeExtra,
     Codex,
     Gemini,
     Kimi,
@@ -83,7 +99,7 @@ impl Provider {
     /// exist precisely because the upstream differs.
     pub fn upstream_family(&self) -> Provider {
         match self {
-            Provider::ClaudeWork => Provider::Claude,
+            Provider::ClaudeWork | Provider::ClaudeExtra => Provider::Claude,
             other => *other,
         }
     }
@@ -93,9 +109,21 @@ impl Provider {
         crate::providers::spec(*self).label
     }
 
-    pub const ALL: [Provider; 11] = [
+    /// Does this family reach Anthropic's Messages endpoint with a Claude
+    /// OAuth bearer?
+    ///
+    /// Three do now, and the count is the reason this exists: the client used to
+    /// spell it `"claude" | "claude_work"` in a dozen `match` arms, so adding a
+    /// third meant finding all twelve and the one that was missed would be a
+    /// silent wrong answer rather than a compile error.
+    pub fn is_claude_family(&self) -> bool {
+        self.upstream_family() == Provider::Claude
+    }
+
+    pub const ALL: [Provider; 12] = [
         Provider::Claude,
         Provider::ClaudeWork,
+        Provider::ClaudeExtra,
         Provider::Codex,
         Provider::Gemini,
         Provider::Kimi,
@@ -201,6 +229,15 @@ pub enum Vendor {
     /// Grok row to no provider at all.
     #[serde(rename = "x-ai")]
     Xai,
+    /// Zhipu AI's GLM family. The catalog files it under the company's
+    /// international brand, `z-ai`, which is also the id its own API uses.
+    #[serde(rename = "z-ai")]
+    Zhipu,
+    Minimax,
+    /// Xiaomi's MiMo. No platform of its own — the models are served through
+    /// Model Studio, which is the whole reason [`Vendor::providers`] maps a
+    /// vendor to a reseller here.
+    Xiaomi,
 }
 
 impl Vendor {
@@ -213,6 +250,9 @@ impl Vendor {
             Vendor::Qwen => "qwen",
             Vendor::Deepseek => "deepseek",
             Vendor::Xai => "x-ai",
+            Vendor::Zhipu => "z-ai",
+            Vendor::Minimax => "minimax",
+            Vendor::Xiaomi => "xiaomi",
         }
     }
 
@@ -229,6 +269,9 @@ impl Vendor {
             Vendor::Qwen => "Qwen",
             Vendor::Deepseek => "DeepSeek",
             Vendor::Xai => "xAI",
+            Vendor::Zhipu => "Z.ai",
+            Vendor::Minimax => "MiniMax",
+            Vendor::Xiaomi => "Xiaomi",
         }
     }
 
@@ -241,6 +284,9 @@ impl Vendor {
             "qwen" => Vendor::Qwen,
             "deepseek" => Vendor::Deepseek,
             "x-ai" => Vendor::Xai,
+            "z-ai" => Vendor::Zhipu,
+            "minimax" => Vendor::Minimax,
+            "xiaomi" => Vendor::Xiaomi,
             _ => return None,
         })
     }
@@ -254,17 +300,22 @@ impl Vendor {
     /// _agree` holds the two halves in step.
     pub fn providers(&self) -> &'static [Provider] {
         match self {
-            Vendor::Anthropic => &[Provider::Claude, Provider::ClaudeWork],
+            Vendor::Anthropic => &[Provider::Claude, Provider::ClaudeWork, Provider::ClaudeExtra],
             Vendor::Openai => &[Provider::Codex],
             Vendor::Google => &[Provider::Gemini],
             Vendor::Moonshotai => &[Provider::Kimi, Provider::KimiApi],
             Vendor::Qwen => &[Provider::Qwen],
             Vendor::Deepseek => &[Provider::Deepseek],
             Vendor::Xai => &[Provider::Xai, Provider::XaiApi],
+            // These three ship no credential family of their own on this
+            // platform: Alibaba's Model Studio resells them, so a Model Studio
+            // key is what serves their rows. `providers::resells_other_vendors`
+            // is what makes that mapping legal — see the test there.
+            Vendor::Zhipu | Vendor::Minimax | Vendor::Xiaomi => &[Provider::Qwen],
         }
     }
 
-    pub const ALL: [Vendor; 7] = [
+    pub const ALL: [Vendor; 10] = [
         Vendor::Anthropic,
         Vendor::Openai,
         Vendor::Google,
@@ -272,6 +323,9 @@ impl Vendor {
         Vendor::Qwen,
         Vendor::Deepseek,
         Vendor::Xai,
+        Vendor::Zhipu,
+        Vendor::Minimax,
+        Vendor::Xiaomi,
     ];
 }
 
@@ -284,6 +338,12 @@ impl Vendor {
 /// that could only tell you afterwards that you had forgotten it.
 pub fn subscribable_providers() -> Vec<Provider> {
     crate::providers::PROVIDERS.iter().filter(|s| s.vendor.is_some()).map(|s| s.provider).collect()
+}
+
+/// [`Provider::is_claude_family`] for a wire string, for the call sites that
+/// only ever hold one. An id nothing answers to reads as `false`.
+pub fn is_claude_family(id: &str) -> bool {
+    Provider::from_str_opt(id).is_some_and(|p| p.is_claude_family())
 }
 
 /// Whether a provider authenticates with a long-lived API key rather than an
@@ -379,7 +439,7 @@ mod tests {
     fn vendor_maps_only_to_providers_that_can_serve_it() {
         assert_eq!(
             Vendor::Anthropic.providers(),
-            &[Provider::Claude, Provider::ClaudeWork]
+            &[Provider::Claude, Provider::ClaudeWork, Provider::ClaudeExtra]
         );
         assert_eq!(Vendor::Openai.providers(), &[Provider::Codex]);
         assert_eq!(Vendor::Google.providers(), &[Provider::Gemini]);
@@ -446,6 +506,8 @@ mod tests {
         let mut union: Vec<Provider> =
             Vendor::ALL.iter().flat_map(|v| v.providers().iter().copied()).collect();
         union.sort_by_key(|p| p.as_str());
+        // A reseller appears once per vendor it serves; the union is a set.
+        union.dedup();
         let mut listed = subscribable_providers();
         listed.sort_by_key(|p| p.as_str());
         assert_eq!(union, listed);
@@ -454,6 +516,11 @@ mod tests {
     #[test]
     fn claude_work_shares_the_claude_upstream() {
         assert_eq!(Provider::ClaudeWork.upstream_family(), Provider::Claude);
+        assert_eq!(Provider::ClaudeExtra.upstream_family(), Provider::Claude);
         assert_eq!(Provider::Codex.upstream_family(), Provider::Codex);
+        // The string form the client's `match` arms used to spell out by hand.
+        assert!(is_claude_family("claude_extra"));
+        assert!(!is_claude_family("codex"));
+        assert!(!is_claude_family("nope"));
     }
 }

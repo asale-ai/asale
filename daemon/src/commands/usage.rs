@@ -500,7 +500,7 @@ pub(crate) async fn fetch_provider_windows(
     token: &str,
 ) -> R<Vec<Value>> {
     match provider {
-        "claude" | "claude_work" => fetch_claude_windows(token).await,
+        p if asale_protocol::ids::is_claude_family(p) => fetch_claude_windows(token).await,
         "gemini" => fetch_gemini_windows(state, account_id, token).await,
         "kimi" => fetch_kimi_windows(token).await,
         _ => Err(cmd_err!("errors.usage.noWindows", format!("{provider} publishes no usage endpoint"))),

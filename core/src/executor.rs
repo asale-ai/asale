@@ -341,7 +341,20 @@ pub fn unsupported_model(status: u16, body: &str) -> bool {
         // The Codex backend refuses a slug the account is not entitled to at
         // validation time, before it is a 404: `"<model> is not supported when
         // using Codex with a ChatGPT account"`.
-        400 => b.contains("not supported when using codex"),
+        //
+        // Model Studio lists every model it *resells* in `/models` — GLM,
+        // MiniMax, MiMo — whether or not this account has subscribed to that
+        // product, and asking for an unsubscribed one answers `400 ... product
+        // is not activated`. Same fact as a 404 from anyone else: this account
+        // cannot serve this id, and it will not be able to for the next buyer
+        // either.
+        400 => b.contains("not supported when using codex") || b.contains("product is not activated"),
+        // And the same vendor's other spelling of the same fact: a model the
+        // account is not entitled to answers `403 access_denied` pointing at
+        // the Model Studio error index. Matched narrowly on that document,
+        // because a bare 403 anywhere else is about the *credential* and is
+        // read as such by `refusal_outcome`.
+        403 => b.contains("access_denied") && b.contains("model-studio"),
         404 => {
             // Anthropic: `{"type":"not_found_error","message":"model: X"}`.
             // OpenAI: `model_not_found` / "does not exist or you do not have
@@ -801,12 +814,15 @@ pub async fn execute(
         // applies the transient cooldown, 401/403 flags the token (spec §4).
         let outcome = match status {
             429 => TaskOutcome::RateLimited { reset_at },
+            // Ahead of everything else 4xx: a model the upstream will not serve
+            // this account is the one 4xx that says something about the lane
+            // rather than about the request, and it takes the lane off the
+            // market. Ahead of the credential check in particular, because one
+            // vendor says it with a 403 and reading that as a bad credential
+            // would flag a key that is working fine.
+            s if unsupported_model(s, &detail) => TaskOutcome::Unsupported,
             401 | 403 => refusal_outcome(status, &detail),
             s if s >= 500 => TaskOutcome::ServerError,
-            // Before the catch-all below: a model the upstream does not have is
-            // the one 4xx that says something about this lane rather than about
-            // the request, and it takes the lane off the market.
-            s if unsupported_model(s, &detail) => TaskOutcome::Unsupported,
             // A 400 that is really "out of credit" — cools the account like the
             // 429 it should have been. See [`quota_exhausted`].
             s if quota_exhausted(s, &detail) => TaskOutcome::QuotaExhausted { reset_at },
@@ -1053,7 +1069,7 @@ async fn finish_canceled(
 
 /// Whether a relayed request will be served with a Claude subscription token.
 fn is_claude(provider: &str) -> bool {
-    provider == "claude" || provider == "claude_work"
+    asale_protocol::ids::is_claude_family(provider)
 }
 
 /// A stable id for Kimi Code's `X-Msh-Device-Id` header, derived from the
@@ -1854,6 +1870,21 @@ mod tests {
             400,
             r#"{"detail":"gpt-5-codex is not supported when using Codex with a ChatGPT account"}"#
         ));
+
+        // Model Studio, both spellings, as the live endpoint returns them for a
+        // resold model the account has not subscribed to.
+        assert!(unsupported_model(
+            400,
+            r#"{"error":{"message":"The product is not activated, please confirm that you have activated products and try again.","code":"invalid_parameter_error"}}"#
+        ));
+        assert!(unsupported_model(
+            403,
+            r#"{"error":{"message":"Access denied. For details, see: https://help.aliyun.com/zh/model-studio/error-code#access-denied","type":"access_denied","code":"access_denied"}}"#
+        ));
+        // A 403 about the credential stays a credential failure — the narrow
+        // match above is what keeps these apart.
+        assert!(!unsupported_model(403, r#"{"error":{"message":"Invalid API key"}}"#));
+        assert!(!unsupported_model(403, r#"{"error":{"code":"access_denied","message":"Access denied"}}"#));
 
         // The consumer's problem, not the lane's: these must stay a plain 4xx
         // that costs the seller nothing.

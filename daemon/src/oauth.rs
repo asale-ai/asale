@@ -96,7 +96,10 @@ pub struct OAuthProvider {
 
 pub fn provider(name: &str) -> Option<OAuthProvider> {
     Some(match name {
-        "claude" | "claude_work" => OAuthProvider {
+        // Every Claude family signs in through the same Anthropic client; what
+        // separates them is the UA profile and, for `claude_extra`, what a buyer
+        // may be matched to it.
+        p if asale_protocol::ids::is_claude_family(p) => OAuthProvider {
             name: name.to_string(),
             authorize_url: "https://claude.ai/oauth/authorize",
             token_url: "https://api.anthropic.com/v1/oauth/token",

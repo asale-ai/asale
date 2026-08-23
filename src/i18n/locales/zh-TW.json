@@ -57,7 +57,6 @@
     },
     "map": {
       "title": "你所在的網路",
-      "desc": "國家來自每位使用者自己填寫的資料 — 這裡不讀取任何 IP 位址。",
       "legendUsers": "使用者",
       "legendFlow": "Token 流向",
       "legendLess": "較少",

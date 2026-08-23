@@ -57,7 +57,6 @@
     },
     "map": {
       "title": "The network around you",
-      "desc": "Countries come from what each user declared — nothing here reads an IP address.",
       "legendUsers": "Users",
       "legendFlow": "Token flow",
       "legendLess": "Fewer",

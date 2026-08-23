@@ -225,7 +225,7 @@ pub fn spawn_quota_loop(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
             // page sizes a switched-off subscription too, and this is a free
             // endpoint asked twice a day.
             let mut replan = false;
-            for tool in tools.iter().filter(|t| matches!(t.provider.as_str(), "claude" | "claude_work")) {
+            for tool in tools.iter().filter(|t| asale_protocol::ids::is_claude_family(&t.provider)) {
                 replan |= refresh_plan(&state, &tool.provider, &tool.account_id, now).await;
             }
 

@@ -194,7 +194,7 @@ async fn buy_gate(st: &ProxyState, tool: Option<&str>, model: &str) -> BuyDecisi
 /// stay on the market route.
 fn direct_candidates(path: &str) -> &'static [&'static str] {
     if path.starts_with("/v1/messages") {
-        &["claude", "claude_work"]
+        &["claude", "claude_work", "claude_extra"]
     } else if path.starts_with("/v1beta/") {
         &["gemini"]
     } else {
@@ -211,7 +211,7 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 fn direct_upstream(provider: &str, path: &str, path_and_query: &str) -> Option<(String, Vec<(&'static str, String)>)> {
     match provider {
-        "claude" | "claude_work" => Some((
+        p if asale_protocol::ids::is_claude_family(p) => Some((
             format!("https://api.anthropic.com{path}"),
             // Only `anthropic-version` here: the rest of Claude Code's identity
             // (user-agent, the beta list, the SDK headers) depends on the body
@@ -308,7 +308,7 @@ async fn forward(
         }
         return forward_direct(st, provider, tool, &path, &path_and_query, method, bytes, meter).await;
     }
-    forward_market(st, &path_and_query, method, bytes).await
+    forward_market(st, tool, &path_and_query, method, bytes).await
 }
 
 /// Direct route: inject the pool-selected local subscription token and call the
@@ -371,7 +371,7 @@ async fn forward_direct(
     // its own `metadata.user_id`, both of which are kept — what this adds there
     // is the billing header; any other Anthropic-dialect caller needs the lot.
     let mut out_body = bytes.to_vec();
-    if provider == "claude" || provider == "claude_work" {
+    if asale_protocol::ids::is_claude_family(provider) {
         let session = crate::session::claude_session_for(&picked.account_id).unwrap_or_default();
         if let Some(patched) = asale_client_core::executor::with_claude_code_system(&out_body, &session) {
             out_body = patched;
@@ -494,6 +494,7 @@ fn tag_direct(mut resp: Response, provider: &str, model: &str) -> Response {
 /// exact same request under a fresh key.
 async fn send_market(
     st: &ProxyState,
+    tool: Option<&'static str>,
     target: &str,
     method: &reqwest::Method,
     bytes: &axum::body::Bytes,
@@ -535,6 +536,16 @@ async fn send_market(
     if let Some(app) = &st.app {
         req = req.header(asale_protocol::frame::H_DEVICE, app.device_id.clone());
     }
+    // Which tool is buying. Matching needs it because one vendor refuses traffic
+    // from a client that is not its own: a Claude subscription bearer serving an
+    // opencode request is a refusal at best and the seller's account at worst,
+    // so the gateway keeps those lanes out of that buyer's candidate set
+    // (`providers::denied_providers`). Only ever narrowing, so a request whose
+    // tool cannot be identified is sent without it and matched against
+    // everything, exactly as before.
+    if let Some(tool) = tool {
+        req = req.header(asale_protocol::frame::H_TOOL, tool);
+    }
     req.body(bytes.to_vec()).send().await
 }
 
@@ -568,6 +579,7 @@ async fn remint_key(st: &ProxyState, used: &str) -> Result<String, String> {
 /// the return.
 async fn forward_market(
     st: ProxyState,
+    tool: Option<&'static str>,
     path_and_query: &str,
     method: axum::http::Method,
     bytes: axum::body::Bytes,
@@ -581,7 +593,7 @@ async fn forward_market(
     let target = format!("{}{}", st.server_api_base.trim_end_matches('/'), path_and_query);
     let reqwest_method = reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::POST);
 
-    let mut resp = match send_market(&st, &target, &reqwest_method, &bytes, &key).await {
+    let mut resp = match send_market(&st, tool, &target, &reqwest_method, &bytes, &key).await {
         Ok(r) => r,
         Err(e) => return (StatusCode::BAD_GATEWAY, format!("upstream error: {e}")).into_response(),
     };
@@ -595,7 +607,7 @@ async fn forward_market(
         match remint_key(&st, &key).await {
             Ok(fresh) => {
                 key = fresh;
-                resp = match send_market(&st, &target, &reqwest_method, &bytes, &key).await {
+                resp = match send_market(&st, tool, &target, &reqwest_method, &bytes, &key).await {
                     Ok(r) => r,
                     Err(e) => return (StatusCode::BAD_GATEWAY, format!("upstream error: {e}")).into_response(),
                 };
@@ -1017,6 +1029,31 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let raw = String::from_utf8_lossy(&rx.await.unwrap()).to_ascii_lowercase();
         assert!(raw.contains("anthropic-version:"), "the gateway hop carried no version header:\n{raw}");
+    }
+
+    /// The gateway keeps a Claude subscription lane away from an opencode
+    /// buyer, and this header is the only thing that tells it which buyer this
+    /// is — the `/{tool}` prefix is stripped before the hop, and the tool's own
+    /// headers never reach the gateway because this proxy rebuilds the request.
+    #[tokio::test]
+    async fn the_originating_tool_travels_to_the_gateway() {
+        let (addr, rx) = capturing_gateway().await;
+        let mut st = state(Some("sk-asale-test")).await;
+        st.server_api_base = format!("http://{addr}");
+        let port = serve(st).await;
+
+        let resp = asale_client_core::http::plain()
+            .post(format!("http://127.0.0.1:{port}/opencode/v1/chat/completions"))
+            .json(&serde_json::json!({"model": "claude-fable-5", "messages": []}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let raw = String::from_utf8_lossy(&rx.await.unwrap()).to_ascii_lowercase();
+        assert!(
+            raw.contains(&format!("{}: opencode", asale_protocol::frame::H_TOOL)),
+            "the gateway hop did not name the tool it came from:\n{raw}"
+        );
     }
 
     /// The same body reaches OpenAI- and Gemini-shaped routes; a vendor header
