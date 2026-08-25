@@ -864,6 +864,29 @@ impl AccountPool {
         self.accounts.iter().any(|a| a.provider == provider && a.available(now))
     }
 
+    /// Whether a sell-enabled account *other than* `except` could serve this
+    /// lane right now.
+    ///
+    /// What the relay executor asks before handing a failed task to a second
+    /// account. The market cannot ask it on our behalf: a lane is
+    /// `{device}|{provider}`, so every `custom` account on this machine is one
+    /// entry to the gateway and a single failure excludes all of them together.
+    /// Which account served, and which others were standing by, is known only
+    /// here.
+    pub fn alternate_available(&self, provider: &str, model: &str, except: &str, now: i64) -> bool {
+        // The dialect the lane was declared in still binds: the body in hand was
+        // built for that wire, and an account speaking another is not a
+        // substitute. Same rule as `acquire`.
+        let wire = self.lane_wire(provider, model, now);
+        self.accounts.iter().any(|a| {
+            a.provider == provider
+                && a.account_id != except
+                && a.sell_enabled
+                && !(wire.is_some() && a.wire_for(model).is_some() && a.wire_for(model) != wire)
+                && a.lane_available(model, now)
+        })
+    }
+
     /// Whether any *sell-enabled* account could serve this lane right now —
     /// what the supply declaration must be built from.
     pub fn any_sellable(&self, provider: &str, model: &str, now: i64) -> bool {
@@ -1286,6 +1309,27 @@ mod tests {
         a.upstream_wire = Some(Wire::Openai);
         a.upstream_responses = responses;
         a
+    }
+
+    /// Several `custom` accounts on one machine are a single lane to the
+    /// market, so a failed task can only be handed to another one from here.
+    /// The question has to exclude the account that just failed and honour the
+    /// dialect the lane was declared in.
+    #[test]
+    fn another_account_on_this_device_can_take_over_a_failed_lane() {
+        let mut pool = AccountPool::new(Strategy::RoundRobin);
+        pool.set_accounts(vec![endpoint("openrouter", 1_000, true), endpoint("bai-mix6", 1_000, true)]);
+        assert!(pool.alternate_available("custom", "gpt-5.5", "openrouter", 0));
+        // Nobody else sells it: the buyer hears the original failure instead of
+        // the same account being tried twice.
+        let mut alone = AccountPool::new(Strategy::RoundRobin);
+        alone.set_accounts(vec![endpoint("openrouter", 1_000, true)]);
+        assert!(!alone.alternate_available("custom", "gpt-5.5", "openrouter", 0));
+        // A lane the other account cannot speak the dialect of is not a
+        // substitute — `LUNA` is Responses-only and `bai-chat` is chat-only.
+        let mut mixed = AccountPool::new(Strategy::RoundRobin);
+        mixed.set_accounts(vec![endpoint("openrouter", 1_000, true), endpoint("bai-chat", 1_000, false)]);
+        assert!(!mixed.alternate_available("custom", LUNA, "openrouter", 0));
     }
 
     #[test]

@@ -367,17 +367,19 @@ pub fn unsupported_model(status: u16, body: &str) -> bool {
     }
 }
 
-/// Anthropic's third-party usage allowance running out, which arrives as a
-/// `400 invalid_request_error` instead of the 429 every other exhaustion uses:
-/// "Third-party apps now draw from your extra usage, not your plan limits."
+/// An account that cannot pay for the call, whatever status its vendor chose
+/// to say so in — Anthropic's `400` about extra usage, an aggregator's `400
+/// insufficient_user_quota`, OpenRouter's `402`.
 ///
-/// Shape aside, it is a quota wall: the account cannot serve *anyone* until its
-/// owner tops up, and the catch-all below reads a 400 as the consumer's problem
-/// and leaves the lane on the market. On 2026-08-22 that is exactly what
-/// happened — one account kept winning matches and answering every one of them
-/// with this 400, so buyers saw a dead model rather than a failover.
+/// Shape aside, they are all a quota wall: the account cannot serve *anyone*
+/// until its owner tops up, and the catch-all below reads a 4xx as the
+/// consumer's problem and leaves the lane on the market. On 2026-08-22 that is
+/// exactly what happened — one account kept winning matches and answering every
+/// one of them with this 400, so buyers saw a dead model rather than a
+/// failover. The vocabulary itself lives in the protocol crate, because the
+/// gateway re-reads the same body for sellers still on an older client.
 pub fn quota_exhausted(status: u16, body: &str) -> bool {
-    status == 400 && body.to_ascii_lowercase().contains("draw from your extra usage")
+    asale_protocol::is_out_of_credit(status, body)
 }
 
 /// How to resolve the upstream bearer token for a provider.
@@ -416,6 +418,22 @@ pub trait TokenProvider: Send + Sync {
     ///
     /// [`AccountPool::lane_saturated`]: crate::pool::AccountPool::lane_saturated
     fn saturated(&self, _provider: &str, _model: &str) -> bool {
+        false
+    }
+
+    /// Whether some *other* account on this device could serve this lane right
+    /// now — one that is not `except`.
+    ///
+    /// Asked after a failed attempt has been reported, to decide whether the
+    /// task is worth handing to a second account before the buyer is told it
+    /// failed. It has to be a question and not just "acquire again and see",
+    /// because acquiring takes a concurrency slot that would then have to be
+    /// released as either a success or a fault, and it is neither.
+    ///
+    /// Default: false. A provider with no pool behind it has no second account
+    /// to offer, and retrying the one it has against the same credential only
+    /// spends the buyer's time.
+    fn has_alternate(&self, _provider: &str, _model: &str, _except: &str) -> bool {
         false
     }
 
@@ -568,7 +586,7 @@ pub async fn execute(
     // subscription quota on a task the platform never authorized (a forged or
     // replayed dispatch). `budget_tokens` below is the second, local guard.
     if req.quota_sig.trim().is_empty() {
-        send_error(out, &task_id, "QUOTA_SIG_INVALID", "missing quota grant signature", false);
+        send_error(out, &task_id, "QUOTA_SIG_INVALID", "missing quota grant signature", true);
         return;
     }
     {
@@ -578,7 +596,10 @@ pub async fn execute(
             .unwrap_or(0);
         if let Err(e) = quota.verify(&req.task_id, &req.model, req.budget_tokens, req.exp, &req.quota_sig, now) {
             tracing::warn!(task = %task_id, "refusing relayed request: {e}");
-            send_error(out, &task_id, "QUOTA_SIG_INVALID", &e.to_string(), false);
+            // Retriable: the usual cause is this machine's own quota public
+            // key or clock (see the gateway's `is_retriable` floor), and the
+            // buyer must not lose a request over one seller's configuration.
+            send_error(out, &task_id, "QUOTA_SIG_INVALID", &e.to_string(), true);
             return;
         }
     }
@@ -596,267 +617,355 @@ pub async fn execute(
     // Resolve + inject the subscription token (only place it is used). The
     // lease picks an account from the pool (spec §4) and must be reported back.
     let provider = req.upstream.provider.clone();
-    let lease = match lease_for_task(tokens, &provider, &model, &mut cancel).await {
-        Ok(l) => l,
-        // Nobody left to read an error, and no account to blame for one.
-        Err(LeaseFailure::Canceled) => {
-            if let Some(r) = records {
-                r.record(&task_id, &provider, "", &model, &Usage::default(), "canceled").await;
+    // How many *other* local accounts one task may fall through to before the
+    // buyer is told it failed.
+    //
+    // The gateway cannot make this hop: a lane is `{device}|{provider}`
+    // (`supply_declarations` is keyed on device+provider+model), so seven
+    // `custom` accounts on one machine are a single lane to the market — when
+    // the failover ladder excludes it for one account's 402, it excludes every
+    // one of them and goes looking for a different *device*. Which account
+    // served is knowable only here, and so is the fact that six others were
+    // standing by.
+    const MAX_LOCAL_FAILOVERS: u32 = 2;
+    let mut failovers_left = MAX_LOCAL_FAILOVERS;
+    // The first attempt's failure, kept while a second account is tried: if
+    // nobody else can serve the lane, this is what the buyer is owed.
+    let mut held: Option<HeldFailure> = None;
+    let (lease, resp, status) = loop {
+        let lease = match lease_for_task(tokens, &provider, &model, &mut cancel).await {
+            Ok(l) => l,
+            // Nobody left to read an error, and no account to blame for one.
+            Err(LeaseFailure::Canceled) => {
+                if let Some(r) = records {
+                    r.record(&task_id, &provider, "", &model, &Usage::default(), "canceled").await;
+                }
+                return;
             }
-            return;
-        }
-        Err(LeaseFailure::NoAccount) => {
-            send_error(out, &task_id, "TOKEN_EXPIRED", "no local token for provider", true);
-            if let Some(r) = records {
-                r.record(&task_id, &provider, "", &model, &Usage::default(), "no_token").await;
+            Err(LeaseFailure::NoAccount) => {
+                // A retry that found nobody else to hand the task to reports the
+                // failure that sent it looking, not "no account" — which is both
+                // untrue (there was one; it could not pay) and unactionable.
+                match held.take() {
+                    Some(f) => f.report(out, records, &task_id, &provider, &model).await,
+                    None => {
+                        send_error(out, &task_id, "TOKEN_EXPIRED", "no local token for provider", true);
+                        if let Some(r) = records {
+                            r.record(&task_id, &provider, "", &model, &Usage::default(), "no_token").await;
+                        }
+                    }
+                }
+                return;
             }
-            return;
-        }
-    };
-    let token = lease.token.clone();
-    let session_id = match lease.session_id.clone().filter(|s| !s.is_empty()) {
-        Some(s) => s,
-        None => tokens.session_for(&lease.account_id).unwrap_or_default(),
-    };
+        };
+        let token = lease.token.clone();
+        let session_id = match lease.session_id.clone().filter(|s| !s.is_empty()) {
+            Some(s) => s,
+            None => tokens.session_for(&lease.account_id).unwrap_or_default(),
+        };
 
-    let method = reqwest::Method::from_bytes(req.upstream.method.as_bytes()).unwrap_or(reqwest::Method::POST);
-    // A `custom` account's endpoint belongs to whoever configured it, so the
-    // gateway sends a placeholder and both the real URL and the header the key
-    // travels in are assembled here — the one side that knows which account
-    // this task was leased against. Everything else uses the URL as built and a
-    // bearer: those hosts are the vendors' and are settled at compile time.
-    let custom = lease
-        .upstream_base
-        .as_deref()
-        .map(str::trim)
-        .filter(|b| !b.is_empty())
-        .map(|base| (base, lease.upstream_wire.unwrap_or_default()));
-    let url = match custom {
-        Some((base, wire)) => custom_url(base, wire, &req.upstream.url),
-        None => req.upstream.url.clone(),
-    };
-    let mut builder = http.request(method, &url);
-    // A subscription request rebuilds Claude Code's own header identity below,
-    // so the gateway's guesses at those names are dropped rather than sent
-    // alongside — `reqwest` appends, and two `anthropic-beta` headers is a
-    // shape no first-party client ever puts on the wire.
-    let claude_identity = is_claude(&provider) && custom.is_none();
-    for (k, v) in &req.upstream.headers {
-        if let Some(s) = v.as_str() {
-            if claude_identity && CLAUDE_IDENTITY_HEADERS.iter().any(|h| k.eq_ignore_ascii_case(h)) {
+        let method = reqwest::Method::from_bytes(req.upstream.method.as_bytes()).unwrap_or(reqwest::Method::POST);
+        // A `custom` account's endpoint belongs to whoever configured it, so the
+        // gateway sends a placeholder and both the real URL and the header the key
+        // travels in are assembled here — the one side that knows which account
+        // this task was leased against. Everything else uses the URL as built and a
+        // bearer: those hosts are the vendors' and are settled at compile time.
+        let custom = lease
+            .upstream_base
+            .as_deref()
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .map(|base| (base, lease.upstream_wire.unwrap_or_default()));
+        let url = match custom {
+            Some((base, wire)) => custom_url(base, wire, &req.upstream.url),
+            None => req.upstream.url.clone(),
+        };
+        let mut builder = http.request(method, &url);
+        // A subscription request rebuilds Claude Code's own header identity below,
+        // so the gateway's guesses at those names are dropped rather than sent
+        // alongside — `reqwest` appends, and two `anthropic-beta` headers is a
+        // shape no first-party client ever puts on the wire.
+        let claude_identity = is_claude(&provider) && custom.is_none();
+        for (k, v) in &req.upstream.headers {
+            if let Some(s) = v.as_str() {
+                if claude_identity && CLAUDE_IDENTITY_HEADERS.iter().any(|h| k.eq_ignore_ascii_case(h)) {
+                    continue;
+                }
+                builder = builder.header(k, s);
+            }
+        }
+        builder = match custom {
+            Some((_, wire)) => authorize_custom(builder, wire, &token, &req.upstream.headers),
+            None => builder.header("authorization", format!("Bearer {token}")),
+        };
+        let mut body = B64.decode(req.upstream.body_b64.as_bytes()).unwrap_or_default();
+        // The token we just injected is a Claude Code subscription credential.
+        // Anthropic decides "plan vs extra usage" from how much the request reads
+        // like the official CLI, so the whole fingerprint is built here, where the
+        // credential is known: without this the account answered 400
+        // "Third-party apps now draw from your extra usage, not your plan limits",
+        // which the gateway misread as a 429 and took the lane off the market
+        // (2026-08-23).
+        // Whether the fingerprint above actually went on. A body it could not parse
+        // is relayed as it arrived — the lane still has Claude Code's own traffic to
+        // serve, so this is not worth failing over — but that request is the one
+        // shape Anthropic bills to extra usage, and the 400 it earns costs the whole
+        // account a cooldown. Recording it is what tells the two cases apart after
+        // the fact: without this, "was it cloaked?" can only be guessed from the
+        // `system=NNNB` in the shape string.
+        let mut cloaked = false;
+        if is_claude(&provider) {
+            if let Some(patched) = with_claude_code_system(&body, &session_id) {
+                body = patched;
+                cloaked = true;
+            }
+            if claude_identity {
+                // Read off the *patched* body: the beta set is per-request — tools,
+                // thinking and the model all move it — so it can only be assembled
+                // once the body is final.
+                builder = builder.header("anthropic-beta", claude_code_betas(&body, true));
+                for (k, v) in claude_identity_headers(&session_id) {
+                    builder = builder.header(k, v);
+                }
+            }
+        }
+        // A custom endpoint may know this model by another name — an aggregator
+        // lists `anthropic/claude-haiku-4.5` for what the market trades as
+        // `claude-haiku-4-5`. The lane was declared, matched and metered under the
+        // market id, so only the outgoing body is rewritten, and only here: the
+        // account is what decides the spelling, and this is where the account is
+        // known.
+        if let Some(id) = lease.upstream_model.as_deref().filter(|s| !s.is_empty()) {
+            match with_model(&body, id) {
+                Some(patched) => body = patched,
+                // A body whose model could not be replaced would reach the upstream
+                // asking for an id it does not publish, and come back as a 400 that
+                // reads like a broken account. Failing here says what is wrong.
+                None => {
+                    tokens.report(&provider, &lease.account_id, &model, TaskOutcome::ServerError);
+                    send_error(out, &task_id, "UPSTREAM_5XX", "could not set the upstream model id", false);
+                    if let Some(r) = records {
+                        r.record(&task_id, &provider, &lease.account_id, &model, &Usage::default(), "model_rewrite_failed")
+                            .await;
+                    }
+                    return;
+                }
+            }
+        }
+        // Kimi Code identifies the calling installation, not just the calling
+        // product, and the device id is the one part of that identity the gateway
+        // cannot know — it belongs to this publisher. Same reasoning as the Claude
+        // block above: applied where the credential is, not where the body is built.
+        if provider == "kimi" {
+            builder = builder.header("x-msh-device-id", kimi_device_id(&lease.account_id));
+        }
+        // Codex's upstream authenticates the *pair*: the ChatGPT bearer and the
+        // account id it was issued for. With the bearer alone it answers 401 — which
+        // reads exactly like a revoked login, so the pool flags the account as
+        // needing a fresh sign-in and takes every one of its lanes off the market.
+        // The id belongs to the account, so like Kimi's device id it can only be
+        // filled in here, next to the token.
+        if provider == "codex" {
+            let resolved = lease
+                .upstream_account_id
+                .clone()
+                .filter(|s| !s.is_empty())
+                // Accounts connected before the id was being recorded have nothing
+                // stored, and asking their owner to sign in again to recover a value
+                // the token already carries is a poor trade — so read it back off
+                // the bearer instead. Same claim the CLI reads out of the id_token,
+                // and it is reissued with every refresh, so this keeps working.
+                .or_else(|| chatgpt_account_id(&token));
+            match resolved {
+                Some(acct) => builder = builder.header("chatgpt-account-id", acct),
+                // Neither source had it: say so, rather than send a request that can
+                // only 401 and then be misread as a revoked credential. Reconnecting
+                // the account through asale's own Codex login fills it in.
+                None => {
+                    tokens.report(&provider, &lease.account_id, &model, TaskOutcome::AuthFailed);
+                    send_error(
+                        out,
+                        &task_id,
+                        "TOKEN_EXPIRED",
+                        "codex account has no chatgpt-account-id; reconnect the account",
+                        // This account on this machine is misconfigured; every
+                        // other seller's is not. The gateway hands the buyer on.
+                        true,
+                    );
+                    if let Some(r) = records {
+                        r.record(&task_id, &provider, &lease.account_id, &model, &Usage::default(), "no_account_id").await;
+                    }
+                    return;
+                }
+            }
+        }
+        // Fingerprint what we are about to send, before the body is moved into the
+        // request. An upstream 4xx names the offending field ("System messages are
+        // not allowed") but never which item carried it, and the body itself must
+        // not be logged — it is the consumer's prompt. The shape is enough to tell a
+        // translator bug from a credential problem, and this is the only place it
+        // can be recorded: the gateway builds this body and never sees the
+        // rejection; this process sees the rejection and never kept the body.
+        let shape = body_shape(&body);
+        builder = builder.body(body);
+
+        let send = tokio::select! {
+            r = builder.send() => r,
+            // Cancelled before the upstream even answered: drop the request future
+            // and close the connection, which is what stops the generation.
+            _ = &mut cancel => {
+                tracing::info!(task = %task_id, "consumer left before the upstream answered; abandoning the call");
+                finish_canceled(tokens, records, &provider, &lease.account_id, &model, &task_id, &Usage::default()).await;
+                return;
+            }
+        };
+        let resp = match send {
+            Ok(r) => r,
+            Err(e) => {
+                tokens.report(&provider, &lease.account_id, &model, TaskOutcome::ServerError);
+                let failure = HeldFailure {
+                    code: "UPSTREAM_5XX",
+                    message: format!("upstream send: {e}"),
+                    detail: String::new(),
+                    retriable: true,
+                    record_status: "upstream_error".into(),
+                    account_id: lease.account_id.clone(),
+                };
+                // The upstream was never reached, so nothing has been streamed and
+                // another account on this device is free to try.
+                if failovers_left > 0 && tokens.has_alternate(&provider, &model, &lease.account_id) {
+                    failovers_left -= 1;
+                    held = Some(failure);
+                    continue;
+                }
+                failure.report(out, records, &task_id, &provider, &model).await;
+                return;
+            }
+        };
+
+        let status = resp.status().as_u16();
+
+        // Bank whatever the provider said about its own quota on the way past —
+        // including on the 429 that follows exhaustion, which is the reading the
+        // Limits page most wants and the one a later probe could no longer obtain.
+        if let Some(sink) = records {
+            let observed = quota_headers(&provider, resp.headers());
+            if !observed.is_empty() {
+                sink.observe_quota(&provider, &lease.account_id, &observed).await;
+            }
+        }
+
+        if status >= 400 {
+            let reset_at = retry_after_reset(&resp);
+            // The upstream's own words are the only way to tell a real quota
+            // exhaustion from a rejection wearing a 429 (Anthropic masks OAuth
+            // policy failures as `rate_limit_error`) — and, for the operator on the
+            // other end, the only way to tell "this seller's key is out of credit"
+            // from a bare `UPSTREAM_4XX`. Logged here and sent on as the error
+            // frame's `detail`, which the gateway records against the task and does
+            // not forward to the buyer.
+            //
+            // Read *before* the pool is told anything, because on a 403 the body is
+            // the only thing that says whether the credential or the machine was
+            // refused — see [`refusal_outcome`].
+            let detail = resp.text().await.unwrap_or_default();
+            // Pool feedback: 429 cools the account (honoring Retry-After), 5xx
+            // applies the transient cooldown, 401/403 flags the token (spec §4).
+            let outcome = match status {
+                429 => TaskOutcome::RateLimited { reset_at },
+                // Ahead of everything else 4xx: a model the upstream will not serve
+                // this account is the one 4xx that says something about the lane
+                // rather than about the request, and it takes the lane off the
+                // market. Ahead of the credential check in particular, because one
+                // vendor says it with a 403 and reading that as a bad credential
+                // would flag a key that is working fine.
+                s if unsupported_model(s, &detail) => TaskOutcome::Unsupported,
+                401 | 403 => refusal_outcome(status, &detail),
+                s if s >= 500 => TaskOutcome::ServerError,
+                // A 400 that is really "out of credit" — cools the account like the
+                // 429 it should have been. See [`quota_exhausted`].
+                s if quota_exhausted(s, &detail) => TaskOutcome::QuotaExhausted { reset_at },
+                _ => TaskOutcome::Success { tokens_used: 0 },
+            };
+            // What the gateway acts on is the code, not the status. A quota wall
+            // reported as a plain 4xx reads as the consumer's problem: the request
+            // dies here instead of moving to another seller, and this lane stays on
+            // the market until the client's own re-declaration catches up.
+            // `UPSTREAM_RATE_LIMIT` is retriable *and* pulls the supply entry
+            // (`Job::abandon`), which is the whole of what an exhausted account
+            // needs — see [`quota_exhausted`].
+            // A plain 429 is the same news as a quota wall and needs the same code:
+            // sent as `UPSTREAM_4XX` it read to the gateway as "the buyer's request
+            // was bad", so the lane kept its supply entry, walked back into rotation
+            // and 429'd again — each round counted as a plain failure against the
+            // device's reputation until it fell below the matching floor — and the
+            // buyer was handed `invalid_request_error` for what is a rate limit.
+            //
+            // Read off the *outcome*, not the status. Deciding by status made
+            // every 4xx the buyer's problem: a seller's expired key, a model
+            // that account does not publish, a machine the vendor refuses and an
+            // empty balance all arrived as a final `UPSTREAM_4XX`, so the
+            // gateway never spent a failover attempt on any of them. Over the
+            // seven days to 2026-08-25 that was 279 failed orders of which
+            // *every one* had exactly one attempt, and 264 of them were the
+            // lane's fault rather than the request's.
+            //
+            // The classification above already knows which is which. The three
+            // buckets are: the request is bad (nothing to gain by moving it),
+            // the lane is bad (move it, and hold the lane responsible), the
+            // upstream is having a moment (move it).
+            let (code, retriable) = match &outcome {
+                TaskOutcome::QuotaExhausted { .. } | TaskOutcome::RateLimited { .. } => {
+                    (protocol::codes::UPSTREAM_RATE_LIMIT, true)
+                }
+                TaskOutcome::AuthFailed => (protocol::codes::TOKEN_EXPIRED, true),
+                TaskOutcome::Unsupported | TaskOutcome::Blocked => (protocol::codes::LANE_UNUSABLE, true),
+                TaskOutcome::ServerError => (protocol::codes::UPSTREAM_5XX, true),
+                // The catch-all arm of the classification above: a 4xx nothing
+                // recognised. It is the one shape that fails identically at
+                // every seller, so it is the buyer's to fix and the only one
+                // that stops here.
+                TaskOutcome::Success { .. } => (protocol::codes::UPSTREAM_4XX, false),
+            };
+            // Whether the refusal belongs to this *account* rather than to the
+            // request. Only the former is worth handing to a second account: a
+            // malformed body is refused identically everywhere, and retrying it
+            // spends another seller's credit on the same 400. `Blocked` is left out
+            // from the other side — it is the machine that was refused, and every
+            // account here shares it.
+            let account_scoped = matches!(
+                &outcome,
+                TaskOutcome::QuotaExhausted { .. }
+                    | TaskOutcome::RateLimited { .. }
+                    | TaskOutcome::AuthFailed
+                    | TaskOutcome::Unsupported
+                    | TaskOutcome::ServerError
+            );
+            tokens.report(&provider, &lease.account_id, &model, outcome);
+            tracing::warn!(
+                task = %task_id, provider = %provider, model = %model, status, cloaked, sent = %shape,
+                "upstream rejected: {}", detail.chars().take(400).collect::<String>()
+            );
+            let failure = HeldFailure {
+                code,
+                message: format!("upstream {status}"),
+                detail,
+                retriable,
+                record_status: format!("upstream_{status}"),
+                account_id: lease.account_id.clone(),
+            };
+            // `tokens.report` above has already cooled the lane that failed, so the
+            // next lease skips it on its own — no exclusion list to thread through.
+            if account_scoped && failovers_left > 0 && tokens.has_alternate(&provider, &model, &lease.account_id) {
+                failovers_left -= 1;
+                held = Some(failure);
                 continue;
             }
-            builder = builder.header(k, s);
-        }
-    }
-    builder = match custom {
-        Some((_, wire)) => authorize_custom(builder, wire, &token, &req.upstream.headers),
-        None => builder.header("authorization", format!("Bearer {token}")),
-    };
-    let mut body = B64.decode(req.upstream.body_b64.as_bytes()).unwrap_or_default();
-    // The token we just injected is a Claude Code subscription credential.
-    // Anthropic decides "plan vs extra usage" from how much the request reads
-    // like the official CLI, so the whole fingerprint is built here, where the
-    // credential is known: without this the account answered 400
-    // "Third-party apps now draw from your extra usage, not your plan limits",
-    // which the gateway misread as a 429 and took the lane off the market
-    // (2026-08-23).
-    // Whether the fingerprint above actually went on. A body it could not parse
-    // is relayed as it arrived — the lane still has Claude Code's own traffic to
-    // serve, so this is not worth failing over — but that request is the one
-    // shape Anthropic bills to extra usage, and the 400 it earns costs the whole
-    // account a cooldown. Recording it is what tells the two cases apart after
-    // the fact: without this, "was it cloaked?" can only be guessed from the
-    // `system=NNNB` in the shape string.
-    let mut cloaked = false;
-    if is_claude(&provider) {
-        if let Some(patched) = with_claude_code_system(&body, &session_id) {
-            body = patched;
-            cloaked = true;
-        }
-        if claude_identity {
-            // Read off the *patched* body: the beta set is per-request — tools,
-            // thinking and the model all move it — so it can only be assembled
-            // once the body is final.
-            builder = builder.header("anthropic-beta", claude_code_betas(&body, true));
-            for (k, v) in claude_identity_headers(&session_id) {
-                builder = builder.header(k, v);
-            }
-        }
-    }
-    // A custom endpoint may know this model by another name — an aggregator
-    // lists `anthropic/claude-haiku-4.5` for what the market trades as
-    // `claude-haiku-4-5`. The lane was declared, matched and metered under the
-    // market id, so only the outgoing body is rewritten, and only here: the
-    // account is what decides the spelling, and this is where the account is
-    // known.
-    if let Some(id) = lease.upstream_model.as_deref().filter(|s| !s.is_empty()) {
-        match with_model(&body, id) {
-            Some(patched) => body = patched,
-            // A body whose model could not be replaced would reach the upstream
-            // asking for an id it does not publish, and come back as a 400 that
-            // reads like a broken account. Failing here says what is wrong.
-            None => {
-                tokens.report(&provider, &lease.account_id, &model, TaskOutcome::ServerError);
-                send_error(out, &task_id, "UPSTREAM_5XX", "could not set the upstream model id", false);
-                if let Some(r) = records {
-                    r.record(&task_id, &provider, &lease.account_id, &model, &Usage::default(), "model_rewrite_failed")
-                        .await;
-                }
-                return;
-            }
-        }
-    }
-    // Kimi Code identifies the calling installation, not just the calling
-    // product, and the device id is the one part of that identity the gateway
-    // cannot know — it belongs to this publisher. Same reasoning as the Claude
-    // block above: applied where the credential is, not where the body is built.
-    if provider == "kimi" {
-        builder = builder.header("x-msh-device-id", kimi_device_id(&lease.account_id));
-    }
-    // Codex's upstream authenticates the *pair*: the ChatGPT bearer and the
-    // account id it was issued for. With the bearer alone it answers 401 — which
-    // reads exactly like a revoked login, so the pool flags the account as
-    // needing a fresh sign-in and takes every one of its lanes off the market.
-    // The id belongs to the account, so like Kimi's device id it can only be
-    // filled in here, next to the token.
-    if provider == "codex" {
-        let resolved = lease
-            .upstream_account_id
-            .clone()
-            .filter(|s| !s.is_empty())
-            // Accounts connected before the id was being recorded have nothing
-            // stored, and asking their owner to sign in again to recover a value
-            // the token already carries is a poor trade — so read it back off
-            // the bearer instead. Same claim the CLI reads out of the id_token,
-            // and it is reissued with every refresh, so this keeps working.
-            .or_else(|| chatgpt_account_id(&token));
-        match resolved {
-            Some(acct) => builder = builder.header("chatgpt-account-id", acct),
-            // Neither source had it: say so, rather than send a request that can
-            // only 401 and then be misread as a revoked credential. Reconnecting
-            // the account through asale's own Codex login fills it in.
-            None => {
-                tokens.report(&provider, &lease.account_id, &model, TaskOutcome::AuthFailed);
-                send_error(
-                    out,
-                    &task_id,
-                    "TOKEN_EXPIRED",
-                    "codex account has no chatgpt-account-id; reconnect the account",
-                    false,
-                );
-                if let Some(r) = records {
-                    r.record(&task_id, &provider, &lease.account_id, &model, &Usage::default(), "no_account_id").await;
-                }
-                return;
-            }
-        }
-    }
-    // Fingerprint what we are about to send, before the body is moved into the
-    // request. An upstream 4xx names the offending field ("System messages are
-    // not allowed") but never which item carried it, and the body itself must
-    // not be logged — it is the consumer's prompt. The shape is enough to tell a
-    // translator bug from a credential problem, and this is the only place it
-    // can be recorded: the gateway builds this body and never sees the
-    // rejection; this process sees the rejection and never kept the body.
-    let shape = body_shape(&body);
-    builder = builder.body(body);
-
-    let send = tokio::select! {
-        r = builder.send() => r,
-        // Cancelled before the upstream even answered: drop the request future
-        // and close the connection, which is what stops the generation.
-        _ = &mut cancel => {
-            tracing::info!(task = %task_id, "consumer left before the upstream answered; abandoning the call");
-            finish_canceled(tokens, records, &provider, &lease.account_id, &model, &task_id, &Usage::default()).await;
+            failure.report(out, records, &task_id, &provider, &model).await;
             return;
         }
+        break (lease, resp, status);
     };
-    let resp = match send {
-        Ok(r) => r,
-        Err(e) => {
-            tokens.report(&provider, &lease.account_id, &model, TaskOutcome::ServerError);
-            send_error(out, &task_id, "UPSTREAM_5XX", &format!("upstream send: {e}"), true);
-            if let Some(r) = records {
-                r.record(&task_id, &provider, &lease.account_id, &model, &Usage::default(), "upstream_error").await;
-            }
-            return;
-        }
-    };
-
-    let status = resp.status().as_u16();
-
-    // Bank whatever the provider said about its own quota on the way past —
-    // including on the 429 that follows exhaustion, which is the reading the
-    // Limits page most wants and the one a later probe could no longer obtain.
-    if let Some(sink) = records {
-        let observed = quota_headers(&provider, resp.headers());
-        if !observed.is_empty() {
-            sink.observe_quota(&provider, &lease.account_id, &observed).await;
-        }
-    }
-
-    if status >= 400 {
-        let reset_at = retry_after_reset(&resp);
-        // The upstream's own words are the only way to tell a real quota
-        // exhaustion from a rejection wearing a 429 (Anthropic masks OAuth
-        // policy failures as `rate_limit_error`) — and, for the operator on the
-        // other end, the only way to tell "this seller's key is out of credit"
-        // from a bare `UPSTREAM_4XX`. Logged here and sent on as the error
-        // frame's `detail`, which the gateway records against the task and does
-        // not forward to the buyer.
-        //
-        // Read *before* the pool is told anything, because on a 403 the body is
-        // the only thing that says whether the credential or the machine was
-        // refused — see [`refusal_outcome`].
-        let detail = resp.text().await.unwrap_or_default();
-        // Pool feedback: 429 cools the account (honoring Retry-After), 5xx
-        // applies the transient cooldown, 401/403 flags the token (spec §4).
-        let outcome = match status {
-            429 => TaskOutcome::RateLimited { reset_at },
-            // Ahead of everything else 4xx: a model the upstream will not serve
-            // this account is the one 4xx that says something about the lane
-            // rather than about the request, and it takes the lane off the
-            // market. Ahead of the credential check in particular, because one
-            // vendor says it with a 403 and reading that as a bad credential
-            // would flag a key that is working fine.
-            s if unsupported_model(s, &detail) => TaskOutcome::Unsupported,
-            401 | 403 => refusal_outcome(status, &detail),
-            s if s >= 500 => TaskOutcome::ServerError,
-            // A 400 that is really "out of credit" — cools the account like the
-            // 429 it should have been. See [`quota_exhausted`].
-            s if quota_exhausted(s, &detail) => TaskOutcome::QuotaExhausted { reset_at },
-            _ => TaskOutcome::Success { tokens_used: 0 },
-        };
-        // What the gateway acts on is the code, not the status. A quota wall
-        // reported as a plain 4xx reads as the consumer's problem: the request
-        // dies here instead of moving to another seller, and this lane stays on
-        // the market until the client's own re-declaration catches up.
-        // `UPSTREAM_RATE_LIMIT` is retriable *and* pulls the supply entry
-        // (`Job::abandon`), which is the whole of what an exhausted account
-        // needs — see [`quota_exhausted`].
-        // A plain 429 is the same news as a quota wall and needs the same code:
-        // sent as `UPSTREAM_4XX` it read to the gateway as "the buyer's request
-        // was bad", so the lane kept its supply entry, walked back into rotation
-        // and 429'd again — each round counted as a plain failure against the
-        // device's reputation until it fell below the matching floor — and the
-        // buyer was handed `invalid_request_error` for what is a rate limit.
-        let (code, retriable) = match outcome {
-            TaskOutcome::QuotaExhausted { .. } | TaskOutcome::RateLimited { .. } => ("UPSTREAM_RATE_LIMIT", true),
-            _ if status >= 500 => ("UPSTREAM_5XX", true),
-            _ => ("UPSTREAM_4XX", false),
-        };
-        tokens.report(&provider, &lease.account_id, &model, outcome);
-        tracing::warn!(
-            task = %task_id, provider = %provider, model = %model, status, cloaked, sent = %shape,
-            "upstream rejected: {}", detail.chars().take(400).collect::<String>()
-        );
-        send_error_detail(out, &task_id, code, &format!("upstream {status}"), &detail, retriable);
-        if let Some(r) = records {
-            r.record(&task_id, &provider, &lease.account_id, &model, &Usage::default(), &format!("upstream_{status}")).await;
-        }
-        return;
-    }
 
     // A request the consumer did not ask to stream was answered by the upstream
     // with one JSON object, not an SSE stream. Framing it as `stream_chunk`s
@@ -1781,6 +1890,37 @@ fn merge_usage(usage: &mut Usage, v: &serde_json::Value) {
     usage.cache_write_tokens = m.cache_write;
 }
 
+/// A failed attempt held back while another local account is tried.
+///
+/// Reporting is deferred rather than duplicated because the buyer must hear
+/// exactly one error, and which one depends on something not yet known when the
+/// failure happens: whether this device has another account that can serve the
+/// lane. See the failover loop in [`execute`].
+struct HeldFailure {
+    code: &'static str,
+    message: String,
+    detail: String,
+    retriable: bool,
+    record_status: String,
+    account_id: String,
+}
+
+impl HeldFailure {
+    async fn report(
+        self,
+        out: &mpsc::UnboundedSender<Envelope>,
+        records: Option<&dyn RecordSink>,
+        task_id: &str,
+        provider: &str,
+        model: &str,
+    ) {
+        send_error_detail(out, task_id, self.code, &self.message, &self.detail, self.retriable);
+        if let Some(r) = records {
+            r.record(task_id, provider, &self.account_id, model, &Usage::default(), &self.record_status).await;
+        }
+    }
+}
+
 fn send_error(out: &mpsc::UnboundedSender<Envelope>, task_id: &str, code: &str, message: &str, retriable: bool) {
     send_error_detail(out, task_id, code, message, "", retriable);
 }
@@ -2516,6 +2656,98 @@ data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\"
         }
     }
 
+    /// Two accounts on one device, the first out of credit.
+    ///
+    /// `acquire` hands out whichever accounts have not been reported as failed
+    /// yet — the pool's cooldown, in miniature.
+    struct TwoAccounts {
+        failed: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    impl TwoAccounts {
+        fn next(&self) -> Option<String> {
+            let failed = self.failed.lock().unwrap();
+            ["acc-broke", "acc-funded"].iter().find(|a| !failed.iter().any(|f| f == *a)).map(|a| a.to_string())
+        }
+    }
+    impl TokenProvider for TwoAccounts {
+        fn token_for(&self, _p: &str) -> Option<String> {
+            Some("k".into())
+        }
+        fn acquire(&self, _provider: &str, _model: &str) -> Option<LeasedToken> {
+            self.next().map(|account_id| LeasedToken { token: "k".into(), account_id, ..Default::default() })
+        }
+        fn has_alternate(&self, _p: &str, _m: &str, except: &str) -> bool {
+            self.next().is_some_and(|a| a != except)
+        }
+        fn report(&self, _p: &str, account_id: &str, _m: &str, outcome: TaskOutcome) {
+            if !matches!(outcome, TaskOutcome::Success { .. }) {
+                self.failed.lock().unwrap().push(account_id.to_string());
+            }
+        }
+    }
+
+    /// An upstream that refuses the first caller and serves the second — one
+    /// device's empty aggregator key sitting next to a funded one.
+    async fn spawn_http_seq(responses: Vec<&'static str>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            for response in responses {
+                let Ok((mut sock, _)) = listener.accept().await else { return };
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock.write_all(response.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        format!("http://127.0.0.1:{port}/")
+    }
+
+    /// A device selling one model through several accounts is a *single* lane
+    /// to the market (`{device}|{provider}`), so the gateway's failover ladder
+    /// excludes all of them together when one fails. Falling through to the
+    /// next account is therefore something only this side can do — and until it
+    /// did, one empty key took down every account beside it.
+    #[tokio::test]
+    async fn an_out_of_credit_account_falls_through_to_the_next_one() {
+        let url = spawn_http_seq(vec![
+            "HTTP/1.1 402 Payment Required\r\nContent-Type: application/json\r\nContent-Length: 57\r\nConnection: close\r\n\r\n{\"error\":{\"message\":\"This request requires more credits\"}}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 16\r\nConnection: close\r\n\r\n{\"content\":[]}\u{20}\u{20}",
+        ])
+        .await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let failed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tok = TwoAccounts { failed: failed.clone() };
+        execute(&crate::http::plain(), &tok, req(&url, "custom", 0), &tx, None, &test_verifier(), never_canceled()).await;
+
+        let frames = drain(&mut rx);
+        assert!(
+            frames.iter().all(|f| f.msg_type != protocol::T_ERROR),
+            "the buyer must not hear about a failure another account absorbed"
+        );
+        assert_eq!(failed.lock().unwrap().as_slice(), ["acc-broke"], "and only the empty key is penalised");
+    }
+
+    /// The other half of the same rule: a malformed request fails the same way
+    /// at every account, so it stops at the first one instead of spending a
+    /// second seller's credit to be told the same thing.
+    #[tokio::test]
+    async fn a_bad_request_is_not_retried_against_another_account() {
+        let url = spawn_http_seq(vec![
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 55\r\nConnection: close\r\n\r\n{\"error\":{\"message\":\"messages.2: tool_use ids were\"}}",
+        ])
+        .await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let failed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tok = TwoAccounts { failed: failed.clone() };
+        execute(&crate::http::plain(), &tok, req(&url, "custom", 0), &tx, None, &test_verifier(), never_canceled()).await;
+
+        let frames = drain(&mut rx);
+        let e = frames.iter().find(|f| f.msg_type == protocol::T_ERROR).unwrap();
+        assert_eq!(e.payload["code"], "UPSTREAM_4XX");
+        assert!(failed.lock().unwrap().is_empty(), "a bad request is nobody's account's fault");
+    }
+
     #[tokio::test]
     async fn rate_limit_reports_pool_outcome_with_reset() {
         let url = spawn_http(
@@ -3152,7 +3384,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
             .await;
         let frames = drain(&mut rx);
         assert_eq!(frames[0].payload["code"], "TOKEN_EXPIRED");
-        assert_eq!(frames[0].payload["retriable"], false);
+        assert_eq!(frames[0].payload["retriable"], true, "one machine's missing config is not the buyer's failure");
         assert!(frames[0].payload["message"].as_str().unwrap().contains("chatgpt-account-id"));
     }
 
@@ -3175,7 +3407,29 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
         assert!(quota_exhausted(400, body));
         // Ordinary 400s stay the consumer's problem.
         assert!(!quota_exhausted(400, r#"{"error":{"message":"max_tokens: 99999 > 32000"}}"#));
-        assert!(!quota_exhausted(429, body));
+    }
+
+    /// The same wall, in the other vocabularies sellers actually hit. Each of
+    /// these was reaching the buyer as `UPSTREAM_4XX` — "your request was
+    /// bad" — while the lane stayed advertised and kept winning matches.
+    #[test]
+    fn an_empty_aggregator_balance_is_the_same_wall() {
+        assert!(quota_exhausted(
+            400,
+            r#"{"error":{"message":"credit insufficient balance: balance=1010857 required=1227326","code":"insufficient_user_quota"}}"#
+        ));
+        assert!(quota_exhausted(
+            402,
+            r#"{"error":{"message":"This request requires more credits, or fewer max_tokens.","code":402}}"#
+        ));
+        assert!(quota_exhausted(
+            402,
+            r#"{"error":{"message":"This request would exceed your available credits given your current in-flight requests."}}"#
+        ));
+        // Still not every 4xx: a malformed request is the buyer's to fix, and
+        // cooling the seller for it takes a working lane off the market.
+        assert!(!quota_exhausted(400, r#"{"error":{"message":"messages.2: tool_use ids were found"}}"#));
+        assert!(!quota_exhausted(404, r#"{"error":{"message":"No endpoints found for openai/gpt-5.2-chat."}}"#));
     }
 
     #[tokio::test]

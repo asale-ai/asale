@@ -179,6 +179,16 @@ pub mod codes {
     pub const BUDGET_EXCEEDED: &str = "BUDGET_EXCEEDED";
     pub const CHUNK_GAP: &str = "CHUNK_GAP";
     pub const INTERNAL: &str = "INTERNAL";
+    /// The lane cannot serve this request, but another one can: the upstream
+    /// does not publish this model to that account, or it refused the machine
+    /// the account is running on (a region block, a middlebox).
+    ///
+    /// Its own code because the alternatives both lie. `UPSTREAM_4XX` says the
+    /// buyer's request was bad — which strands them on a seller whose problem
+    /// they cannot fix — and `TOKEN_EXPIRED` sends the seller to re-authenticate
+    /// a credential that is working. Retriable, and a fault of the lane: the
+    /// gateway transfers the request and penalises the lane it left.
+    pub const LANE_UNUSABLE: &str = "LANE_UNUSABLE";
     /// The publisher's WS session went away with this task still in flight.
     ///
     /// Only ever produced by the gateway, never sent by a publisher — a client that
@@ -189,6 +199,47 @@ pub mod codes {
     /// The publisher's session is alive but it has produced no frame for this task
     /// for longer than the gateway is willing to wait. Also gateway-only.
     pub const PUBLISHER_STALLED: &str = "PUBLISHER_STALLED";
+}
+
+/// Whether a 4xx from a provider means "this account cannot pay for the call"
+/// rather than "this request was bad".
+///
+/// Every vendor spells it in a different code, and mostly not the one HTTP
+/// reserved for it: Anthropic hides a subscription wall behind a `400` whose
+/// body mentions extra usage, OpenAI-compatible aggregators answer `400`
+/// `insufficient_user_quota`, OpenRouter answers `402` with a link to its
+/// top-up page. Read as an ordinary bad request they all point at the buyer —
+/// the lane keeps its supply entry, wins the next match and fails it again.
+/// On 2026-08-25, 179 of one device's 220 failures over two days were a single
+/// aggregator key with an empty balance, each one a buyer's request lost.
+///
+/// Lives here because both ends have to agree: the publisher cools the account
+/// on it, and the gateway re-reads the frame so sellers still on an older
+/// client are covered too.
+pub fn is_out_of_credit(status: u16, body: &str) -> bool {
+    // The one status that means exactly this and nothing else.
+    if status == 402 {
+        return true;
+    }
+    if !(400..500).contains(&status) {
+        return false;
+    }
+    let body = body.to_ascii_lowercase();
+    [
+        // Anthropic, on a subscription whose plan allowance is spent.
+        "draw from your extra usage",
+        // OpenAI-compatible aggregators (Model Studio, 302, and friends).
+        "insufficient_user_quota",
+        "insufficient balance",
+        // OpenAI's own name for it.
+        "insufficient_quota",
+        "exceeded your current quota",
+        // OpenRouter.
+        "add more credits",
+        "add credits",
+    ]
+    .iter()
+    .any(|needle| body.contains(needle))
 }
 
 /// Whether an error code is retriable (drives failure transfer).
@@ -205,5 +256,16 @@ pub fn is_retriable(code: &str) -> bool {
             // the request itself is bad.
             | codes::PUBLISHER_GONE
             | codes::PUBLISHER_STALLED
+            // Nothing about it says the request is bad — only that this lane
+            // is the wrong one to ask.
+            | codes::LANE_UNUSABLE
+            // A publisher that cannot verify the grant it was handed is one
+            // whose own machine is misconfigured — no quota public key injected,
+            // or a clock far enough off that a valid grant reads as expired. It
+            // refuses *every* task dispatched to it, so leaving the buyer on it
+            // fails a request the seller next door would have served. If the
+            // fault is really ours (a broken signing seed), the next seller
+            // refuses it the same way and the attempt budget ends the search.
+            | codes::QUOTA_SIG_INVALID
     )
 }

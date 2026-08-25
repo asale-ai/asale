@@ -1238,6 +1238,10 @@ impl TokenProvider for PoolTokens {
         crate::session::claude_session_for(account_id)
     }
 
+    fn has_alternate(&self, provider: &str, model: &str, except: &str) -> bool {
+        self.pool.lock().is_ok_and(|pool| pool.alternate_available(provider, model, except, now_secs()))
+    }
+
     fn acquire(&self, provider: &str, model: &str) -> Option<LeasedToken> {
         // Sale traffic may only ever be served by an account the user switched
         // on for selling, on a lane that is not cooling or paused —
@@ -1312,8 +1316,16 @@ impl TokenProvider for PoolTokens {
                 // The pool treats it as the rate limit it is; the operator is
                 // told what it actually is, because waiting this one out does
                 // nothing — the allowance only comes back if they top it up.
+                // Which top-up depends on whose allowance ran out: a Claude
+                // subscription has one page, a resold API key has whatever its
+                // vendor's is, and naming Anthropic's to the operator of an
+                // empty OpenRouter key sends them to the wrong wallet.
                 TaskOutcome::QuotaExhausted { reset_at } => {
-                    let d = "extra usage exhausted — top up at claude.ai/settings/usage";
+                    let d = if asale_protocol::ids::is_claude_family(provider) {
+                        "extra usage exhausted — top up at claude.ai/settings/usage"
+                    } else {
+                        "upstream credit exhausted — top up this account with its provider"
+                    };
                     (pool.on_error(provider, account_id, model, UpstreamErrorKind::RateLimited { reset_at }, d, now), d.to_string())
                 }
                 TaskOutcome::Blocked => {
