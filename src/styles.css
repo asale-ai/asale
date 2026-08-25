@@ -2674,7 +2674,36 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .fw-mode-hint { font-size: var(--fs-meta); }
 .fw-scanner-desc { font-size: var(--fs-meta); margin-top: var(--s2); line-height: 1.5; }
 .fw-verdict { display: flex; flex-direction: column; gap: var(--s8); margin-top: var(--s12); }
-.fw-findings { display: flex; flex-direction: column; gap: var(--s4); margin-top: var(--s6); }
-/* The rule id is the actionable half — it is what a suppression names — so it
-   keeps the mono face while the sentence beside it stays quiet. */
-.fw-finding { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--s8); font-size: var(--fs-meta); }
+.fw-findings { display: flex; flex-direction: column; gap: var(--s8); margin-top: var(--s6); }
+/* A finding is three lines: what it was, what matched, and the text around it.
+   The middle line is the one somebody came here to read, so it gets the surface
+   and the full width; the head line above it stays meta-sized. */
+.fw-finding { font-size: var(--fs-meta); }
+.fw-f-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--s8); }
+.fw-f-src { margin-left: auto; }
+.fw-f-match,
+.fw-f-ctx {
+  margin-top: var(--s4);
+  padding: var(--s6) var(--s8);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  font-size: var(--fs-micro);
+  line-height: 1.5;
+  /* Long URLs and one-line commands: scroll the block, never the page. */
+  overflow-x: auto;
+  white-space: pre;
+}
+.fw-f-ctx { background: transparent; padding: 0 var(--s8); }
+/* A count on a tab — how much is waiting in "recent decisions". Its own class
+   rather than a pill: a pill on a tab is a notification badge, and this is a
+   quantity you may well already have read. */
+.tabs button .tab-count {
+  margin-left: var(--s2);
+  padding: 0 var(--s6);
+  border-radius: var(--r-2xs);
+  background: var(--surface-2);
+  color: var(--fg-3);
+  font-size: var(--fs-micro);
+}
+.tabs button.active .tab-count { color: var(--fg-2); }
+.fw-more { margin-top: var(--s8); }

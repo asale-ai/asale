@@ -947,6 +947,12 @@ export interface FirewallState {
   policy: FirewallPolicy;
   tools: FirewallTool[];
   scanners: FirewallScannerInfo[];
+  /** Scratchpad placeholders, keyed by input kind and then by UI language.
+   *  Served rather than written here because they are payloads, not copy: the
+   *  daemon has a test that every one of them, in every language, still trips
+   *  the firewall. Kinds with only one spelling (a shell command, an address)
+   *  answer the same text for every language. */
+  try_samples: Record<string, Record<string, string>>;
   log_path: string;
 }
 export type FirewallDecision = "allow" | "warn" | "block";
@@ -958,8 +964,13 @@ export interface FirewallFinding {
   title: string;
   severity: FirewallSeverity;
   detail: string;
-  /** The match, already masked by the daemon. Never a raw secret. */
+  /** What matched: masked for a credential, verbatim for everything else —
+   *  a masked injection payload says a rule fired and nothing more. */
   sample: string;
+  /** One line of the surrounding text, with any credential in it masked. */
+  evidence: string;
+  /** Which turn it came out of: `tool result #4`, `tool call: bash`, `answer`. */
+  source: string;
 }
 export interface FirewallVerdict {
   decision: FirewallDecision;

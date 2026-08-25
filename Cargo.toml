@@ -15,7 +15,7 @@ resolver = "2"
 members = ["protocol", "core", "daemon", "cli", "src-tauri"]
 
 [workspace.package]
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 
 [workspace.dependencies]
@@ -39,7 +39,7 @@ token-meter = "0.1.0"
 # `token-meter` is a version dependency (the build host receives this repository
 # and nothing beside it) is satisfied by a git URL just as well. Pinned to a tag
 # so a build is reproducible; bump it deliberately.
-agent-firewall = { git = "https://github.com/asale-ai/agent-firewall", tag = "v0.2.0", default-features = false }
+agent-firewall = { git = "https://github.com/asale-ai/agent-firewall", tag = "v0.4.0", default-features = false }
 
 anyhow = "1"
 async-trait = "0.1"
