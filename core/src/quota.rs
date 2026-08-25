@@ -1,28 +1,29 @@
 //! Turning a provider's *own* rate-limit windows into a sell-side gate.
 //!
-//! [`crate::discovery::estimate_quota_window`] answers the same question from
-//! the other end — a guessed plan cap minus what this device sold — and it is
-//! wrong in both directions at once. It counts only asale's own sales, so the
-//! operator's Claude Code session is invisible to it; and its cap is a guess
-//! that falls back to the lowest paid tier whenever the login response carries
-//! no plan, which for Claude's OAuth exchange is always. A Max subscription
-//! therefore sells 220k tokens and then declares itself spent for five hours,
-//! while the real window sits at 3%.
+//! This used to be one of two answers. The other one — a guessed plan cap minus
+//! what this device had sold — is gone (see
+//! [`crate::discovery::plan_window_cap`]): it counted only asale's own sales, so
+//! the operator's own Claude Code session was invisible to it, and its cap fell
+//! back to the lowest paid tier whenever the login carried no plan, which for
+//! Claude's OAuth exchange is always. It took live subscriptions off the market
+//! for windows it had invented.
 //!
-//! The providers publish the true number: Claude answers `oauth/usage` with a
-//! utilisation percentage and a reset instant per window, and Codex rides the
-//! same figures back on `x-codex-*` response headers. Both are normalised into
-//! one shape (`{key, label, used_percent, reset_at, window_seconds}`) by
-//! `commands::usage`, banked in the local store, and read back here.
+//! What is left here reads only what the provider itself publishes: Claude
+//! answers `oauth/usage` with a utilisation percentage and a reset instant per
+//! window, and Codex rides the same figures back on `x-codex-*` response
+//! headers. Both are normalised into one shape (`{key, label, used_percent,
+//! reset_at, window_seconds}`) by `commands::usage`, banked in the local store,
+//! and read back here.
 //!
-//! # Why a fraction and not a token count
+//! # What this gate may and may not do
 //!
-//! The upstreams report utilisation, never tokens, so the gate is a fraction of
-//! the subscription rather than an absolute headroom. The plan cap is still
-//! what converts it into the `window_remaining` the market is told about — but
-//! it has stopped deciding *whether* the lane sells, which is the decision it
-//! was getting wrong. A cap that is off by 10× now misstates the size of the
-//! offer; it no longer takes the offer off the market.
+//! It may take a lane off the market for a **model-scoped** window the vendor
+//! says is spent (below), and it may name the instant a spent window returns.
+//! It does **not** turn a percentage into a token headroom any more: no local
+//! arithmetic decides that a subscription is finished. That verdict belongs to
+//! the upstream, and it delivers it as a 429 —
+//! `pool::AccountPool::on_error` cools the account until the reset the upstream
+//! itself names.
 //!
 //! # Model-scoped windows
 //!
@@ -204,22 +205,6 @@ pub fn gate_from_windows(windows: &[Value], now: i64) -> Option<QuotaGate> {
     })
 }
 
-/// Serviceable tokens implied by the gate, given the plan's cap and what this
-/// device has sold since the reading was taken.
-///
-/// The subtraction is what makes a banked reading safe to keep using: the
-/// provider's number was true `at` its measurement, and every token this device
-/// has sold since is not in it yet. Without that, a snapshot taken at 90% would
-/// keep declaring 10% of a subscription that has since been sold out from under
-/// it — and the market would keep routing work to a lane whose upstream now
-/// answers 429.
-pub fn serviceable_tokens(gate: &QuotaGate, plan_cap: u64, sold_since_reading: u64) -> u64 {
-    // Rounded, not truncated: the utilisation arrives as a percentage, so
-    // `1 − 0.54` is 0.45999999999999996 and a cast would quietly shave a token
-    // off every figure this produces.
-    ((plan_cap as f64 * gate.headroom).round() as u64).saturating_sub(sold_since_reading)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,16 +313,5 @@ mod tests {
         assert_eq!(parse_reset_at(&json!(1_786_951_199_i64)), Some(1_786_951_199));
         assert_eq!(parse_reset_at(&json!(0)), None);
         assert_eq!(parse_reset_at(&Value::Null), None);
-    }
-
-    /// The reading ages against this device's own sales, so a snapshot cannot
-    /// keep offering capacity that has been sold since it was taken.
-    #[test]
-    fn tokens_are_measured_from_the_reading_and_decay_with_local_sales() {
-        let g = gate_from_windows(&claude_windows(50.0, 10.0), NOW).unwrap();
-        assert_eq!(serviceable_tokens(&g, 2_200_000, 0), 1_100_000);
-        assert_eq!(serviceable_tokens(&g, 2_200_000, 100_000), 1_000_000);
-        // And never wraps when this device has outsold the reading.
-        assert_eq!(serviceable_tokens(&g, 2_200_000, 9_000_000), 0);
     }
 }

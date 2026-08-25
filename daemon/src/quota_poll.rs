@@ -1,13 +1,21 @@
-//! Keeping the sell-side gate fed with the provider's own rate-limit numbers.
+//! Keeping the client fed with each provider's own rate-limit numbers.
 //!
-//! Before this loop existed the readings were pulled only by the Limits page,
-//! which meant a device that sells around the clock and is never looked at had
-//! no reading at all — and the gate fell back to
-//! [`asale_client_core::discovery::estimate_quota_window`], a guessed plan cap
-//! minus this device's own sales. On a Claude login (whose OAuth exchange
-//! carries no plan, so the cap lands on the lowest paid tier) that stopped a
-//! live subscription after ~220k tokens and left it "spent" for five hours
-//! while the real five-hour window sat at 3%.
+//! These readings used to be a *gate*: `plan cap × headroom − local sales` gave
+//! a token headroom, and an account that ran past it left the market until the
+//! next sweep. That arithmetic is gone (`discovery::plan_window_cap`) — nothing
+//! local decides that a subscription is spent any more, because nothing local
+//! can know. What the readings are still for:
+//!
+//!   * **Model-scoped windows** — Anthropic meters Opus (and friends) on their
+//!     own weekly window. When the vendor says one is spent, that model's lane
+//!     comes off and the rest of the subscription keeps selling
+//!     (`publisher::rebuild_pool`, `quota::ScopeBlock`).
+//!   * **The Sell and Limits pages** — the utilisation bars are the provider's
+//!     own percentages or they are nothing at all.
+//!
+//! An account-wide stop is the upstream's to declare, and it declares it with a
+//! 429: `AccountPool::on_error` cools the account until the reset the upstream
+//! itself names.
 //!
 //! # What is polled, and what is not
 //!
@@ -27,25 +35,24 @@
 //!     `x-ratelimit-*` block on responses it is already serving. Those are
 //!     banked as they arrive and nothing is polled, because there is nothing to
 //!     poll. An xAI account that has never sold anything has no reading, and
-//!     the gate falls back to the local estimate exactly as it did before.
+//!     its pages simply say so.
 //!
 //! An idle Codex window does not move on its own, but the account behind it is
 //! not this device's alone: the operator's own Codex CLI spends the same
 //! subscription, and nothing tells us when it does. So a reading that has gone
 //! [`usage::CODEX_SNAPSHOT_TTL`] without being refreshed by a sale is bought
-//! rather than left to expire — otherwise the gate falls off the provider's own
-//! number back onto the local estimate (this device's sales against a guessed
-//! plan cap), which is the reading that was wrong in the first place. The cost
-//! is one near-empty request per ten minutes per idle selling account, and a
-//! busy one never pays it.
+//! rather than left to expire, so the page has a current number to show instead
+//! of an ageing one. The cost is one near-empty request per ten minutes per idle
+//! selling account, and a busy one never pays it.
 //!
 //! # Per account, never per family
 //!
 //! [`commands::usage::live_windows`] stops at the first account that answers,
-//! because the page shows one row per provider. The gate cannot: two Claude
-//! logins may be two different subscriptions, and letting one account's reading
-//! decide another's would take a healthy subscription off the market because a
-//! different one is spent. So every sell-enabled account is asked for itself.
+//! because the page shows one row per provider. The scope blocks cannot: two
+//! Claude logins may be two different subscriptions, and letting one account's
+//! reading decide another's would take a healthy Opus lane off the market
+//! because a different subscription spent its weekly window. So every
+//! sell-enabled account is asked for itself.
 
 use crate::commands::usage::{self, account_quota_gate, record_quota_windows};
 use crate::keychain;

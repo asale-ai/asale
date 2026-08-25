@@ -121,13 +121,6 @@ const countdown = (until: number, now: number) => {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 };
 
-/** "15:19" in the operator's own timezone.
- *
- *  A subscription window resets hours out, where `countdown` above would say
- *  "241m 30s" — technically the same fact and useless for planning a day. */
-const fmtClock = (ts: number) =>
-  new Date(ts * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-
 /** Stable per-account key — a provider can hold several accounts. */
 const keyOf = (a: { provider: string; account_id: string }) => `${a.provider}:${a.account_id}`;
 
@@ -1835,21 +1828,17 @@ export function Publish() {
             {accounts.map((a) => {
               const k = keyOf(a);
               const limit = a.sell_daily_limit;
-              // What actually stops this account is the plan's 5h rolling
-              // window, so that is the bar: today's tokens against a
-              // daily-equivalent that no upstream enforces only ever read as a
-              // limit that isn't there. A metered key has no window at all —
-              // its bar is the operator's own daily cap, or nothing.
-              const windowed = !a.key_based && a.window_cap > 0;
-              const used = windowed ? a.used_window : a.used_today;
-              const denom = windowed ? a.window_cap : limit;
-              // The provider's own reading, when there is a recent one. It is
-              // what actually gates the lanes (see `publisher::rebuild_pool`),
-              // so the bar has to be it too: a local count against a guessed
-              // cap reads 100% on a Claude subscription that is 3% spent, and a
-              // page saying "spent" over lanes that are selling is worse than
-              // no page at all.
-              const upstream = windowed && a.window_source === "upstream" && a.window_used_percent != null;
+              // The provider's own utilisation, when it publishes one. There is
+              // no second bar any more: a local count against a guessed plan cap
+              // read 100% on a Claude subscription that was 3% spent, and a page
+              // saying "spent" over lanes that are selling is worse than no page
+              // at all. Without an upstream reading the bar falls back to the one
+              // local number that is real — what this account sold today against
+              // the operator's own daily cap — and to nothing at all when they
+              // have not set one.
+              const upstream = !a.key_based && a.window_used_percent != null;
+              const used = a.used_today;
+              const denom = limit;
               const pct = upstream
                 ? (a.window_used_percent as number)
                 : denom > 0 ? (used / denom) * 100 : 0;
@@ -1872,11 +1861,12 @@ export function Publish() {
               // to the market. Named `slots` here because `lanes` in this scope
               // is already the account's (account, model) rows.
               const slots = slotsOf(a);
-              // The daily cap is spent: `rebuild_pool` has already clamped this
-              // account's quota to zero, so every one of its models is off the
+              // The daily cap is spent: `rebuild_pool` has already zeroed this
+              // account's remaining cap, so every one of its models is off the
               // market until the UTC rollover. That is a whole-subscription
               // stop, and it earns a line of its own rather than being left to
-              // be inferred from an `exhausted` pill.
+              // be inferred from an `exhausted` pill. It is also the *only*
+              // local rule that can stop an account now.
               const capSpent = limit > 0 && a.used_today >= limit;
               return (
                 <div key={k} className={`acct ${a.sell_enabled ? "selling" : ""}`}>
@@ -1957,7 +1947,7 @@ export function Publish() {
                       <span>
                         {upstream
                           ? t("publish.windowUpstream", { window: a.window_key ?? "" })
-                          : windowed ? t("publish.windowUsed") : t("publish.limitUsedToday")}
+                          : t("publish.limitUsedToday")}
                         {/* Whose number this is, and how old. A reading from the
                             vendor is worth saying out loud — it is the one that
                             decides whether these lanes sell. */}
@@ -2216,24 +2206,11 @@ export function Publish() {
                         <span className="fact-k">{t("publish.usedTodayFact")}</span>
                         <span className="fact-v mono">{fmtTokens(a.used_today)}</span>
                       </div>
-                      {windowed && (
-                        <div className="fact">
-                          <span className="fact-k">
-                            {upstream ? t("publish.quotaLeftLive") : t("publish.quotaLeft")}
-                          </span>
-                          <span className="fact-v mono">{fmtTokens(a.quota_remaining)}</span>
-                        </div>
-                      )}
-                      {/* A spent window with a reset the vendor named. Worth its
-                          own row: "exhausted" with no clock is the state an
-                          operator goes looking through logs to explain, and the
-                          rolling local estimate never had an instant to give. */}
-                      {a.quota_reset_at != null && a.quota_reset_at > now && (
-                        <div className="fact">
-                          <span className="fact-k">{t("publish.quotaResetAt")}</span>
-                          <span className="fact-v mono">{fmtClock(a.quota_reset_at)}</span>
-                        </div>
-                      )}
+                      {/* No "quota left" row. The only honest answer to how much
+                          a subscription has left is the provider's own
+                          percentage, which is the bar above; the token figure
+                          that used to sit here was `guessed cap − what we sold`,
+                          and it was wrong by an order of magnitude. */}
                     </div>
                   </div>
 

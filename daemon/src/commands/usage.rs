@@ -11,10 +11,6 @@ use super::server_client::authed;
 use super::{R, day_start_ts, day_str, err, now_secs};
 use crate::cmd_err;
 
-/// Rolling window used for the subscription capacity estimate (5h, mirrors
-/// `publisher::WINDOW_SECS`).
-pub(crate) const WINDOW_SECS: i64 = 5 * 3600;
-
 /// What the account *sold* over a period (day / week / month / all): tokens,
 /// earnings and call count, for the tray, the dashboard tile and the share card.
 ///
@@ -222,13 +218,13 @@ pub async fn usage_overview(state: &AppState, period: String, scope: String) -> 
     }))
 }
 
-/// Per-provider subscription capacity summed across connected accounts:
-/// `provider -> (window_cap tokens over 5h, account count, representative plan)`.
-pub(crate) async fn provider_caps(state: &AppState) -> R<std::collections::HashMap<String, (u64, i64, Option<String>)>> {
+/// What is connected per provider: `provider -> (account count, representative
+/// plan)`. The plan is a label for the card; nothing is sized against it here.
+pub(crate) async fn provider_caps(state: &AppState) -> R<std::collections::HashMap<String, (i64, Option<String>)>> {
     let tools = state.store.list_tools().await.map_err(err)?;
-    let mut caps: std::collections::HashMap<String, (u64, i64, Option<String>)> = std::collections::HashMap::new();
+    let mut caps: std::collections::HashMap<String, (i64, Option<String>)> = std::collections::HashMap::new();
     for tool in &tools {
-        let Some(prov) = Provider::from_str_opt(&tool.provider) else { continue };
+        if Provider::from_str_opt(&tool.provider).is_none() { continue }
         // Prefer the plan captured at OAuth/import time, else the tools column.
         let plan = state
             .store
@@ -238,12 +234,10 @@ pub(crate) async fn provider_caps(state: &AppState) -> R<std::collections::HashM
             .flatten()
             .filter(|s| !s.is_empty())
             .or_else(|| tool.plan.clone());
-        let cap = discovery::plan_window_cap(prov, plan.as_deref());
-        let entry = caps.entry(tool.provider.clone()).or_insert((0, 0, None));
-        entry.0 += cap;
-        entry.1 += 1;
-        if entry.2.is_none() {
-            entry.2 = plan;
+        let entry = caps.entry(tool.provider.clone()).or_insert((0, None));
+        entry.0 += 1;
+        if entry.1.is_none() {
+            entry.1 = plan;
         }
     }
     Ok(caps)
@@ -270,33 +264,31 @@ pub async fn usage_limits(state: &AppState, force: Option<bool>) -> R<Value> {
     let tools = state.store.list_tools().await.map_err(err)?;
     let mut providers = Vec::new();
     for provider in asale_protocol::ids::subscribable_providers().iter().map(|p| p.as_str()) {
-        let (window_cap, accounts, plan) = caps.get(provider).cloned().unwrap_or((0, 0, None));
+        let (accounts, plan) = caps.get(provider).cloned().unwrap_or((0, None));
         if accounts == 0 {
             providers.push(json!({ "id": provider, "connected": false }));
             continue;
         }
 
-        // Prefer the provider's *real* rate-limit windows. Fall back to the
-        // local served-vs-cap estimate.
+        // The provider's *real* rate-limit windows, or none at all.
+        //
+        // There used to be a fallback here: this device's own sales against a
+        // guessed plan cap, drawn in the same bars under an "estimate" chip. It
+        // was the same invented number that used to gate the lanes, and it read
+        // 100% over subscriptions that were nowhere near spent. A card that says
+        // "the vendor publishes nothing here" is the honest version.
         //
         // `stale_reason` and `fallback_reason` are different answers to
         // different questions and must not be collapsed: the first says why a
         // real reading could not be refreshed, the second why there is no real
-        // reading at all. Only the second makes the numbers an estimate.
+        // reading at all.
         let (windows, live, as_of, stale_reason, fallback_reason) =
             match live_windows(state, provider, &tools, force).await {
                 LiveWindows::Ok { windows, as_of, stale_reason } => (windows, true, as_of, stale_reason, None),
-                other => {
-                    let est = estimate_windows(state, provider, window_cap).await?;
-                    let reason = match other {
-                        LiveWindows::Failed(e) => Some(e),
-                        // Not an error, but still owed an explanation: without
-                        // one the "estimate" badge is a label with nothing
-                        // behind it.
-                        _ => None,
-                    };
-                    (est, false, None, None, reason)
-                }
+                LiveWindows::Failed(e) => (json!([]), false, None, None, Some(e)),
+                // Not an error, but still owed an explanation: without one the
+                // empty card is a blank with nothing behind it.
+                _ => (json!([]), false, None, None, None),
             };
 
         providers.push(json!({
@@ -378,26 +370,6 @@ pub(crate) async fn live_windows(state: &AppState, provider: &str, tools: &[Tool
         }
     }
     outcome
-}
-
-/// Local stand-in for a provider that has no readable usage endpoint (or whose
-/// endpoint we could not reach): what *this device* served against the plan's
-/// capacity. It measures asale's own selling only, so it is an estimate — the
-/// caller must label it as one.
-async fn estimate_windows(state: &AppState, provider: &str, window_cap: u64) -> R<Value> {
-    let prefix = provider_model_prefix(provider);
-    let window_cap = window_cap as f64;
-    let daily_cap = window_cap * 24.0 / 5.0;
-    let used_window = state.store.served_tokens_since(WINDOW_SECS, prefix).await.map_err(err)? as f64;
-    let used_today = state.store.served_tokens_today(prefix).await.map_err(err)? as f64;
-    let oldest = state.store.oldest_served_ts_since(WINDOW_SECS, prefix).await.map_err(err)?;
-    let win_pct = if window_cap > 0.0 { (used_window / window_cap * 100.0).min(100.0) } else { 0.0 };
-    let day_pct = if daily_cap > 0.0 { (used_today / daily_cap * 100.0).min(100.0) } else { 0.0 };
-    let win_reset = oldest.map(|t| t + WINDOW_SECS);
-    Ok(json!([
-        { "key": "5h", "label": "5h", "used_percent": win_pct, "reset_at": win_reset, "window_seconds": WINDOW_SECS },
-        { "key": "1d", "label": "24h", "used_percent": day_pct, "reset_at": day_start_ts() + 86400, "window_seconds": 86400 },
-    ]))
 }
 
 /// Outcome of a live rate-limit read.
@@ -1434,12 +1406,6 @@ fn parse_reset_field(raw: &str, now: i64) -> Option<i64> {
         return None;
     }
     Some(now + total.round() as i64)
-}
-
-/// LIKE-prefix used to attribute local publisher usage to a provider family
-/// (mirrors `publisher::provider_model_prefix`).
-pub(crate) fn provider_model_prefix(provider: &str) -> Option<&'static str> {
-    Provider::from_str_opt(provider).and_then(|p| asale_protocol::spec(p).model_prefix)
 }
 
 #[cfg(test)]

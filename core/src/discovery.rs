@@ -38,35 +38,6 @@ pub struct RefreshedToken {
     pub expires_at: Option<i64>,
 }
 
-/// A rate-window quota snapshot (spec §3.1 — not token balance, §P0-1).
-#[derive(Debug, Clone, Copy)]
-pub enum WindowKind {
-    Rolling5h,
-    Weekly,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QuotaState {
-    Available,
-    Limited,
-    Exhausted,
-    Unknown,
-}
-
-#[derive(Debug, Clone)]
-pub struct QuotaWindow {
-    pub kind: WindowKind,
-    pub state: QuotaState,
-    /// Estimated serviceable tokens remaining in the window.
-    pub est_serviceable_tokens: u64,
-    /// 0..1 fraction remaining, when derivable.
-    pub remaining_ratio: Option<f32>,
-    pub reset_at: Option<i64>,
-    /// Provenance of the estimate (e.g. "plan-cap:pro − local-5h-usage").
-    pub source: String,
-}
-
 /// The upstream endpoint info a publisher injects into (base URL + default UA).
 #[derive(Debug, Clone)]
 pub struct UpstreamSpec {
@@ -74,28 +45,32 @@ pub struct UpstreamSpec {
     pub default_headers: Vec<(String, String)>,
 }
 
-// ── Plan → rolling-window cap (best-effort, documented provenance) ──────────
+// ── Plan → rolling-window cap (a scale for the seller's own cap, nothing more) ──
 //
 // Upstreams don't publish exact token caps for OAuth plans; these are
-// conservative published-tier estimates for the 5h rolling window used only as
-// the *ceiling* for the local-usage subtraction below. When the plan is
-// unknown we assume the lowest paid tier so we never over-declare supply.
+// conservative published-tier guesses.
+//
+// **This number no longer gates anything.** It used to be the ceiling in
+// `cap − locally-served = quota_remaining`, and a subscription whose lanes had
+// served more than the guess left the market until the estimate recovered —
+// while the upstream was still accepting its traffic. In production that took
+// the only seller of a model off the market for minutes at a time, several
+// times a day: 4.4M is what a Max 20× was guessed to be worth per window, and
+// four minutes of real agent traffic went straight through it without moving
+// Anthropic's own utilisation reading at all.
+//
+// What stops a subscription now is the subscription: a 429 (or a spent window
+// the vendor names in its own reading), handled account-wide in
+// `pool::AccountPool::on_error`. This is left only as the denominator behind
+// "sell at most X% of my plan a day" on the Sell page — a number the operator
+// picks, not one that withholds supply on its own.
 
-/// Testing override for the window cap below, in tokens. Unset (or 0) keeps the
-/// plan estimate.
-///
-/// The caps here are guesses, and a deliberately low-balled one: an account that
-/// has served its estimated 5h allowance declares `quota_remaining = 0` and its
-/// lanes leave the market, whatever the real upstream would still accept. On a
-/// development machine that is the normal state within an afternoon of testing,
-/// and the only way back is to wait out the rolling window — which makes the buy
-/// path untestable for hours at a time, for a number nobody measured.
-///
-/// Not a production knob: over-declaring supply means matching sends work to a
-/// lane the upstream then refuses, which costs the publisher reputation.
+/// Testing override for the cap below, in tokens. Unset (or 0) keeps the plan
+/// guess. Only affects how the daily-cap slider is scaled.
 const WINDOW_CAP_OVERRIDE_ENV: &str = "ASALE_PLAN_WINDOW_CAP";
 
-/// Estimated serviceable tokens for a provider+plan over its rate window.
+/// Rough per-window capacity of a provider+plan, for sizing the operator's own
+/// daily sell cap. Never a gate — see the note above.
 pub fn plan_window_cap(provider: Provider, plan: Option<&str>) -> u64 {
     if let Some(cap) = std::env::var(WINDOW_CAP_OVERRIDE_ENV).ok().and_then(|v| v.trim().parse::<u64>().ok()).filter(|c| *c > 0) {
         return cap;
@@ -160,43 +135,6 @@ pub fn plan_window_cap(provider: Provider, plan: Option<&str>) -> u64 {
 /// offer do not each reach into the protocol crate for it.
 pub use asale_protocol::providers::CUSTOM_WINDOW_TOKENS;
 
-/// Build a rolling-window quota estimate from the plan cap and locally measured
-/// usage in the window. This is the real §P0-1 estimate: cap − used.
-pub fn estimate_quota_window(
-    provider: Provider,
-    plan: Option<&str>,
-    used_in_window: u64,
-    reset_at: Option<i64>,
-) -> QuotaWindow {
-    let cap = plan_window_cap(provider, plan);
-    let remaining = cap.saturating_sub(used_in_window);
-    let ratio = if cap > 0 { (remaining as f32 / cap as f32).clamp(0.0, 1.0) } else { 0.0 };
-    let state = if remaining == 0 {
-        QuotaState::Exhausted
-    } else if ratio < 0.15 {
-        QuotaState::Limited
-    } else {
-        QuotaState::Available
-    };
-    let kind = match provider {
-        Provider::Claude | Provider::ClaudeWork => WindowKind::Rolling5h,
-        _ => WindowKind::Rolling5h,
-    };
-    QuotaWindow {
-        kind,
-        state,
-        est_serviceable_tokens: remaining,
-        remaining_ratio: Some(ratio),
-        reset_at,
-        source: format!(
-            "plan-cap({}={}) − local-window-usage({})",
-            plan.unwrap_or("unknown"),
-            cap,
-            used_in_window
-        ),
-    }
-}
-
 /// Per-provider adapter contract (spec §3.1).
 #[async_trait]
 pub trait ToolAdapter: Send + Sync {
@@ -208,12 +146,6 @@ pub trait ToolAdapter: Send + Sync {
     /// How long before expiry to proactively refresh (spec §3.1 `refresh_lead`).
     fn refresh_lead(&self) -> Duration {
         Duration::from_secs(300)
-    }
-
-    /// Query the rolling-window quota for supply estimation. `used_in_window` is
-    /// the tokens this device already served this window (from local records).
-    async fn query_quota(&self, token: &AccountToken, used_in_window: u64) -> anyhow::Result<QuotaWindow> {
-        Ok(estimate_quota_window(self.provider(), token.plan.as_deref(), used_in_window, None))
     }
 
     /// The upstream endpoint + UA profile for this provider.
@@ -952,28 +884,6 @@ mod tests {
         // xAI discovers its token endpoint; the fallback stands in until it has.
         let discovered = DeviceFlowAdapter::xai(Some("https://auth.x.ai/oauth2/token-v2".into()));
         assert_eq!(discovered.provider(), Provider::Xai);
-    }
-
-    #[test]
-    fn quota_estimate_subtracts_local_usage() {
-        // Pro plan cap minus what we already served this window.
-        let q = estimate_quota_window(Provider::Claude, Some("pro"), 100_000, None);
-        let cap = plan_window_cap(Provider::Claude, Some("pro"));
-        assert_eq!(q.est_serviceable_tokens, cap - 100_000);
-        assert_eq!(q.state, QuotaState::Available);
-        assert!(q.remaining_ratio.unwrap() > 0.8);
-        assert!(q.source.contains("plan-cap"));
-    }
-
-    #[test]
-    fn quota_exhausts_and_limits() {
-        let cap = plan_window_cap(Provider::Claude, Some("pro"));
-        let full = estimate_quota_window(Provider::Claude, Some("pro"), cap, None);
-        assert_eq!(full.state, QuotaState::Exhausted);
-        assert_eq!(full.est_serviceable_tokens, 0);
-
-        let near = estimate_quota_window(Provider::Claude, Some("pro"), cap - (cap / 20), None);
-        assert_eq!(near.state, QuotaState::Limited);
     }
 
     #[test]

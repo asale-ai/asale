@@ -554,6 +554,9 @@ export interface Lane {
   fail_streak: number;
   last_error: string;
   sell_enabled: boolean;
+  /** Tokens this lane's account may still sell under the operator's own daily
+   *  cap. Not a reading of the subscription's headroom — nothing local knows
+   *  that. */
   quota_remaining: number;
   /** What the market currently pays for this model, as whole percent *of* the
    *  vendor's list price (100 = list price). `null` when this device has not
@@ -617,7 +620,6 @@ export interface AccountStatus {
   provider: string;
   account_id: string;
   plan: string | null;
-  quota_remaining: number;
   status: "available" | "cooldown" | "expired" | "exhausted";
   expires_at: number | null;
   cooldown_until: number | null;
@@ -642,25 +644,18 @@ export interface AccountStatus {
    *  the lane's concurrency ceiling, so the gateway stops routing work here
    *  past it rather than this device refusing what it was already sent. */
   sell_concurrency: number;
-  /** When an exhausted account's window resets, unix seconds. Only ever set
-   *  from the provider's own reading — the local estimate's window is a rolling
-   *  sum with no reset instant, so it recovers a token at a time instead. */
-  quota_reset_at: number | null;
-  /** Tokens this account served today / in the current 5h window. */
+  /** Tokens this account served today. */
   used_today: number;
-  used_window: number;
-  /** Its plan's 5h cap and the daily equivalent (×24/5), for "% of plan". */
+  /** Its plan's rough 5h capacity and the daily equivalent (×24/5), so the
+   *  operator's own cap can be shown as "% of plan". A scale for that slider
+   *  only: nothing is withheld against these. */
   window_cap: number;
   daily_cap: number;
-  /** Which answer about this account's headroom is in force:
-   *  - `upstream` — the provider's own rate-limit windows, banked within the
-   *    hour. `window_used_percent` is its number, `window_key` names the
-   *    binding window (`5h`, `7d`) and `window_as_of` when it was measured.
-   *  - `estimate` — `used_window` against the guessed `window_cap`, which is
-   *    all this device had before the providers were asked. On a Claude login
-   *    the plan is never in the token response, so that cap is the lowest paid
-   *    tier and the figure runs far ahead of the real subscription. */
-  window_source: "upstream" | "estimate";
+  /** The provider's own utilisation, banked within the hour: the percent it
+   *  reports, which window is binding (`5h`, `7d`) and when it was measured.
+   *  `null` on every provider that publishes none — there is no local estimate
+   *  standing in for it any more, because the one there used to be read 100%
+   *  over subscriptions that were selling fine. */
   window_used_percent: number | null;
   window_as_of: number | null;
   window_key: string | null;

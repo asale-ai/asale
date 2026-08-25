@@ -23,15 +23,15 @@ pub mod upgrade;
 pub mod ws;
 
 pub use discovery::{
-    estimate_quota_window, needs_refresh, plan_window_cap, ApiKeyAdapter, ClaudeAdapter, CodexAdapter,
-    DeviceFlowAdapter, GeminiAdapter, Provider, QuotaWindow, RefreshedToken, ToolAdapter, Wire,
+    needs_refresh, plan_window_cap, ApiKeyAdapter, ClaudeAdapter, CodexAdapter, DeviceFlowAdapter,
+    GeminiAdapter, Provider, RefreshedToken, ToolAdapter, Wire,
 };
 pub use executor::{LeasedToken, RecordSink, TaskOutcome, TokenProvider};
 pub use pool::{
     AccountPool, AccountRuntime, LaneState, LaneStatusView, PauseReason, PickedAccount, Strategy,
     UpstreamErrorKind,
 };
-pub use quota::{gate_from_windows, serviceable_tokens, QuotaGate};
+pub use quota::{gate_from_windows, QuotaGate};
 pub use security::DeviceIdentity;
 pub use ws::{
     next_backoff, spawn_publisher, ConfigSource, ConnState, LaneControl, PublisherDeps, PublisherHandle,

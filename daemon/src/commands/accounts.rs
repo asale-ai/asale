@@ -10,7 +10,6 @@ use asale_client_core::{cli_import, discovery, Provider, Wire};
 use serde_json::{json, Value};
 use super::sell::{accounts_changed, credential_replaced};
 use super::{R, err, now_secs};
-use super::usage::{WINDOW_SECS};
 use crate::cmd_err;
 
 /// Scan the machine for credentials of installed vendor CLIs (Claude Code,
@@ -328,13 +327,14 @@ fn is_key_credential(provider: &str, account_id: &str, origin: Option<&str>) -> 
 /// status plus everything the per-account sell limit UI needs:
 ///
 ///   - `sell_enabled` / `sell_daily_limit` — this account's own switch and cap.
-///   - `used_today` / `used_window`        — tokens *this account* served, from
-///                                           account-attributed metering.
-///   - `window_cap` / `daily_cap`          — its plan's 5h cap and the daily
-///                                           equivalent (×24/5), so a cap can be
-///                                           expressed as a % of the plan.
+///   - `used_today`                        — tokens *this account* served today.
+///   - `window_cap` / `daily_cap`          — its plan's rough capacity, a scale
+///     for the operator's own "% of plan" cap. Nothing is withheld against it.
+///   - `window_used_percent` / `window_key` / `window_as_of` — the provider's own
+///     utilisation, or `null` where it publishes none. There is no local estimate
+///     standing in for it any more.
 ///   - `key_based`                         — a metered key, so the window
-///                                           numbers above do not apply to it.
+///     numbers above do not apply to it.
 ///   - `origin` / `shared_with_local_cli`  — whether the credential is asale's
 ///                                           own OAuth login or a copy of the
 ///                                           one an installed CLI is using.
@@ -354,29 +354,18 @@ pub async fn list_accounts(state: &AppState) -> R<Value> {
         let window_cap = Provider::from_str_opt(&s.provider)
             .map(|p| discovery::plan_window_cap(p, plan.as_deref()))
             .unwrap_or(0) as i64;
-        let used_window = state
-            .store
-            .served_tokens_since_for_account(WINDOW_SECS, &s.provider, &s.account_id)
-            .await
-            .map_err(err)? as i64;
-        // Which of the two answers about this account's headroom is in force.
-        // The page has always shown `used_window / window_cap`, which is a
-        // local count against a guessed cap — and on a Claude login, where the
-        // plan is never known, a cap so low that a live subscription reads as
-        // spent. When the provider's own reading is gating the account instead,
-        // say so and show *its* number, or the page contradicts the lane it is
-        // describing: 100% of a made-up cap, still selling.
+        // The provider's own reading, or nothing. There is no second answer any
+        // more: `used_window / window_cap` was a local count against a guessed
+        // cap, and on a Claude login — where the plan is never known — that cap
+        // was low enough to read 100% over lanes that were selling fine. A page
+        // that contradicts the lane it describes is worse than a page with one
+        // less number on it.
         let gate = super::usage::account_quota_gate(&state.store, &s.provider, &s.account_id, now_secs()).await;
         let mut row = serde_json::to_value(&s).map_err(err)?;
         if let Some(obj) = row.as_object_mut() {
             obj.insert("window_cap".into(), json!(window_cap));
             // Daily equivalent of the 5h rolling cap (24h / 5h = 4.8×).
             obj.insert("daily_cap".into(), json!(window_cap * 24 / 5));
-            obj.insert("used_window".into(), json!(used_window));
-            obj.insert(
-                "window_source".into(),
-                json!(if gate.is_some() { "upstream" } else { "estimate" }),
-            );
             obj.insert("window_used_percent".into(), json!(gate.as_ref().map(|(g, _)| (1.0 - g.headroom) * 100.0)));
             obj.insert("window_as_of".into(), json!(gate.as_ref().map(|(_, at)| *at)));
             obj.insert("window_key".into(), json!(gate.as_ref().map(|(g, _)| g.tightest.clone())));
