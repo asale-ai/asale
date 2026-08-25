@@ -22,6 +22,7 @@
 //!                       enable/disable/default, and adopting one for the
 //!                       tools this machine buys through
 //!   [`settings`]      — daemon identity, upstream proxy, consume mode
+//!   [`security`]      — the agent firewall: policy, per-tool switches, events
 //!   [`sell`]          — publishing switch, devices, publisher policy
 //!   [`probe`]         — buying your own lane, to prove it can be bought from
 //!   [`accounts`]      — subscription discovery/import + per-account sell rules
@@ -42,6 +43,7 @@ pub mod buy;
 pub mod oauth_flow;
 pub mod probe;
 pub mod records;
+pub mod security;
 pub mod sell;
 pub mod server_client;
 pub mod settings;
@@ -57,6 +59,7 @@ pub use buy::*;
 pub use oauth_flow::*;
 pub use probe::*;
 pub use records::*;
+pub use security::*;
 pub use sell::*;
 pub use settings::*;
 pub use share::*;

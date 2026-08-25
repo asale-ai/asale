@@ -907,4 +907,79 @@ export interface ReconcileResult {
   reconciled_at: number;
 }
 
+// ── Agent firewall (Security page) ──
+/** How hard the firewall leans on a finding, per tool. */
+export type FirewallMode = "audit" | "balanced" | "strict";
+/** The five scanners. Keep in sync with `agent_firewall::Scanner`. */
+export type FirewallScanner = "secret" | "injection" | "hidden_unicode" | "tool_policy" | "egress";
+
+export interface FirewallPolicy {
+  secret_scan: boolean;
+  injection_scan: boolean;
+  hidden_unicode: boolean;
+  tool_policy: boolean;
+  egress: boolean;
+  /** Mask secrets and forward, instead of refusing. */
+  redact_secrets: boolean;
+  audit_log: boolean;
+  allow_hosts: string[];
+  deny_hosts: string[];
+  /** Rule ids the user has silenced. */
+  suppress: string[];
+  tools: Record<string, { enabled: boolean; mode: FirewallMode }>;
+}
+/** One agent's row on the Security page. */
+export interface FirewallTool {
+  id: BuyToolId;
+  label: string;
+  installed: boolean;
+  enabled: boolean;
+  mode: FirewallMode;
+}
+/** Served by the daemon rather than spelled here: the ids are the crate's
+ *  contract and the rule counts come from its tables. */
+export interface FirewallScannerInfo {
+  id: FirewallScanner;
+  rules: number;
+  direction: "inbound" | "outbound" | "both";
+}
+export interface FirewallState {
+  policy: FirewallPolicy;
+  tools: FirewallTool[];
+  scanners: FirewallScannerInfo[];
+  log_path: string;
+}
+export type FirewallDecision = "allow" | "warn" | "block";
+export type FirewallSeverity = "low" | "medium" | "high" | "critical";
+export interface FirewallFinding {
+  scanner: FirewallScanner;
+  /** Stable rule id — what a suppression names. */
+  rule: string;
+  title: string;
+  severity: FirewallSeverity;
+  detail: string;
+  /** The match, already masked by the daemon. Never a raw secret. */
+  sample: string;
+}
+export interface FirewallVerdict {
+  decision: FirewallDecision;
+  findings: FirewallFinding[];
+  score: number;
+}
+export interface FirewallEvent {
+  ts: number;
+  agent: string;
+  kind: string;
+  decision: FirewallDecision;
+  score: number;
+  findings: FirewallFinding[];
+}
+export interface FirewallEvents {
+  events: FirewallEvent[];
+  total: number;
+  /** Non-null = the log was edited, and this is the first record that no
+   *  longer verifies. */
+  tampered_at: number | null;
+}
+
 export { inTauri, realTauri };

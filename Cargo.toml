@@ -15,7 +15,7 @@ resolver = "2"
 members = ["protocol", "core", "daemon", "cli", "src-tauri"]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 
 [workspace.dependencies]
@@ -31,6 +31,15 @@ asale-protocol = { path = "protocol" }
 # there. asale-protocol above can be a path because it lives *inside* this repo,
 # which is the whole reason it was put there.
 token-meter = "0.1.0"
+
+# The agent firewall — the scanners behind the Security page and the check the
+# local proxy runs on every buy-side request.
+#
+# By git tag rather than crates.io: the crate is not published, and the reason
+# `token-meter` is a version dependency (the build host receives this repository
+# and nothing beside it) is satisfied by a git URL just as well. Pinned to a tag
+# so a build is reproducible; bump it deliberately.
+agent-firewall = { git = "https://github.com/asale-ai/agent-firewall", tag = "v0.2.0", default-features = false }
 
 anyhow = "1"
 async-trait = "0.1"

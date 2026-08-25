@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 asale-client-core = { path = "../core" }
 asale-protocol.workspace = true
+agent-firewall.workspace = true
 
 anyhow.workspace = true
 async-trait.workspace = true

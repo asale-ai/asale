@@ -19,6 +19,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-firewall"
+version = "0.2.0"
+source = "git+https://github.com/asale-ai/agent-firewall?tag=v0.2.0#0591dd3a82a26403eb1445a4c9866df59f75a61c"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -65,7 +76,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "asale"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "asale-client-core",
  "asale-daemon",
@@ -87,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "asale-cli"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -95,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "asale-client-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "asale-protocol",
@@ -119,8 +130,9 @@ dependencies = [
 
 [[package]]
 name = "asale-daemon"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
+ "agent-firewall",
  "anyhow",
  "asale-client-core",
  "asale-protocol",
@@ -148,7 +160,7 @@ dependencies = [
 
 [[package]]
 name = "asale-protocol"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "serde",
  "serde_json",

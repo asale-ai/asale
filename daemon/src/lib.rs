@@ -15,6 +15,7 @@ pub mod auth_store;
 pub mod cli_scan;
 pub mod codex_catalog;
 pub mod commands;
+pub mod firewall;
 pub mod keychain;
 pub mod logging;
 pub mod oauth;

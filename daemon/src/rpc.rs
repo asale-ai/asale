@@ -525,6 +525,10 @@ rpc_args! {
     // `models` absent → leave the selection unchanged; `[]` → clear it.
     BuyToolArgs    { tool: String, enabled: bool, #[serde(default)] models: Option<Vec<String>> }
     PathArgs       { path: String }
+    // The agent firewall. `mode` absent on a switch-on falls back to `audit`.
+    FirewallToolArgs { tool: String, enabled: bool, #[serde(default)] mode: Option<String> }
+    FirewallEventsArgs { #[serde(default)] limit: Option<usize> }
+    FirewallCheckArgs { text: String, #[serde(default)] kind: Option<String> }
     // The share card: a filename and the PNG itself, base64.
     SaveImageArgs  { name: String, data: String }
     // Every field past `enabled` absent → leave that term of the sale as it is.
@@ -631,6 +635,8 @@ async fn rpc(
         "market_globe" => commands::market_globe(st).await?,
         "market_featured" => commands::market_featured(st).await?,
         "buy_tools" => commands::buy_tools(st).await?,
+        // The agent firewall: the Security page reads its whole state here.
+        "firewall_policy" => commands::firewall_policy(st).await?,
         // Which of those tools are running — the restart advice, made checkable.
         "tool_processes" => commands::tool_processes().await?,
 
@@ -859,6 +865,22 @@ async fn rpc(
             let p: BuyToolArgs = args(&a)?;
             commands::set_buy_tool(st, p.tool, p.enabled, p.models).await?
         },
+        // Agent firewall: the per-tool switch, everything else on the policy,
+        // the decision log, and the page's scratchpad.
+        "set_firewall_tool" => {
+            let p: FirewallToolArgs = args(&a)?;
+            commands::set_firewall_tool(st, p.tool, p.enabled, p.mode).await?
+        },
+        "set_firewall_options" => commands::set_firewall_options(st, a.clone()).await?,
+        "firewall_events" => {
+            let p: FirewallEventsArgs = args(&a)?;
+            commands::firewall_events(p.limit).await?
+        },
+        "firewall_check" => {
+            let p: FirewallCheckArgs = args(&a)?;
+            commands::firewall_check(st, p.text, p.kind).await?
+        },
+
         // Open one of those tools' config files on the daemon's machine. Only
         // paths the buy switch itself writes are accepted — see the command.
         "open_config_path" => {

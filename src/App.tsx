@@ -4,7 +4,7 @@ import { invoke, inTauri, isDaemonDown, waitForDaemon, type Profile } from "./li
 import {
   IconDashboard, IconPublish, IconConsume, IconWallet,
   IconRecords, IconUsage, IconGauge, IconAccount, IconSettings,
-  IconGlobe, IconGithub, IconShare, IconKey,
+  IconGlobe, IconGithub, IconShare, IconKey, IconShield,
 } from "./icons";
 import { openExternal } from "./shell";
 import { SITE_URL, REPO_URL } from "./links";
@@ -24,13 +24,14 @@ const Usage = lazy(() => import("./pages/Usage").then((m) => ({ default: m.Usage
 const Limits = lazy(() => import("./pages/Limits").then((m) => ({ default: m.Limits })));
 const Account = lazy(() => import("./pages/Account").then((m) => ({ default: m.Account })));
 const Settings = lazy(() => import("./pages/Settings").then((m) => ({ default: m.Settings })));
+const Security = lazy(() => import("./pages/Security").then((m) => ({ default: m.Security })));
 // Lazy for the same reason the pages are: the sheet carries fifteen brand
 // marks and a QR encoder, and most sessions never open it.
 const EarningsShareDialog = lazy(() =>
   import("./components/EarningsShareDialog").then((m) => ({ default: m.EarningsShareDialog })),
 );
 
-type Tab = "dashboard" | "publish" | "consume" | "apikeys" | "usage" | "limits" | "wallet" | "records" | "account" | "settings";
+type Tab = "dashboard" | "publish" | "consume" | "apikeys" | "usage" | "limits" | "wallet" | "records" | "security" | "account" | "settings";
 
 const ICONS: Record<Tab, JSX.Element> = {
   dashboard: <IconDashboard />,
@@ -41,6 +42,7 @@ const ICONS: Record<Tab, JSX.Element> = {
   limits: <IconGauge />,
   wallet: <IconWallet />,
   records: <IconRecords />,
+  security: <IconShield />,
   account: <IconAccount />,
   settings: <IconSettings />,
 };
@@ -58,7 +60,10 @@ const NAV: Array<{ label?: string; items: Tab[] } | "spacer"> = [
   // switches. Calling the gateway from your own code is a way in that you set
   // up once and then leave alone — it belongs with the things you configure,
   // not with the two switches you flip every day.
-  { items: ["apikeys", "settings"] },
+  // Security sits with the things you set up once, not with the two switches
+  // you flip every day — but *above* them, because it is the one item on this
+  // list whose default a user should look at before trusting the rest.
+  { items: ["security", "apikeys", "settings"] },
 ];
 
 
@@ -271,6 +276,7 @@ export function App() {
               {tab === "limits" && <Limits />}
               {tab === "wallet" && <WalletPage />}
               {tab === "records" && <Records />}
+              {tab === "security" && <Security />}
               {tab === "account" && <Account />}
               {tab === "settings" && <Settings />}
             </Suspense>

@@ -2664,3 +2664,17 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .verify-probe-name { color: var(--fg); }
 /* A probe's own sentence can be long; the row must not push the dialog wide. */
 .verify-probe-note { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Security page (agent firewall) ──────────────────────────────────────────
+   Everything here is a row inside an `.acct`, so the page inherits the density
+   and the borders of the Buy page it sits beside — the only additions are the
+   three shapes that page has no equivalent for: the mode picker under a switch,
+   a scanner's one-line explanation, and a list of findings. */
+.fw-modes { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s10); margin-top: var(--s10); }
+.fw-mode-hint { font-size: var(--fs-meta); }
+.fw-scanner-desc { font-size: var(--fs-meta); margin-top: var(--s2); line-height: 1.5; }
+.fw-verdict { display: flex; flex-direction: column; gap: var(--s8); margin-top: var(--s12); }
+.fw-findings { display: flex; flex-direction: column; gap: var(--s4); margin-top: var(--s6); }
+/* The rule id is the actionable half — it is what a suppression names — so it
+   keeps the mono face while the sentence beside it stays quiet. */
+.fw-finding { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--s8); font-size: var(--fs-meta); }
