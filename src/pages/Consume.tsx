@@ -44,7 +44,13 @@ function toOptions(
         vendor: m.provider,
         meta: bits.join(" · ") || undefined,
         tag: off > 0 ? `-${off}%` : undefined,
-        unavailable: m.supply_capacity_tokens > 0 ? undefined : t("consume.noSupply"),
+        // Lanes, not capacity. A lane asking more than the market currently
+        // pays is withheld: it is online and has tokens to sell, so it carries
+        // capacity, but no buyer will ever be routed to it. Reading capacity
+        // here listed those models as available and every one of them failed on
+        // the first call — `online_lanes` is the count that has already had the
+        // price test applied (see the server's `SupplyView::servable`).
+        unavailable: m.online_lanes > 0 ? undefined : t("consume.noSupply"),
       };
     })
     .sort((a, b) => (a.label ?? a.id).localeCompare(b.label ?? b.id));
