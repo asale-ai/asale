@@ -15,7 +15,7 @@ import { invoke, inTauri, isDaemonDown, fmtTokens, type Globe, type GlobeFlow, t
 import { COUNTRY_CENTROIDS, COUNTRY_SHAPES, WORLD_H, WORLD_W } from "../lib/world";
 import { errText } from "../errors";
 import { Card, Skeleton } from "../ui";
-import { IconAccount, IconAlert, IconGlobe, IconUsage, IconZap } from "../icons";
+import { IconAccount, IconAlert, IconGlobe, IconUsage } from "../icons";
 
 /** More arcs than this and the map reads as a hairball rather than a network. */
 const MAX_ARCS = 24;
@@ -201,7 +201,6 @@ export function WorldMap({ region = "", children }: { region?: string; children?
             <Metric icon={<IconGlobe />} label={t("dashboard.map.statCountries")} value={String(totals.countries)} loading={loading} />
             <Metric icon={<IconAccount />} label={t("dashboard.map.statUsers")} value={totals.users.toLocaleString()} loading={loading} />
             <Metric icon={<IconUsage />} label={t("dashboard.map.statTokens")} value={fmtTokens(totals.tokens)} loading={loading} />
-            <Metric icon={<IconZap />} label={t("dashboard.map.statLanes")} value={String(totals.lanes)} loading={loading} />
           </dl>
         )}
 
