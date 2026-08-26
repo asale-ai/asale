@@ -366,6 +366,13 @@ export function Consume() {
                           <IconAlert /><span>{t("consume.opencodeNeedsModel")}</span>
                         </div>
                       )}
+                      {/* Same shape once more: a custom Harness route serves
+                          the models it lists and nothing else. */}
+                      {tool.id === "dsh" && tool.models.length === 0 && (
+                        <div className="callout warn compact card-foot">
+                          <IconAlert /><span>{t("consume.dshNeedsModel")}</span>
+                        </div>
+                      )}
                     </div>
                   )}
 

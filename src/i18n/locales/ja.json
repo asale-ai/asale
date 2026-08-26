@@ -353,6 +353,7 @@
     "noModels": "購読可能なモデルがまだありません。",
     "codexNeedsModel": "Codex はリクエストではなく自前のモデル一覧からモデルを選びます。未選択のままだと組み込みの GPT モデルのままで、マーケットでは提供できません。選択すると ~/.codex/config.toml に書き込まれ、ChatGPT アプリのモデル一覧に表示されます。",
     "opencodeNeedsModel": "opencode は設定に書かれたモデルだけを提供します。未選択のままだとプロバイダーだけが入って選べるモデルがありません。選ぶと ~/.config/opencode/opencode.json に書き込まれ、opencode は最初のモデルで起動します。",
+    "dshNeedsModel": "Harness のカスタムルートは設定に列挙したモデルだけを提供します。未選択のままだと asale ルートだけが入って選べるモデルがありません。選ぶと $DSH_HOME/settings.yaml の asale プロバイダー配下に書き込まれ、Harness のモデルピッカーで選択すれば使えます。",
     "toolsTitle": "インストール済みの AI ツール",
     "toolsDesc": "インストール済みの各ツールに個別の購入スイッチがあります。オンにするとそのツールの設定を Asale 経由に書き換え、元のファイルをバックアップします。オフにすると元の内容に復元します。",
     "buySwitch": "このツールでトークンを購入する",

@@ -353,6 +353,7 @@
     "noModels": "市場暫無可訂閱的模型。",
     "codexNeedsModel": "Codex 的模型來自它自帶的模型清單，而不是請求裡的欄位：不選就仍停在內建的 GPT 模型上，市場無法服務。選定後會寫入 ~/.codex/config.toml，並出現在 ChatGPT 應用程式的模型下拉選單裡。",
     "opencodeNeedsModel": "opencode 只提供設定裡寫明的模型，不選就等於裝好了 provider 卻沒有任何模型可選。選定後會寫入 ~/.config/opencode/opencode.json，opencode 預設從第一個開始。",
+    "dshNeedsModel": "Harness 的自訂路由只提供它列出的模型，不選就等於裝好了 asale 這條路由卻沒有任何模型可選。選定後會寫入 $DSH_HOME/settings.yaml 的 asale provider 底下，再到 Harness 的模型選擇器裡選中即可使用。",
     "toolsTitle": "已安裝的 AI 工具",
     "toolsDesc": "本機安裝的每個工具都有獨立的買入開關。開啟會改寫該工具的設定以走 Asale 並備份原檔；關閉則原樣還原。",
     "buySwitch": "為此工具買入 Token",

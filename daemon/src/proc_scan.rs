@@ -83,6 +83,12 @@ const SPECS: &[Spec] = &[
     // so the name is the whole signal; the package path is a marker anyway for
     // installs that go through the JS entry point.
     Spec { tool: "opencode", bin: "opencode", markers: &["opencode-ai/bin"] },
+    // DeepSeek Harness is a JS package (`@deepseek-ai/dsh`, bin `dsh` →
+    // `lib/bin.js`), so a POSIX install shows up as `node …/bin.js` and needs
+    // the marker; the Windows shim is caught by `bin`. `dsh` is short enough to
+    // be somebody else's binary name, which is why it takes an exact match on
+    // the executable and never a substring of the command line.
+    Spec { tool: "dsh", bin: "dsh", markers: &["@deepseek-ai/dsh"] },
 ];
 
 /// Every running buy-side CLI, as `(tool, instance)` pairs.

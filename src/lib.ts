@@ -715,7 +715,7 @@ export interface ConsumeModeInfo {
 
 // ── Buy side: one switch + model multi-select per installed CLI (flow §4/§6) ──
 /** Keep in sync with `tool_config::TOOLS` — the daemon is the list's owner. */
-export type BuyToolId = "claude" | "codex" | "gemini" | "openclaw" | "hermes" | "opencode";
+export type BuyToolId = "claude" | "codex" | "gemini" | "openclaw" | "hermes" | "opencode" | "dsh";
 export interface BuyTool {
   id: BuyToolId;
   label: string;

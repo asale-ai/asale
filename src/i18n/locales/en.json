@@ -353,6 +353,7 @@
     "noModels": "No market models available yet.",
     "codexNeedsModel": "Codex picks its model from a list of its own, not from the request: with nothing selected it stays on its built-in GPT models, which the market cannot serve. Pick one and it is written into ~/.codex/config.toml and shows up in the ChatGPT app's model menu.",
     "opencodeNeedsModel": "opencode offers exactly the models its config names, so with nothing selected the provider is installed with an empty model list and nothing to pick. Choose one or more and they are written into ~/.config/opencode/opencode.json, and opencode starts on the first.",
+    "dshNeedsModel": "A custom Harness route serves the models it lists and nothing else, so with nothing selected the route is installed with no model to pick. Choose one or more and they are written to $DSH_HOME/settings.yaml under the asale provider; select one in the Harness model picker to use it.",
     "toolsTitle": "Installed AI tools",
     "toolsDesc": "Each tool installed here gets its own buy switch. Turning it on rewrites that tool's config to route through Asale and backs up the original; turning it off restores the original exactly.",
     "buySwitch": "Buy tokens for this tool",

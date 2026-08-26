@@ -14,6 +14,10 @@
 //!   openclaw → `~/.openclaw/openclaw.json`
 //!   hermes   → `<hermes_home()>/config.yaml` — the one tool not under a
 //!              `~/.<tool>` dot-directory; see `hermes_home` for why.
+//!   dsh      → `<dsh_home()>/settings.yaml` (a `llm-pi-ai` provider route) and
+//!              `<dsh_home()>/.credentials.yaml` (the route's key). The only
+//!              tool that keeps its endpoint and its secret in *different*
+//!              files — see `apply_dsh`.
 //!
 //! This is the *only* place asale writes into a vendor CLI's directory, and it
 //! happens solely on the buy side. The sell side never reads or writes these
@@ -30,7 +34,7 @@ use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 
 /// The tools a buy switch can be turned on for.
-pub const TOOLS: &[&str] = &["claude", "codex", "gemini", "openclaw", "hermes", "opencode"];
+pub const TOOLS: &[&str] = &["claude", "codex", "gemini", "openclaw", "hermes", "opencode", "dsh"];
 
 /// Display name for a tool id. Lowercase where the tool's own name is — asale
 /// is not the one who decides how somebody else's product is spelled.
@@ -42,6 +46,7 @@ pub fn label(tool: &str) -> &'static str {
         "openclaw" => "OpenClaw",
         "hermes" => "Hermes",
         "opencode" => "opencode",
+        "dsh" => "DeepSeek Harness",
         _ => "unknown",
     }
 }
@@ -113,6 +118,28 @@ const ANTHROPIC_AUTH_TOKEN: &str = "ANTHROPIC_AUTH_TOKEN";
 /// Claude Code also honours ANTHROPIC_API_KEY; clear it so a stale key can't
 /// shadow the token we set (cc-switch resolves the same ambiguity).
 const ANTHROPIC_API_KEY: &str = "ANTHROPIC_API_KEY";
+
+// ── DeepSeek Harness ───────────────────────────────────────────────────────
+//
+// Shapes taken from the harness' own generated config catalog and the provider
+// guide (`docs/user/guide/providers.md`), which document `llm-pi-ai` as the
+// route type for "a company gateway, self-hosted server, or provider absent
+// from the installed catalog" — which is exactly what the asale proxy is.
+
+/// Settings section owning custom provider routes.
+const DSH_SECTION: &str = "llm-pi-ai";
+/// Route id under `llm-pi-ai.providers`. Permanent by the harness' own rule:
+/// sessions, model defaults and credential references all address a route by
+/// this name, so renaming it later would orphan every one of them.
+const DSH_ROUTE: &str = "asale";
+/// Wire protocol declared for the route. The proxy serves OpenAI-compatible
+/// chat completions under `/dsh/v1`, and a route the installed catalog does not
+/// ship must name its protocol explicitly.
+const DSH_API: &str = "openai-completions";
+/// The credential *reference* written into settings. The harness never puts a
+/// secret in `settings.yaml`; it stores one under this name in
+/// `.credentials.yaml` and looks it up per request.
+const DSH_KEY_ENV: &str = "ASALE_API_KEY";
 
 // ── Gemini CLI env keys ────────────────────────────────────────────────────
 const GEMINI_BASE_URL: &str = "GOOGLE_GEMINI_BASE_URL";
@@ -201,6 +228,7 @@ pub fn tool_dir(tool: &str) -> PathBuf {
         "openclaw" => home().join(".openclaw"),
         "hermes" => hermes_home(),
         "opencode" => opencode_config_dir(),
+        "dsh" => dsh_home(),
         _ => home().join(".asale-unknown"),
     }
 }
@@ -249,6 +277,19 @@ fn opencode_config_file() -> PathBuf {
     jsonc
 }
 
+/// DeepSeek Harness' home: `$DSH_HOME`, else `~/.dsh`.
+///
+/// Both files this tool owns hang off it, and the harness resolves it the same
+/// way for each of them (`dsh-credentials-local`'s `dshHome` config documents
+/// the same pair), so reading the variable once here keeps them from ever
+/// disagreeing about which machine-local directory is the live one.
+fn dsh_home() -> PathBuf {
+    std::env::var_os("DSH_HOME")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| home().join(".dsh"))
+}
+
 /// Hermes' own home — the one tool that does not keep its config in a
 /// dot-directory under `$HOME`.
 ///
@@ -294,6 +335,10 @@ pub fn config_paths(tool: &str) -> Vec<PathBuf> {
         "openclaw" => vec![d.join("openclaw.json")],
         "hermes" => vec![d.join("config.yaml")],
         "opencode" => vec![opencode_config_file()],
+        // Endpoint and secret live apart by the harness' own design: settings
+        // hold only a *reference* to a credential, never the credential. Both
+        // are ours to write, so both are backed up and both are restored.
+        "dsh" => vec![d.join("settings.yaml"), d.join(".credentials.yaml")],
         _ => vec![],
     }
 }
@@ -316,6 +361,7 @@ pub fn installed(tool: &str) -> bool {
         "openclaw" => "openclaw",
         "hermes" => "hermes",
         "opencode" => "opencode",
+        "dsh" => "dsh",
         _ => return false,
     })
 }
@@ -334,6 +380,13 @@ pub fn current_base_url(tool: &str) -> Option<String> {
             .get(ANTHROPIC_BASE_URL)?
             .as_str()
             .map(String::from),
+        // Only our own route's endpoint. Another route being pointed elsewhere
+        // is normal — the harness runs several at once — so the question here
+        // is exclusively whether *ours* still names the proxy.
+        "dsh" => {
+            let raw = read_raw(&primary_config_path(tool))?;
+            yaml_path_get(&raw, &[DSH_SECTION, "providers", DSH_ROUTE], "baseURL")
+        }
         "gemini" => dotenv_get(&read_raw(&primary_config_path(tool)).unwrap_or_default(), GEMINI_BASE_URL),
         "codex" => {
             let raw = read_raw(&primary_config_path(tool))?;
@@ -428,7 +481,7 @@ pub fn proxy_base_for(tool: &str) -> String {
     let base = proxy_base();
     match tool {
         "codex" => format!("{base}/v1"),
-        "openclaw" | "hermes" | "opencode" => format!("{base}/{tool}/v1"),
+        "openclaw" | "hermes" | "opencode" | "dsh" => format!("{base}/{tool}/v1"),
         _ => base,
     }
 }
@@ -605,6 +658,7 @@ pub fn apply(tool: &str, base_url: &str, token: &str, models: &[String]) -> Resu
         "openclaw" => apply_openclaw(token, models)?,
         "hermes" => apply_hermes(token, models)?,
         "opencode" => apply_opencode(token, models)?,
+        "dsh" => apply_dsh(token, models)?,
         _ => unreachable!("known() checked above"),
     }
     Ok(backup)
@@ -900,6 +954,320 @@ fn strip_opencode(raw: &str) -> Option<String> {
         return None;
     }
     serde_json::to_string_pretty(&Value::Object(root)).ok()
+}
+
+// ── DeepSeek Harness ───────────────────────────────────────────────────────
+
+/// Point DeepSeek Harness at the proxy by owning one `llm-pi-ai` route.
+///
+/// Two files, because the harness separates them on purpose: `settings.yaml`
+/// describes the route and names a credential, and `.credentials.yaml` holds
+/// the secret that name resolves to. Writing the token into settings instead
+/// would be rejected — there is no field for a literal key on a route — so
+/// both files are ours to write and both are in [`config_paths`], hence backed
+/// up and restored together.
+///
+/// The credential store resolves layers in a fixed order, and the one above
+/// ours is the *inherited process environment*: an `ASALE_API_KEY` exported in
+/// the shell that launched `dsh` outranks the file and is documented as
+/// deliberately unwritable from inside. Everything below ours (`$DSH_HOME/.env`
+/// and the workspace `.env`) loses to it, so the ordinary machine has asale as
+/// the effective source the moment this is written.
+///
+/// ## The two compat switches
+///
+/// pi-ai infers a request's shape from the endpoint URL, and an address it does
+/// not recognise is addressed as OpenAI itself. Two of those inferences the
+/// asale proxy does not accept. Both were checked against dsh 0.1.1-rc.2 by
+/// recording what it sends, and they are *not* equally load-bearing:
+///
+///   * `maxTokensField` — **required, and confirmed by the recording**: without
+///     it the output cap goes as `max_completion_tokens`, which the server does
+///     not read. With it, `max_tokens`.
+///   * `supportsDeveloperRole` — **defensive**: pi-ai sends the system prompt as
+///     `role: "developer"` only to a model that declares reasoning, and a model
+///     entered by hand on a custom route declares none, so the recording showed
+///     `system` either way. It is written anyway because the day a model here
+///     does declare reasoning, the failure is silent: the server's translators
+///     map only `system`, so a developer-role prompt is relayed as an ordinary
+///     message — demoted, not refused.
+///
+/// Both are written on the route rather than left for the user to discover from
+/// a gateway that holds a good key at a reachable address and still refuses
+/// every request.
+///
+/// One thing deliberately *not* worked around: pi-ai's "Fetch available models"
+/// sends no `Authorization`, and the server answers `/v1/models` without a key
+/// with 401. It costs nothing here — the switch writes the model list itself,
+/// which is the case the harness' own docs point a user to when an endpoint
+/// does not serve discovery.
+fn apply_dsh(token: &str, models: &[String]) -> Result<()> {
+    let paths = config_paths("dsh");
+    let (settings_path, creds_path) = (&paths[0], &paths[1]);
+
+    // settings.yaml — our route, rewritten whole. The route is asale's own
+    // (its id is ours, and the harness forbids renaming one), so there is no
+    // user edit inside it to merge with; everything *outside* it is untouched.
+    let raw = read_raw(settings_path).unwrap_or_default();
+    anyhow::ensure!(
+        yaml_is_editable(&raw),
+        "{} is not valid YAML — DeepSeek Harness fails to boot on a settings file it cannot \
+         parse, so writing the buy settings into it would break every provider you have, not \
+         just this one. Fix the file and switch buying on again.",
+        settings_path.display()
+    );
+    let updated = yaml_path_set_block(
+        &raw,
+        &[DSH_SECTION, "providers", DSH_ROUTE],
+        &dsh_route_lines(models),
+    );
+    write_atomic(settings_path, &updated)?;
+
+    // .credentials.yaml — the secret the route's `apiKeyEnv` names.
+    let creds = read_raw(creds_path).unwrap_or_default();
+    write_atomic(creds_path, &dsh_credentials_set(&creds, token))?;
+    dsh_lock_down(creds_path);
+    Ok(())
+}
+
+/// The body of our route, as YAML lines at zero indent — [`yaml_path_set_block`]
+/// applies the nesting.
+///
+/// `models` omitted rather than written empty when nothing is selected: the
+/// field is optional and an omission serves the installed catalog for the route
+/// (which, for a route the catalog does not ship, is nothing at all). An empty
+/// list would instead be a route that explicitly declares it serves no models,
+/// and the harness rejects deviations in this file loudly, at boot — taking
+/// every other provider down with it. So an empty selection leaves the harness
+/// with a route and nothing to pick, exactly as it does for opencode, and the
+/// Buy page says so.
+fn dsh_route_lines(models: &[String]) -> Vec<String> {
+    let mut out = vec![
+        format!("displayName: asale"),
+        format!("apiKeyEnv: {DSH_KEY_ENV}"),
+        format!("api: {DSH_API}"),
+        format!("baseURL: {}", proxy_base_for("dsh")),
+        "compat:".to_string(),
+        "  supportsDeveloperRole: false".to_string(),
+        "  maxTokensField: max_tokens".to_string(),
+    ];
+    if !models.is_empty() {
+        out.push("models:".to_string());
+        for m in models {
+            out.push(format!("  - id: {}", yaml_scalar(m)));
+        }
+    }
+    out
+}
+
+/// Upsert our key in the credentials document's `refs` space, preserving every
+/// other line.
+///
+/// The document is versioned and every deviation from its shape is a rejection
+/// rather than a skipped entry, so a file we create is written with its
+/// `version: 1` header. A file that is already there keeps whatever header it
+/// has: the harness migrates a pre-release flat document in place at boot, and
+/// stamping a version onto one mid-flight would hand its migrator a shape it
+/// refuses by name.
+fn dsh_credentials_set(raw: &str, token: &str) -> String {
+    if raw.trim().is_empty() {
+        return format!("version: 1\n\nrefs:\n  {DSH_KEY_ENV}: {}\n", yaml_scalar(token));
+    }
+    yaml_block_set(raw, "refs", &[(DSH_KEY_ENV, token)])
+}
+
+/// Hold the credentials document — and the directory it sits in — to what the
+/// harness requires of it.
+///
+/// Not belt-and-braces: on POSIX the store refuses to *read* a document
+/// carrying any group or other permission bit, before parsing it, at boot and
+/// on every reload. A file left group-readable by a lenient umask would
+/// therefore not be a weaker secret, it would be a harness that fails to start.
+/// [`write_atomic`] already sets `0600`; the directory is what it cannot know
+/// to narrow.
+#[cfg(unix)]
+fn dsh_lock_down(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+#[cfg(not(unix))]
+fn dsh_lock_down(_path: &Path) {}
+
+/// Drop our route from the settings document, keeping every other provider.
+fn strip_dsh_settings(raw: &str) -> Option<String> {
+    let out = yaml_path_remove(raw, &[DSH_SECTION, "providers", DSH_ROUTE]);
+    (!out.trim().is_empty()).then_some(out)
+}
+
+/// Drop our key from the credentials document.
+///
+/// `unset` removes an entry rather than blanking it — an empty value in this
+/// file is rejected outright by the store — so the line goes entirely.
+fn strip_dsh_credentials(raw: &str) -> Option<String> {
+    let out = yaml_key_remove(raw, "refs", DSH_KEY_ENV);
+    // A document reduced to its own header holds no credentials; leaving it
+    // would be asale's file surviving the restore meant to remove it.
+    let meaningful = out
+        .lines()
+        .map(str::trim)
+        .any(|l| !l.is_empty() && !l.starts_with('#') && l != "version: 1" && l != "refs:");
+    meaningful.then_some(out)
+}
+
+/// Locate a nested mapping by its key path: `(header index, body range, indent)`.
+///
+/// Each step searches only inside the previous one's body and requires a deeper
+/// indent, so a `providers:` belonging to a different section cannot be walked
+/// into. A block's body ends at the first real content line indented no deeper
+/// than its header — blank lines and comments never end it, since either can sit
+/// inside a block.
+fn yaml_path_span(lines: &[&str], path: &[&str]) -> Option<(usize, usize, usize, String)> {
+    let (mut from, mut to) = (0usize, lines.len());
+    let mut found = None;
+    for key in path {
+        let (idx, indent) = (from..to).find_map(|i| {
+            let l = lines[i];
+            let indent: String = l.chars().take_while(|c| c.is_whitespace()).collect();
+            if let Some((_, _, _, parent)) = &found {
+                if indent.len() <= String::len(parent) {
+                    return None;
+                }
+            }
+            l[indent.len()..].strip_prefix(*key).filter(|r| r.starts_with(':')).map(|_| (i, indent))
+        })?;
+        let body_start = idx + 1;
+        let body_end = (body_start..to)
+            .find(|&i| {
+                let t = lines[i].trim();
+                !t.is_empty() && !t.starts_with('#') && lines[i].len() - t.len() <= indent.len()
+            })
+            .unwrap_or(to);
+        found = Some((idx, body_start, body_end, indent));
+        from = body_start;
+        to = body_end;
+    }
+    found
+}
+
+/// One scalar key inside a nested mapping.
+fn yaml_path_get(raw: &str, path: &[&str], key: &str) -> Option<String> {
+    let lines: Vec<&str> = raw.lines().collect();
+    let (_, body_start, body_end, _) = yaml_path_span(&lines, path)?;
+    let (idx, indent) = yaml_key_line(&lines, body_start..body_end, key)?;
+    let value = lines[idx][indent.len() + key.len() + 1..].trim();
+    let value = match value.strip_prefix('"').and_then(|v| v.rfind('"').map(|e| v[..e].to_string())) {
+        Some(quoted) => yaml_unescape(&quoted),
+        None => value.split('#').next().unwrap_or("").trim().to_string(),
+    };
+    (!value.is_empty()).then_some(value)
+}
+
+/// Replace the mapping at `path` with `body`, creating any missing ancestor.
+///
+/// Whole-block replacement rather than a key-by-key merge, because the block
+/// this writes is asale's alone: a leftover key from an older build (a `compat`
+/// switch we have since stopped setting, a model no longer selected) would
+/// otherwise accumulate inside it forever. Lines outside the block keep their
+/// bytes, comments and ordering.
+fn yaml_path_set_block(raw: &str, path: &[&str], body: &[String]) -> String {
+    let mut lines: Vec<String> = raw.lines().map(String::from).collect();
+
+    // Deepest existing ancestor, so only what is missing gets created.
+    let existing = {
+        let view: Vec<&str> = lines.iter().map(String::as_str).collect();
+        (0..path.len())
+            .rev()
+            .find_map(|n| yaml_path_span(&view, &path[..=n]).map(|s| (n, s)))
+    };
+
+    let (mut depth, insert_at, indent) = match existing {
+        // The block itself is there: cut it out, and put the replacement back
+        // where it stood.
+        Some((n, (header, _, body_end, indent))) if n + 1 == path.len() => {
+            lines.drain(header..body_end);
+            (n, header, indent)
+        }
+        // An ancestor is there: append the rest inside it, after its last real
+        // content line so a new key lands in the block rather than after its
+        // trailing comments.
+        Some((n, (_, body_start, body_end, indent))) => {
+            let last = (body_start..body_end)
+                .rev()
+                .find(|&i| !lines[i].trim().is_empty() && !lines[i].trim().starts_with('#'));
+            let at = last.map_or(body_end, |i| i + 1);
+            (n + 1, at, format!("{indent}  "))
+        }
+        // Nothing at all: a new top-level section at the end of the file.
+        None => {
+            if !lines.is_empty() && !lines.last().is_some_and(|l| l.trim().is_empty()) {
+                lines.push(String::new());
+            }
+            (0, lines.len(), String::new())
+        }
+    };
+
+    let mut out: Vec<String> = Vec::new();
+    let mut indent = indent;
+    while depth < path.len() {
+        out.push(format!("{indent}{}:", path[depth]));
+        indent.push_str("  ");
+        depth += 1;
+    }
+    out.extend(body.iter().map(|l| format!("{indent}{l}")));
+    lines.splice(insert_at..insert_at, out);
+    join_lines(&lines, raw)
+}
+
+/// Remove the mapping at `path`, and any ancestor it leaves empty.
+fn yaml_path_remove(raw: &str, path: &[&str]) -> String {
+    let mut lines: Vec<String> = raw.lines().map(String::from).collect();
+    for n in (0..path.len()).rev() {
+        let view: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let Some((header, body_start, body_end, _)) = yaml_path_span(&view, &path[..=n]) else {
+            break;
+        };
+        // Below the target itself, only prune what our removal emptied — an
+        // ancestor still holding another provider is not ours to delete.
+        let empty = (body_start..body_end)
+            .all(|i| lines[i].trim().is_empty() || lines[i].trim().starts_with('#'));
+        if n + 1 < path.len() && !empty {
+            break;
+        }
+        lines.drain(header..body_end);
+    }
+    join_lines(&lines, raw)
+}
+
+/// Remove one key from a top-level block, leaving the block itself in place.
+fn yaml_key_remove(raw: &str, section: &str, key: &str) -> String {
+    let mut lines: Vec<String> = raw.lines().map(String::from).collect();
+    let view: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let Some((_, body_start, body_end)) = yaml_block(raw, section) else {
+        return raw.to_string();
+    };
+    let Some((idx, _)) = yaml_key_line(&view, body_start..body_end, key) else {
+        return raw.to_string();
+    };
+    // A comment directly above an entry is that entry's annotation and goes
+    // with it — the harness' own writer treats it the same way.
+    let mut from = idx;
+    while from > body_start && lines[from - 1].trim().starts_with('#') {
+        from -= 1;
+    }
+    lines.drain(from..=idx);
+    join_lines(&lines, raw)
+}
+
+/// Rejoin edited lines, keeping the original's trailing-newline habit.
+fn join_lines(lines: &[String], original: &str) -> String {
+    let mut out = lines.join("\n");
+    if original.is_empty() || original.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 /// The object at `parent[key]`, created (or replaced, if it is not an object)
@@ -1325,6 +1693,8 @@ fn strip_ours(tool: &str, path: &Path) -> Result<()> {
         ("openclaw", _) => strip_openclaw(&raw),
         ("hermes", _) => strip_hermes(&raw),
         ("opencode", _) => strip_opencode(&raw),
+        ("dsh", ".credentials.yaml") => strip_dsh_credentials(&raw),
+        ("dsh", _) => strip_dsh_settings(&raw),
         ("gemini", "settings.json") => strip_gemini_settings(&raw),
         ("gemini", _) => strip_dotenv(&raw, &[GEMINI_BASE_URL, GEMINI_API_KEY]),
         _ => Some(raw),
@@ -1477,7 +1847,16 @@ mod tests {
         // one would have these tests rewriting their real opencode config.
         let prev_xdg = std::env::var("XDG_CONFIG_HOME").ok();
         std::env::set_var("XDG_CONFIG_HOME", tmp.join(".config"));
+        // And the third of the same kind: DeepSeek Harness takes its home from
+        // `$DSH_HOME` when set, which on a machine that has one would put these
+        // tests inside the developer's real harness — credentials file included.
+        let prev_dsh = std::env::var("DSH_HOME").ok();
+        std::env::set_var("DSH_HOME", tmp.join(".dsh"));
         let out = f();
+        match prev_dsh {
+            Some(p) => std::env::set_var("DSH_HOME", p),
+            None => std::env::remove_var("DSH_HOME"),
+        }
         match prev_xdg {
             Some(p) => std::env::set_var("XDG_CONFIG_HOME", p),
             None => std::env::remove_var("XDG_CONFIG_HOME"),
@@ -2266,6 +2645,141 @@ auxiliary:
             "OTHER=1\n"
         );
         assert!(strip_dotenv("GOOGLE_GEMINI_BASE_URL=http://x\n", &[GEMINI_BASE_URL]).is_none());
+    }
+
+    // ── DeepSeek Harness ───────────────────────────────────────────────────
+
+    /// A settings file with another provider already configured — the case that
+    /// decides whether this switch is safe to turn on at all.
+    const DSH_THEIRS: &str = "\
+llm-pi-ai:
+  providers:
+    # their company gateway
+    my-gateway:
+      apiKeyEnv: GATEWAY_API_KEY
+      api: openai-completions
+      baseURL: https://gateway.example/v1
+      models:
+        - id: legacy-chat
+
+llm-deepseek:
+  reasoningEffort: high
+";
+
+    #[test]
+    fn dsh_switch_writes_a_route_and_leaves_every_other_one_alone() {
+        with_temp_home(|| {
+            let paths = config_paths("dsh");
+            let (settings, creds) = (&paths[0], &paths[1]);
+            std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+            std::fs::write(settings, DSH_THEIRS).unwrap();
+
+            let backup = apply("dsh", "http://127.0.0.1:9787", "sk-asale-dsh", &["gpt-5.5".into()])
+                .unwrap();
+            let after = read_raw(settings).unwrap();
+
+            // Ours is there, addressed under its own prefix.
+            assert_eq!(
+                current_base_url("dsh").as_deref(),
+                Some(proxy_base_for("dsh").as_str())
+            );
+            assert!(points_at_proxy("dsh"));
+            // Quoted, as `yaml_scalar` writes every value: a model id is a
+            // plain string and must not be read as a YAML float or date.
+            assert!(after.contains(r#"- id: "gpt-5.5""#), "got:\n{after}");
+            // The two compat switches, without which a reasoning model's
+            // system prompt arrives as an ordinary message.
+            assert!(after.contains("supportsDeveloperRole: false"));
+            assert!(after.contains("maxTokensField: max_tokens"));
+
+            // Theirs is untouched, comment included.
+            assert!(after.contains("# their company gateway"));
+            assert!(after.contains("apiKeyEnv: GATEWAY_API_KEY"));
+            assert_eq!(
+                yaml_path_get(&after, &[DSH_SECTION, "providers", "my-gateway"], "baseURL")
+                    .as_deref(),
+                Some("https://gateway.example/v1")
+            );
+            assert!(after.contains("reasoningEffort: high"), "a sibling section survives");
+
+            // The secret went to the credentials document, never to settings.
+            assert!(!after.contains("sk-asale-dsh"), "settings must hold a reference, not a key");
+            let c = read_raw(creds).unwrap();
+            assert!(c.contains(&format!(r#"{DSH_KEY_ENV}: "sk-asale-dsh""#)), "got:\n{c}");
+            assert!(c.contains("version: 1"), "the store rejects an unversioned document");
+
+            restore("dsh", &backup).unwrap();
+            assert_eq!(read_raw(settings).unwrap(), DSH_THEIRS, "restore is byte-exact");
+            assert!(read_raw(creds).is_none(), "a credentials file we created is removed");
+        });
+    }
+
+    /// Turning the switch off on a machine where the file was already there has
+    /// to leave the user's own credentials in place.
+    #[test]
+    fn dsh_strip_takes_only_our_own_key() {
+        let doc = format!(
+            "version: 1\n\nrefs:\n  DEEPSEEK_API_KEY: sk-theirs\n  {DSH_KEY_ENV}: sk-ours\n"
+        );
+        let out = strip_dsh_credentials(&doc).expect("their key still makes this a real document");
+        assert!(out.contains("DEEPSEEK_API_KEY: sk-theirs"));
+        assert!(!out.contains(DSH_KEY_ENV));
+
+        // Ours alone: nothing of theirs is left, so the file goes.
+        let only_ours = format!("version: 1\n\nrefs:\n  {DSH_KEY_ENV}: sk-ours\n");
+        assert!(strip_dsh_credentials(&only_ours).is_none());
+    }
+
+    /// Re-applying must not accumulate. The route is rewritten whole, so a
+    /// model dropped from the selection leaves with it.
+    #[test]
+    fn dsh_reapply_replaces_the_route_rather_than_merging_into_it() {
+        with_temp_home(|| {
+            let settings = &config_paths("dsh")[0];
+            apply("dsh", "http://127.0.0.1:9787", "t", &["a-model".into(), "b-model".into()])
+                .unwrap();
+            apply("dsh", "http://127.0.0.1:9787", "t", &["b-model".into()]).unwrap();
+            let after = read_raw(settings).unwrap();
+            assert!(!after.contains("a-model"), "a deselected model must not survive");
+            assert_eq!(after.matches("baseURL:").count(), 1, "one route, written once");
+        });
+    }
+
+    /// An empty selection installs the route with no `models` key at all —
+    /// never an empty list, which this document's reader rejects outright,
+    /// taking every other provider down with it.
+    #[test]
+    fn dsh_empty_selection_omits_the_model_list() {
+        with_temp_home(|| {
+            let settings = &config_paths("dsh")[0];
+            apply("dsh", "http://127.0.0.1:9787", "t", &[]).unwrap();
+            let after = read_raw(settings).unwrap();
+            assert!(after.contains("api: openai-completions"));
+            assert!(!after.contains("models:"), "no key beats an empty one here");
+        });
+    }
+
+    /// The nested walk must not wander into a same-named key under a different
+    /// parent — `providers:` is an ordinary word in this file.
+    #[test]
+    fn dsh_path_walk_stays_inside_its_own_section() {
+        let doc = "\
+other:
+  providers:
+    asale:
+      baseURL: https://not-ours.example
+llm-pi-ai:
+  providers:
+    asale:
+      baseURL: https://ours.example
+";
+        assert_eq!(
+            yaml_path_get(doc, &[DSH_SECTION, "providers", DSH_ROUTE], "baseURL").as_deref(),
+            Some("https://ours.example")
+        );
+        let stripped = yaml_path_remove(doc, &[DSH_SECTION, "providers", DSH_ROUTE]);
+        assert!(stripped.contains("https://not-ours.example"), "the other section is not ours");
+        assert!(!stripped.contains("https://ours.example"));
     }
 }
 
