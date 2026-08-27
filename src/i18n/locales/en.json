@@ -158,6 +158,7 @@
     "windowUpstream": "Subscription window used ({{window}}, from the provider)",
     "usedTodayFact": "Served today (UTC)",
     "expiredHint": "This credential has expired or could not be refreshed — reconnect the account before selling again.",
+    "reauth": "Sign in again",
     "blockedHint": "The provider refused requests from this machine (a region block or a network filter), not the credential — the sign-in is still valid. Check the network route to the provider, then press Resume.",
     "statusAvailable": "available",
     "statusCooldown": "cooldown",
@@ -229,6 +230,8 @@
     "lanes": "Per-model",
     "laneResume": "Resume",
     "laneResumeHint": "Put this model back on the market once you have fixed the problem",
+    "laneReauth": "Sign in again",
+    "laneReauthHint": "This account's credential is dead — signing in again puts these models back on the market on its own",
     "laneStatus": {
       "selling": "selling",
       "cooldown": "cooling down",

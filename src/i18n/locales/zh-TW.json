@@ -158,6 +158,7 @@
     "windowUpstream": "訂閱視窗已用（{{window}}，服務商即時）",
     "usedTodayFact": "今日已售出（UTC）",
     "expiredHint": "此憑證已失效或無法自動更新，請重新連接帳號後再賣出。",
+    "reauth": "重新登入",
     "blockedHint": "上游拒絕了本機發出的請求（地區限制或網路出口被攔截），拒絕的是這台機器而不是憑證——登入仍然有效。請檢查到上游的網路出口，處理好後點「恢復」。",
     "statusAvailable": "可用",
     "statusCooldown": "冷卻中",
@@ -229,6 +230,8 @@
     "lanes": "分模型狀態",
     "laneResume": "恢復",
     "laneResumeHint": "問題處理完成後，把該模型重新投放到市場",
+    "laneReauth": "重新登入",
+    "laneReauthHint": "該帳號的憑證已失效，重新登入後這些模型會自動回到市場",
     "laneStatus": {
       "selling": "在售",
       "cooldown": "冷卻中",

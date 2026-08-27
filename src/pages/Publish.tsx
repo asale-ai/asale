@@ -211,12 +211,16 @@ const RANK_VISIBLE = 8;
  *  meaningful against an axis that does not move when the prices do.
  */
 function DiscountRank({
-  lanes, floor, now, onResume, resuming, verdicts, gated,
+  lanes, floor, now, onResume, onReauth, resuming, verdicts, gated,
 }: {
   lanes: Lane[];
   floor: number;
   now: number;
   onResume: (lane: Lane) => void;
+  /** Take the operator back through this account's sign-in. Absent for the
+   *  families that have no re-connect flow (a custom endpoint), whose lanes
+   *  fall back to the plain resume button. */
+  onReauth?: () => void;
   resuming: Record<string, boolean>;
   /** This account's verification standing, one entry per lane that has one. */
   verdicts: LaneVerdict[];
@@ -361,7 +365,20 @@ function DiscountRank({
                 {state}
                 {back && <span className="dr-back"> · {back}</span>}
               </span>
-              {l.requires_user && (
+              {/* "Resume" means "I have fixed it". A revoked or expired
+                  credential is the one pause the operator cannot fix anywhere
+                  else, so pressing it there just puts the lane back for one
+                  more 401 — the button has to be the sign-in itself. */}
+              {l.requires_user && (l.paused_reason === "auth" && onReauth ? (
+                <button
+                  className="lane-resume"
+                  onClick={onReauth}
+                  disabled={!inTauri}
+                  title={t("publish.laneReauthHint")}
+                >
+                  {t("publish.laneReauth")}
+                </button>
+              ) : (
                 <button
                   className="lane-resume"
                   onClick={() => onResume(l)}
@@ -370,7 +387,7 @@ function DiscountRank({
                 >
                   {t("publish.laneResume")}
                 </button>
-              )}
+              ))}
             </div>
           );
         }))}
@@ -1079,6 +1096,10 @@ export function Publish() {
    *  are reachable from the lane list behind it. */
   const autoPrompted = useRef(false);
 
+  /** The connect card, so a re-sign-in started from an account further down the
+   *  page can scroll the form it just opened into view. */
+  const connectCard = useRef<HTMLDivElement>(null);
+
   /** Show the verification dialog for one account.
    *
    *  `force` means the seller just did something — moved the switch — and is
@@ -1342,6 +1363,32 @@ export function Publish() {
       setMsg(t("publish.connected", { provider, account: r.account_id }));
       loadAccounts();
     } catch (e) { setErr(errText(e)); } finally { setBusy(false); setDeviceCode(null); }
+  }
+
+  /** Whether this family can be signed in to again from here. Everything but a
+   *  custom endpoint can: those are booked under `custom` with no per-endpoint
+   *  re-key form, and offering a button that opens a *new* endpoint form would
+   *  be worse than the plain resume they already have. */
+  const canReauth = (a: AccountStatus) =>
+    a.provider !== ENDPOINT_TILE && !!ALL_PROVIDERS.find((p) => p.id === a.provider);
+
+  /** The credential is dead — take the operator back through the same sign-in
+   *  that created this account, rather than through remove-and-add.
+   *
+   *  Nothing else is needed: the daemon upserts on `account_id`, and
+   *  `credential_replaced` clears this account's `auth` pauses (on disk and in
+   *  the pool) and re-declares every lane they were holding. So there is no
+   *  "now press resume" step afterwards, and there must not be one — the
+   *  in-memory `auth_failed` flag is what the resume button reads, and it does
+   *  not survive a restart. */
+  function reconnect(a: AccountStatus) {
+    const cred = ALL_PROVIDERS.find((p) => p.id === a.provider)?.credential;
+    if (cred === "oauth") return void connect(a.provider);
+    if (cred === "device_flow") return void connectDevice(a.provider);
+    // Key families: the form lives in the connect card above this one, so the
+    // button has to bring it into view as well as open it.
+    openKeyForm(a.provider);
+    connectCard.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   /** Only one connect form is open at a time. The tiles are one row of choices,
@@ -1794,14 +1841,16 @@ export function Publish() {
 
       {/* Connecting comes first: with no account yet the rest of the page has
           nothing to show, and the empty state points "above" for OAuth. */}
-      <Card
-        icon={<IconPlus />}
-        title={t("publish.connectTitle")}
-        desc={t("publish.connectDesc")}
-      >
-        {connectGrid}
-        <Ok>{msg}</Ok>
-      </Card>
+      <div ref={connectCard}>
+        <Card
+          icon={<IconPlus />}
+          title={t("publish.connectTitle")}
+          desc={t("publish.connectDesc")}
+        >
+          {connectGrid}
+          <Ok>{msg}</Ok>
+        </Card>
+      </div>
 
       <Card
         icon={<IconShield />}
@@ -1868,6 +1917,14 @@ export function Publish() {
               // be inferred from an `exhausted` pill. It is also the *only*
               // local rule that can stop an account now.
               const capSpent = limit > 0 && a.used_today >= limit;
+              // The credential needs a person. Read off the *lanes* as well as
+              // the account, because the two outlive each other by different
+              // amounts: the `expired` status comes from an in-memory
+              // `auth_failed` that a daemon restart forgets, while the lanes'
+              // `auth` pause is on disk and comes back. Asking only the account
+              // meant a restart quietly dropped the banner and left six lanes
+              // labelled "sign-in needed" with nothing on the page saying why.
+              const deadCred = a.status === "expired" || own.some((l) => l.paused_reason === "auth");
               return (
                 <div key={k} className={`acct ${a.sell_enabled ? "selling" : ""}`}>
                   <div className="acct-head">
@@ -1916,9 +1973,18 @@ export function Publish() {
                     </div>
                   </div>
 
-                  {a.status === "expired" && (
+                  {deadCred && (
                     <div className="callout warn compact">
                       <IconInfo /><span>{t("publish.expiredHint")}</span>
+                      {canReauth(a) && (
+                        <button
+                          className="btn ghost sm callout-act"
+                          onClick={() => reconnect(a)}
+                          disabled={!inTauri || busy}
+                        >
+                          {t("publish.reauth")}
+                        </button>
+                      )}
                     </div>
                   )}
 
@@ -2226,6 +2292,7 @@ export function Publish() {
                           floor={floor}
                           now={now}
                           onResume={resume}
+                          onReauth={canReauth(a) ? () => reconnect(a) : undefined}
                           resuming={resuming}
                           verdicts={verification?.lanes ?? []}
                           gated={!!verification?.enabled && !!verification?.enforced}

@@ -1295,9 +1295,17 @@ impl TokenProvider for PoolTokens {
             return;
         }
         let now = now_secs();
+        // Which lanes the outcome actually moved. Almost always just the one
+        // that failed — but an auth failure is the *account's*, and `on_error`
+        // pauses every lane it has. Emitting only the failing model left the
+        // other lanes' pauses in memory alone: `spawn_lane_loop` never saw them,
+        // so nothing was written to disk, and the next daemon start put five of
+        // this account's six lanes straight back on the market to earn the same
+        // 401 — and a fresh reputation hit — one buyer at a time.
+        let mut touched: Vec<String> = Vec::new();
         let (paused, detail) = {
             let Ok(mut pool) = self.pool.lock() else { return };
-            match outcome {
+            let out = match outcome {
                 TaskOutcome::Success { tokens_used } => {
                     pool.on_success(provider, account_id, model, tokens_used);
                     (None, String::new())
@@ -1337,12 +1345,34 @@ impl TokenProvider for PoolTokens {
                     let d = "upstream refused this machine (403 — region block or network filter)";
                     (pool.on_error(provider, account_id, model, UpstreamErrorKind::Blocked, d, now), d.to_string())
                 }
+            };
+            // Read back rather than returned from `on_error`: `Blocked` widens
+            // the same way once its ladder runs out, and asking the pool what is
+            // actually paused now covers both without either arm knowing.
+            if matches!(out.0, Some(PauseReason::Auth | PauseReason::Blocked)) {
+                let reason = out.0.map(|r| r.as_str());
+                touched.extend(
+                    pool.lane_views(now)
+                        .into_iter()
+                        .filter(|v| {
+                            v.provider == provider
+                                && v.account_id == account_id
+                                && v.model != model
+                                && v.paused_reason.as_deref() == reason
+                        })
+                        .map(|v| v.model),
+                );
             }
+            out
         };
         // A success is worth reporting too: it may have cleared a cooldown, and
         // the market should hear about restored capacity as promptly as it
         // hears about lost capacity.
         self.emit(provider, account_id, model, paused, &detail);
+        // The account's other lanes, when this pause took them out too.
+        for m in &touched {
+            self.emit(provider, account_id, m, paused, &detail);
+        }
     }
 }
 
@@ -2005,6 +2035,33 @@ mod tests {
         by_provider.insert("claude".to_string(), vec!["claude-opus-5".to_string()]);
         by_provider.insert("codex".to_string(), vec!["gpt-5.5".to_string(), "gpt-5.4".to_string()]);
         Some(SellableCatalog { fetched_at: 1, by_provider, ..Default::default() })
+    }
+
+    /// An auth failure is the *account's*, and `on_error` takes every lane it
+    /// holds off the market for it. Every one of those has to reach the lane
+    /// loop, because that loop is what writes the pause to disk — and disk is
+    /// what a restart reads. Emitting only the model that happened to fail once
+    /// left five of six lanes paused in memory alone, so the next start put them
+    /// back on the market to collect the same 401 one buyer at a time.
+    #[test]
+    fn an_auth_failure_reports_every_lane_of_the_account() {
+        let mut a = AccountRuntime::new("claude", "me@x", "claude:me@x")
+            .with_models(["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"]);
+        a.sell_enabled = true;
+        let mut pool = AccountPool::new(asale_client_core::Strategy::FillFirst);
+        pool.set_accounts(vec![a]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let tokens = PoolTokens { pool: Arc::new(StdMutex::new(pool)), lanes: Some(tx) };
+
+        tokens.report("claude", "me@x", "claude-opus-5", TaskOutcome::AuthFailed);
+
+        let mut reported = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            assert_eq!(ev.paused.as_deref(), Some("auth"), "{} came through unpaused", ev.model);
+            reported.push(ev.model);
+        }
+        reported.sort();
+        assert_eq!(reported, ["claude-haiku-4-5", "claude-opus-5", "claude-sonnet-5"]);
     }
 
     #[test]
