@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="public/logo.svg" width="88" alt="Asale">
+<a href="https://asale.ai"><img src="public/logo.svg" width="88" alt="Asale"></a>
 
 # Asale 用戶端
 
@@ -24,6 +24,15 @@
 </div>
 
 ---
+
+## 目錄
+
+- [這是什麼](#這是什麼)
+- [功能](#功能)
+- [下載與安裝](#下載與安裝)
+- [安全與隱私](#安全與隱私)
+- [開發者](#開發者)
+- [授權與風險](#授權與風險)
 
 ## 這是什麼
 

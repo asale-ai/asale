@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="public/logo.svg" width="88" alt="Asale">
+<a href="https://asale.ai"><img src="public/logo.svg" width="88" alt="Asale"></a>
 
 # Asale Client
 
@@ -24,6 +24,15 @@ Turn idle quota into income; when you hit a limit, someone else takes over.
 </div>
 
 ---
+
+## Contents
+
+- [What is this](#what-is-this)
+- [Features](#features)
+- [Download & install](#download--install)
+- [Security & privacy](#security--privacy)
+- [Developers](#developers)
+- [License & risk](#license--risk)
 
 ## What is this
 

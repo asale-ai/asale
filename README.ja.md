@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="public/logo.svg" width="88" alt="Asale">
+<a href="https://asale.ai"><img src="public/logo.svg" width="88" alt="Asale"></a>
 
 # Asale クライアント
 
@@ -24,6 +24,15 @@
 </div>
 
 ---
+
+## 目次
+
+- [これは何か](#これは何か)
+- [機能](#機能)
+- [ダウンロードとインストール](#ダウンロードとインストール)
+- [セキュリティとプライバシー](#セキュリティとプライバシー)
+- [開発者向け](#開発者向け)
+- [ライセンスとリスク](#ライセンスとリスク)
 
 ## これは何か
 

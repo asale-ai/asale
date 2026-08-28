@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="public/logo.svg" width="88" alt="Asale">
+<a href="https://asale.ai"><img src="public/logo.svg" width="88" alt="Asale"></a>
 
 # Asale 客户端
 
@@ -24,6 +24,15 @@
 </div>
 
 ---
+
+## 目录
+
+- [这是什么](#这是什么)
+- [功能](#功能)
+- [下载与安装](#下载与安装)
+- [安全与隐私](#安全与隐私)
+- [开发者](#开发者)
+- [许可与风险](#许可与风险)
 
 ## 这是什么
 
