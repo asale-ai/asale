@@ -116,6 +116,9 @@ pub async fn create_api_key_ex(
     label: String,
     expires_in_days: Option<i64>,
     set_default: bool,
+    // The highest market price this key buys at, in whole percent of list.
+    // `None` leaves it at the server's default, which is no ceiling.
+    max_ratio_pct: Option<i32>,
     apply: bool,
 ) -> R<Value> {
     let mut v = authed(
@@ -126,6 +129,7 @@ pub async fn create_api_key_ex(
             "label": label,
             "expires_in_days": expires_in_days,
             "set_default": set_default,
+            "max_ratio_pct": max_ratio_pct,
         })),
     )
     .await?;
@@ -152,6 +156,8 @@ pub async fn update_api_key(
     // the expiry alone, `Some(None)` clears it, `Some(Some(n))` re-dates it.
     expires_in_days: Option<Option<i64>>,
     set_default: Option<bool>,
+    // The highest market price this key buys at, in whole percent of list.
+    max_ratio_pct: Option<i32>,
     apply: bool,
 ) -> R<Value> {
     let mut body = serde_json::Map::new();
@@ -166,6 +172,9 @@ pub async fn update_api_key(
     }
     if let Some(d) = set_default {
         body.insert("set_default".into(), json!(d));
+    }
+    if let Some(p) = max_ratio_pct {
+        body.insert("max_ratio_pct".into(), json!(p));
     }
     let mut v = authed(
         state,

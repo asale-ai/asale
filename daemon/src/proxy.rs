@@ -564,6 +564,17 @@ async fn send_market(
     if let Some(tool) = tool {
         req = req.header(asale_protocol::frame::H_TOOL, tool);
     }
+    // The most the user is willing to pay for this model, as a percentage of
+    // the vendor's list price. The market ratio moves on its own — a request
+    // that finds no supply at the published price raises it to wherever the
+    // cheapest reserve is — so without this a buyer who came for the discount
+    // can be served at close to list without ever agreeing to it. Sent only
+    // when a ceiling was actually set: 100 is list price, which the market can
+    // never exceed anyway, so the header would be pure noise.
+    let ceiling = crate::commands::buy::max_ratio_pct(&st.store).await;
+    if ceiling < 100 {
+        req = req.header(asale_protocol::frame::H_MAX_RATIO, ceiling.to_string());
+    }
     req.body(bytes.to_vec()).send().await
 }
 

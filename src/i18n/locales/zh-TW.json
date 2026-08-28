@@ -386,7 +386,13 @@
     "openedFile": "已開啟 {{path}}。",
     "openedFolder": "該設定檔尚未產生，已改為開啟所在資料夾 {{path}}。",
     "reapply": "重新套用",
-    "repaired": "{{tools}} 的設定曾被其他程式改動，已自動重新指向 Asale。重新啟動該工具後生效。"
+    "repaired": "{{tools}} 的設定曾被其他程式改動，已自動重新指向 Asale。重新啟動該工具後生效。",
+    "maxPriceTitle": "最高買入價",
+    "maxPriceDesc": "Asale 的市場價是官方價的一個百分比，會隨供給浮動。超過這裡設定的上限，請求會被拒絕，而不是以你沒同意過的價格成交。",
+    "maxPriceLabel": "上限（官方價的百分比）",
+    "maxPriceSave": "儲存",
+    "maxPriceHint": "市場要價高於官方價的 {{pct}}% 時拒絕成交。只對本機的工具生效；在別處使用的 Key 依它自己的上限，於「API Key」頁設定。",
+    "maxPriceHintOff": "100% 就是官方價，市場價永遠不會超過它，等於不限制。調低才會限制你實際支付的價格。"
   },
   "apikeys": {
     "title": "API 金鑰",
@@ -468,7 +474,11 @@
     "sampleUsesLocalProxy": "範例指向本機代理：金鑰由用戶端注入，這裡填什麼都可以。用戶端未執行時該位址無法使用。",
     "sample": "範例",
     "sampleUsesRealKey": "範例中已填入你的真實金鑰，請勿把這段程式分享出去。",
-    "sampleUsesPlaceholder": "把佔位符換成你的金鑰，或點擊上方某把金鑰右側的眼睛圖示顯示它。"
+    "sampleUsesPlaceholder": "把佔位符換成你的金鑰，或點擊上方某把金鑰右側的眼睛圖示顯示它。",
+    "colMaxRatio": "買入價上限",
+    "maxRatioNone": "不限制",
+    "maxRatioTip": "這把 Key 最多以官方價的百分之多少買入，點擊可修改。100% 就是官方價，市場價永遠不會超過它，等於不限制。",
+    "maxRatioHint": "這把 Key 最多以官方價的百分之多少買入。100% 就是官方價，市場價永遠不會超過它，等於不限制。"
   },
   "wallet": {
     "title": "錢包",
@@ -1155,7 +1165,8 @@
     "market": {
       "noSupply": "目前沒有賣家在售 {{model}}。",
       "modelNotTraded": "本平台不交易 {{model}}。",
-      "laneUnverified": "本機的 {{model}} 通道還沒通過模型驗證，市場暫時不會把請求路由過來。跑一次驗證就能開始出售。"
+      "laneUnverified": "本機的 {{model}} 通道還沒通過模型驗證，市場暫時不會把請求路由過來。跑一次驗證就能開始出售。",
+      "priceAboveCap": "{{model}} 目前市價是官方價的 {{ask}}%，高於你設定的上限 {{cap}}%。可以等價格回落，或到「買 Token」頁把上限調高。"
     },
     "wallet": {
       "insufficientBalance": "餘額不足。",

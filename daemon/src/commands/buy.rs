@@ -16,6 +16,27 @@ pub async fn buy_models(store: &asale_client_core::store::LocalStore, tool: &str
     store.buy_tool(tool).await.map(|r| r.models).unwrap_or_default()
 }
 
+/// Setting key for the buyer's price ceiling, in whole percent of the vendor's
+/// list price. Absent = 100 = no ceiling.
+pub const MAX_RATIO_KEY: &str = "buy_max_ratio";
+
+/// The ceiling this machine buys under, as the proxy sends it to the gateway.
+///
+/// Clamped to what the market can actually quote: below 5% no trade has ever
+/// existed, above 100% is list price, which is the market's own ceiling. A
+/// setting that was never written reads as 100 — the behaviour every install
+/// had before this existed.
+pub async fn max_ratio_pct(store: &asale_client_core::store::LocalStore) -> i32 {
+    store
+        .get_setting(MAX_RATIO_KEY)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.trim().parse::<i32>().ok())
+        .unwrap_or(100)
+        .clamp(5, 100)
+}
+
 /// Is this tool's buy switch on?
 pub async fn buy_is_enabled(store: &asale_client_core::store::LocalStore, tool: &str) -> bool {
     store.buy_tool(tool).await.map(|r| r.enabled).unwrap_or(false)

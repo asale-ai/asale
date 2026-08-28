@@ -386,7 +386,13 @@
     "openedFile": "Opened {{path}}.",
     "openedFolder": "That file has not been written yet — opened the folder {{path}} instead.",
     "reapply": "Re-apply",
-    "repaired": "{{tools}}: the config had been changed by something else and was pointed back at Asale. Restart the tool for it to take effect."
+    "repaired": "{{tools}}: the config had been changed by something else and was pointed back at Asale. Restart the tool for it to take effect.",
+    "maxPriceTitle": "Highest price to buy at",
+    "maxPriceDesc": "Asale prices every model as a percentage of the vendor's list price, and that percentage moves with supply. Above the ceiling set here, a request is refused instead of being served at a price you did not agree to.",
+    "maxPriceLabel": "Ceiling, as % of list price",
+    "maxPriceSave": "Save",
+    "maxPriceHint": "Requests are refused when the market is asking more than {{pct}}% of list price. Applies to the tools on this machine; a key used from somewhere else carries its own ceiling, set on the API keys page.",
+    "maxPriceHintOff": "100% is list price, which the market can never exceed — no request is refused on price. Lower it to cap what you pay."
   },
   "apikeys": {
     "title": "API keys",
@@ -468,7 +474,11 @@
     "sampleUsesLocalProxy": "This sample points at the local proxy: the app injects the key, so whatever is in the code is ignored. The address is dead while the app is not running.",
     "sample": "Sample",
     "sampleUsesRealKey": "This sample carries a real key of yours. Do not share the snippet.",
-    "sampleUsesPlaceholder": "Replace the placeholder with one of your keys, or reveal a key above with its eye button."
+    "sampleUsesPlaceholder": "Replace the placeholder with one of your keys, or reveal a key above with its eye button.",
+    "colMaxRatio": "Price cap",
+    "maxRatioNone": "No cap",
+    "maxRatioTip": "The most this key will pay, as a percentage of the vendor's list price. Click to change. 100% is list price, which the market never exceeds — that is no cap at all.",
+    "maxRatioHint": "The most this key will pay, as a percentage of the vendor's list price. 100% is list price, which the market never exceeds — no cap."
   },
   "wallet": {
     "title": "Wallet",
@@ -1155,7 +1165,8 @@
     "market": {
       "noSupply": "No provider is selling {{model}} right now.",
       "modelNotTraded": "{{model}} is not traded on this platform.",
-      "laneUnverified": "This device's {{model}} lane has not passed model verification yet, so the market will not route to it. Run the verification and it will start selling."
+      "laneUnverified": "This device's {{model}} lane has not passed model verification yet, so the market will not route to it. Run the verification and it will start selling.",
+      "priceAboveCap": "{{model}} is trading at {{ask}}% of list price, above your {{cap}}% ceiling. Wait for the price to come down, or raise the ceiling on the Buy page."
     },
     "wallet": {
       "insufficientBalance": "Insufficient balance.",

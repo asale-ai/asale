@@ -363,6 +363,11 @@ export interface ApiKeyRow {
   /** False for keys minted before the sealed copy existed: those cannot be
    *  shown again, only replaced. */
   revealable: boolean;
+  /** The highest market price this key buys at, in whole percent of the
+   *  vendor's list price. 100 = list price = no ceiling, which is what the
+   *  market itself is capped at. Requests above it are refused
+   *  (`price_above_cap`) instead of being served at a price nobody agreed to. */
+  max_ratio_pct: number;
 }
 
 /** `GET /api/v1/apikeys`. */
@@ -374,6 +379,10 @@ export interface ApiKeyList {
    *  rather than folded into the number, so a console never shows an exempt
    *  account "12 / 10" beside a button it has disabled for no reason. */
   unlimited: boolean;
+  /** What "no price ceiling" is spelled as, and the lowest ceiling worth
+   *  setting — stated by the server so no frontend hard-codes the range. */
+  max_ratio_pct_default: number;
+  max_ratio_pct_min: number;
 }
 
 /** `POST /api/v1/apikeys` — the one moment the plaintext is returned. */
@@ -384,6 +393,8 @@ export interface ApiKeyCreated {
   key_preview: string;
   is_default: boolean;
   expires_at: string | null;
+  /** The ceiling this key was minted with, in whole percent of list price. */
+  max_ratio_pct: number;
 }
 
 /** `PATCH /api/v1/apikeys/:id`. */

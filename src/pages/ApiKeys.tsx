@@ -57,6 +57,14 @@ function previewHasTail(preview: string): boolean {
   return /[^•]/.test(preview.replace(/^sk-asale-/, ""));
 }
 
+/** The range the market can actually quote in — 5% is its floor and 100% is
+ *  list price, its ceiling. Anything else reads as "no ceiling". */
+function clampRatio(v: string): number {
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n)) return 100;
+  return Math.min(100, Math.max(5, n));
+}
+
 /** Whole days from now until `iso`, rounded up. */
 function daysLeft(iso: string): number {
   return Math.ceil((new Date(iso).getTime() - Date.now()) / 86_400_000);
@@ -72,6 +80,8 @@ export function ApiKeys() {
   const [creating, setCreating] = useState(false);
   const [newLabel, setNewLabel] = useState("");
   const [newTtl, setNewTtl] = useState<number | null>(null);
+  /** The price ceiling the new key is minted with, as the input holds it. */
+  const [newRatio, setNewRatio] = useState("100");
   const nameRef = useRef<HTMLInputElement>(null);
   const [fresh, setFresh] = useState<{ id: number; key: string } | null>(null);
   const [shown, setShown] = useState<Record<number, string>>({});
@@ -141,6 +151,7 @@ export function ApiKeys() {
     setCreating(false);
     setNewLabel("");
     setNewTtl(null);
+    setNewRatio("100");
   }, []);
 
   async function create() {
@@ -150,11 +161,13 @@ export function ApiKeys() {
       const r = await invoke<{ id: number; key: string }>("create_api_key", {
         label: newLabel.trim(),
         expiresInDays: newTtl,
+        maxRatioPct: clampRatio(newRatio),
       });
       setFresh({ id: r.id, key: r.key });
       setCreating(false);
       setNewLabel("");
       setNewTtl(null);
+      setNewRatio("100");
       await load();
     } catch (e) {
       setErr(String(e));
@@ -222,6 +235,7 @@ export function ApiKeys() {
     onRename: (label) => run(() => invoke("update_api_key", { id: k.id, label })),
     onToggle: () => run(() => invoke("update_api_key", { id: k.id, enabled: !k.enabled })),
     onRenew: () => run(() => invoke("update_api_key", { id: k.id, expiresInDays: 90 })),
+    onMaxRatio: (pct) => run(() => invoke("update_api_key", { id: k.id, maxRatioPct: pct })),
     onDefault: () => intend(k, "default"),
     onApply: () => intend(k, "apply"),
     onDelete: () => run(() => invoke("delete_api_key", { id: k.id })),
@@ -308,9 +322,11 @@ export function ApiKeys() {
               nameRef={nameRef}
               label={newLabel}
               ttl={newTtl}
+              ratio={newRatio}
               busy={busy}
               onLabel={setNewLabel}
               onTtl={setNewTtl}
+              onRatio={setNewRatio}
               onSubmit={create}
               onCancel={closeCreate}
             />
@@ -346,6 +362,7 @@ export function ApiKeys() {
                 <th>{t("apikeys.colKey")}</th>
                 <th>{t("apikeys.colStatus")}</th>
                 <th>{t("apikeys.colExpiry")}</th>
+                <th>{t("apikeys.colMaxRatio")}</th>
                 <th aria-label={t("apikeys.rowActions")} />
               </tr>
             </thead>
@@ -378,14 +395,16 @@ export function ApiKeys() {
 /* ── Creation ────────────────────────────────────────────────────────── */
 
 function CreateForm({
-  nameRef, label, ttl, busy, onLabel, onTtl, onSubmit, onCancel,
+  nameRef, label, ttl, ratio, busy, onLabel, onTtl, onRatio, onSubmit, onCancel,
 }: {
   nameRef: React.RefObject<HTMLInputElement>;
   label: string;
   ttl: number | null;
+  ratio: string;
   busy: boolean;
   onLabel: (v: string) => void;
   onTtl: (v: number | null) => void;
+  onRatio: (v: string) => void;
   onSubmit: () => void;
   onCancel: () => void;
 }) {
@@ -433,6 +452,24 @@ function CreateForm({
           </div>
           <div className="hint">{t("apikeys.expiryHint")}</div>
         </div>
+        <div className="field" style={{ marginBottom: 0 }}>
+          <label htmlFor="ak-ratio">{t("apikeys.colMaxRatio")}</label>
+          <div className="input-row">
+            <input
+              id="ak-ratio"
+              className="input mono"
+              style={{ width: 88 }}
+              type="number"
+              min={5}
+              max={100}
+              value={ratio}
+              onChange={(e) => onRatio(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && onSubmit()}
+            />
+            <span className="unit">%</span>
+          </div>
+          <div className="hint">{t("apikeys.maxRatioHint")}</div>
+        </div>
       </div>
 
       <div className="btn-row" style={{ marginTop: "var(--s16)" }}>
@@ -461,6 +498,7 @@ type RowProps = {
   onRename: (label: string) => void;
   onToggle: () => void;
   onRenew: () => void;
+  onMaxRatio: (pct: number) => void;
   onDefault: () => void;
   onApply: () => void;
   onDelete: () => void;
@@ -482,6 +520,9 @@ function Row(p: RowProps) {
       </td>
       <td className="nowrap">
         <Expiry row={row} fmtDate={p.fmtDate} />
+      </td>
+      <td className="nowrap">
+        <MaxRatio row={row} busy={p.busy} onSave={p.onMaxRatio} />
       </td>
       <td>
         <span className="btn-row nowrap" style={{ justifyContent: "flex-end", flexWrap: "nowrap" }}>
@@ -652,6 +693,60 @@ function Expiry({ row, fmtDate }: { row: ApiKeyRow; fmtDate: (iso: string) => st
         </div>
       )}
     </>
+  );
+}
+
+/** The price ceiling this key buys under, edited in place.
+ *
+ *  A percentage of the vendor's list price: the market never quotes above 100%,
+ *  so that value is the one that refuses nothing and is drawn as such rather
+ *  than as a number. Keys used by this machine's own tools are additionally
+ *  held to the ceiling on the Buy page — whichever of the two is stricter wins,
+ *  so a key can never be talked into paying more than it says here. */
+function MaxRatio({
+  row, busy, onSave,
+}: { row: ApiKeyRow; busy: boolean; onSave: (pct: number) => void }) {
+  const { t } = useTranslation();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const pct = row.max_ratio_pct || 100;
+
+  if (editing) {
+    const commit = () => {
+      setEditing(false);
+      const next = clampRatio(draft);
+      if (next !== pct) onSave(next);
+    };
+    return (
+      <input
+        className="input mono"
+        style={{ width: 88 }}
+        type="number"
+        min={5}
+        max={100}
+        autoFocus
+        aria-label={t("apikeys.colMaxRatio")}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") commit();
+          if (e.key === "Escape") setEditing(false);
+        }}
+      />
+    );
+  }
+
+  return (
+    <button
+      className="pill plain act mono"
+      disabled={busy}
+      title={t("apikeys.maxRatioTip")}
+      onClick={() => { setDraft(String(pct)); setEditing(true); }}
+    >
+      {pct >= 100 ? t("apikeys.maxRatioNone") : `${pct}%`}
+      <IconPencil />
+    </button>
   );
 }
 

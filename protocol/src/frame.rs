@@ -156,6 +156,21 @@ pub const H_TARGET_DEVICE: &str = "x-asale-target-device";
 /// by lying is narrow the supply *they* are matched against.
 pub const H_TOOL: &str = "x-asale-tool";
 
+/// Buy-side request header carrying the caller's own price ceiling, in whole
+/// percent of the vendor's list price.
+///
+/// The market ratio moves without asking anyone: a request that finds no supply
+/// at the published price raises it to wherever the cheapest reserve is, and the
+/// buyer pays that. This is the number above which the buyer would rather not
+/// trade at all — the gateway refuses instead of matching.
+///
+/// Sent by the local buy proxy, which is where a desktop user's setting lives.
+/// A caller reaching the gateway with a bare api key has no proxy to set it, so
+/// the ceiling written on the key itself applies instead (`api_keys.max_ratio_pct`).
+/// Never widening: a value above the key's own ceiling is ignored, so the header
+/// can only ever make a request pickier than the key already is.
+pub const H_MAX_RATIO: &str = "x-asale-max-ratio";
+
 /// The exact bytes both sides sign and verify. Defined once so the two can
 /// never disagree about field order or separator.
 pub fn handshake_signing_body(

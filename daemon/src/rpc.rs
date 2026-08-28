@@ -485,6 +485,7 @@ rpc_args! {
         #[serde(default, alias = "expires_in_days")] expires_in_days: Option<i64>,
         #[serde(default, alias = "set_default")] set_default: Option<bool>,
         #[serde(default, alias = "apply_to_tools")] apply_to_tools: Option<bool>,
+        #[serde(default, alias = "max_ratio_pct")] max_ratio_pct: Option<i32>,
     }
     // `expiresInDays` is three-valued, which `Option<Option<_>>` plus
     // `deserialize_with` is the only way to express: absent leaves the expiry
@@ -497,6 +498,7 @@ rpc_args! {
         expires_in_days: Option<Option<i64>>,
         #[serde(default, alias = "set_default")] set_default: Option<bool>,
         #[serde(default, alias = "apply_to_tools")] apply_to_tools: Option<bool>,
+        #[serde(default, alias = "max_ratio_pct")] max_ratio_pct: Option<i32>,
     }
     KeyIdArgs      { id: i64 }
     ApiKeyArgs     {
@@ -700,6 +702,7 @@ async fn rpc(
                 p.label.unwrap_or_else(|| "asale".into()),
                 p.expires_in_days,
                 p.set_default.unwrap_or(false),
+                p.max_ratio_pct,
                 p.apply_to_tools.unwrap_or(false),
             )
             .await?
@@ -713,6 +716,7 @@ async fn rpc(
                 p.enabled,
                 p.expires_in_days,
                 p.set_default,
+                p.max_ratio_pct,
                 p.apply_to_tools.unwrap_or(false),
             )
             .await?

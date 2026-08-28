@@ -6,8 +6,20 @@ import {
 } from "../lib";
 import { Card, Ok, Err, SkeletonRows, PageHead, IconAction, Mark } from "../ui";
 import { ModelMultiSelect, type ModelOption } from "../components/ModelPicker";
-import { IconRoute, IconConsume, IconRefresh, IconCheck, IconAlert, IconX, IconExternal } from "../icons";
+import { IconRoute, IconConsume, IconRefresh, IconCheck, IconAlert, IconX, IconExternal, IconWallet } from "../icons";
 import { errText } from "../errors";
+
+/** Where the daemon keeps this machine's price ceiling (`commands::buy::MAX_RATIO_KEY`). */
+const MAX_RATIO_KEY = "buy_max_ratio";
+
+/** The range the market can actually quote in: below 5% no trade has ever
+ *  existed, and 100% is list price, which is the market's own ceiling. Anything
+ *  outside it — or anything that is not a number — reads as "no ceiling". */
+function clampPct(v: string | number): number {
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n)) return 100;
+  return Math.min(100, Math.max(5, n));
+}
 
 const priceOf = (m: MarketModel, type: string) => m.prices.find((p) => p.token_type === type);
 const usd = (micros: number) => `$${pricePerMillion(micros).toFixed(2)}`;
@@ -80,6 +92,15 @@ export function Consume() {
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  /** The highest market price this machine will buy at, in whole percent of the
+   *  vendor's list price. Kept as the string the input holds — an empty box mid
+   *  edit is not the number 0. */
+  const [maxRatio, setMaxRatio] = useState("100");
+  const [savedRatio, setSavedRatio] = useState("100");
+  const [savingRatio, setSavingRatio] = useState(false);
+  /** Its own error slot: this card sits above the tools list, and a failure
+   *  reported at the bottom of the page is a failure nobody sees. */
+  const [ratioErr, setRatioErr] = useState("");
 
   const loadTools = useCallback(() => {
     if (!inTauri) return Promise.resolve();
@@ -124,8 +145,38 @@ export function Consume() {
       invoke<{ models: MarketModel[] }>("market_models")
         .then((r) => setModels(toOptions(r.models || [], t)))
         .catch(() => {}),
+      // Never written = no ceiling. A failed read is the same case: the proxy
+      // reads the setting itself, so showing 100 here matches what it does.
+      invoke<string | null>("get_setting", { key: MAX_RATIO_KEY })
+        .then((v) => {
+          const pct = String(clampPct(v ?? "100"));
+          setMaxRatio(pct);
+          setSavedRatio(pct);
+        })
+        .catch(() => {}),
     ]).finally(() => setLoading(false));
   }, [loadTools, t]);
+
+  /** Persist the price ceiling. The proxy reads the setting per request, so
+   *  this takes effect on the next call without restarting anything. */
+  async function saveMaxRatio() {
+    const pct = String(clampPct(maxRatio));
+    setMaxRatio(pct);
+    if (pct === savedRatio) return;
+    setRatioErr("");
+    setSavingRatio(true);
+    try {
+      await invoke("set_setting", { key: MAX_RATIO_KEY, value: pct });
+      // The hint under the box is the confirmation: it reads back the ceiling
+      // that is now in force, which is the only thing there was to say.
+      setSavedRatio(pct);
+    } catch (e) {
+      setRatioErr(errText(e));
+      setMaxRatio(savedRatio);
+    } finally {
+      setSavingRatio(false);
+    }
+  }
 
   /** Flip a tool's buy switch, and/or replace its model selection. */
   async function setBuy(tool: BuyTool, enabled: boolean, nextModels?: string[]) {
@@ -209,6 +260,46 @@ export function Consume() {
           />
         }
       />
+
+      <Card
+        icon={<IconWallet />}
+        title={t("consume.maxPriceTitle")}
+        desc={t("consume.maxPriceDesc")}
+      >
+        <div className="field">
+          <label htmlFor="buy-max-ratio">{t("consume.maxPriceLabel")}</label>
+          <div className="input-row">
+            <input
+              id="buy-max-ratio"
+              className="input mono"
+              type="number"
+              min={5}
+              max={100}
+              step={1}
+              value={maxRatio}
+              disabled={!inTauri || savingRatio}
+              onChange={(e) => setMaxRatio(e.target.value)}
+              onBlur={saveMaxRatio}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") saveMaxRatio();
+                if (e.key === "Escape") setMaxRatio(savedRatio);
+              }}
+            />
+            <span className="unit">%</span>
+            <button
+              className="btn sm"
+              onClick={saveMaxRatio}
+              disabled={!inTauri || savingRatio || clampPct(maxRatio) === Number(savedRatio)}
+            >
+              {t("consume.maxPriceSave")}
+            </button>
+          </div>
+          <div className="acct-sub-label after">
+            {savedRatio === "100" ? t("consume.maxPriceHintOff") : t("consume.maxPriceHint", { pct: savedRatio })}
+          </div>
+          <Err>{ratioErr}</Err>
+        </div>
+      </Card>
 
       <Card
         icon={<IconConsume />}
