@@ -131,12 +131,19 @@ GUI の代わりにウェブモードが入ります ——
 [**公式サイト**](https://asale.ai)を開けば OS を自動判別して対応するインストーラを渡します。
 直接リンクからでも構いません:
 
+<img src=".repolish/tables/ja/t-6ea59e.svg" alt="ダウンロードとインストール" width="880">
+
+<details>
+<summary>ダウンロードとインストール as a table</summary>
+
 | プラットフォーム | 直接リンク |
 |---|---|
 | macOS（Apple シリコン / Intel ユニバーサル） | [asale.ai/dl/mac](https://asale.ai/dl/mac) |
 | Windows | [asale.ai/dl/windows](https://asale.ai/dl/windows) |
 | Linux AppImage | [asale.ai/dl/linux-appimage](https://asale.ai/dl/linux-appimage) |
 | Linux .deb | [asale.ai/dl/linux-deb](https://asale.ai/dl/linux-deb) |
+
+</details>
 
 <sup>上の表にバージョン番号がないのは意図的です。各リンクはクリックした時点で最新の
 [GitHub リリース](https://github.com/asale-ai/asale/releases)を解決するため、ここが古くなることは

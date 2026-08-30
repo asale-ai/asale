@@ -117,12 +117,19 @@ irm https://asale.ai/dl/install.ps1 | iex
 也可以打開[**官網首頁**](https://asale.ai)，它會自動辨識你的系統並給出對應安裝包；
 或者直接點下面的直達連結：
 
+<img src=".repolish/tables/zh-tw/t-7180cc.svg" alt="下載與安裝" width="880">
+
+<details>
+<summary>下載與安裝（表格原文）</summary>
+
 | 平台 | 直達連結 |
 |---|---|
 | macOS（Apple 晶片 / Intel 通用） | [asale.ai/dl/mac](https://asale.ai/dl/mac) |
 | Windows | [asale.ai/dl/windows](https://asale.ai/dl/windows) |
 | Linux AppImage | [asale.ai/dl/linux-appimage](https://asale.ai/dl/linux-appimage) |
 | Linux .deb | [asale.ai/dl/linux-deb](https://asale.ai/dl/linux-deb) |
+
+</details>
 
 <sup>上面刻意沒有版本號：每個連結都在你點擊的那一刻去解析最新的
 [GitHub release](https://github.com/asale-ai/asale/releases)，所以這裡永遠不會過期。
