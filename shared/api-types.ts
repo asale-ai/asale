@@ -154,7 +154,8 @@ export interface RankingModel {
   ref_output: number;
   supply_capacity_tokens: number;
   online_lanes: number;
-  calls_last_minute: number;
+  /** Buy-side calls over the last 24 hours; the leaderboard's demand figure. */
+  calls_last_24h: number;
   /** Absent for models Artificial Analysis does not score — image, audio,
    *  search and deep-research variants, mostly. */
   bench: ModelBenchmark | null;
