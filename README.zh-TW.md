@@ -1,6 +1,6 @@
 <div align="center">
 
-<a href="https://asale.ai"><img src="public/logo.svg" width="88" alt="Asale"></a>
+<img src=".repolish/hero.zh-CN.svg" alt="" width="100%">
 
 # Asale 用戶端
 
