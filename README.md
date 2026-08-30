@@ -9,12 +9,13 @@
 [![version](https://img.shields.io/badge/version-alpha-orange?style=flat-square)](https://github.com/asale-ai/asale/releases)
 [![downloads](https://img.shields.io/github/downloads/asale-ai/asale/total?style=flat-square&color=brightgreen)](https://github.com/asale-ai/asale/releases)
 [![commit activity](https://img.shields.io/github/commit-activity/m/asale-ai/asale?style=flat-square)](https://github.com/asale-ai/asale/commits/main)
-[![license](https://img.shields.io/github/license/asale-ai/asale?style=flat-square)](LICENSE)
 [![repolish](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/asale-ai/asale/main/.repolish/badge.json&style=flat-square)](https://github.com/asale-ai/repolish)
 
 ### Share the tokens you don't use
 
 Turn idle quota into income; when you hit a limit, someone else takes over.
+
+<img src=".repolish/overview.svg" alt="asale-client at a glance" width="880">
 
 **English** · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md)
 
@@ -114,9 +115,6 @@ other**, so the platform's fee ratio is verifiable. The same data is available i
 ## Download & install
 
 [![latest release](https://img.shields.io/github/v/release/asale-ai/asale?label=latest&color=2f7d4f)](https://github.com/asale-ai/asale/releases/latest)
-
-<img src=".repolish/overview.svg" alt="asale-client at a glance" width="880">
-
 
 Free. One line does the whole thing — app, plus the `asale` command line:
 

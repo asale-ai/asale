@@ -1,0 +1,4 @@
+# The detector reads a `[[bin]]` in the workspace and calls this a CLI. It is a
+# Tauri desktop app that happens to ship a companion `asale` command, and the
+# overview card prints the profile, so leaving it wrong is visible on the README.
+profile = "app"
