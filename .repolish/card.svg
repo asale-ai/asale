@@ -135,7 +135,7 @@
   <text class="t" x="74" y="368" font-size="13" fill="#edebfa" text-anchor="start" font-weight="700">repo-topics</text>
   <text class="t" x="74" y="386" font-size="12" fill="#8b87a3" text-anchor="start">Piling on topics dilutes relevance. Trim to twelve or fewer. Candidates: javascript, react, command-line,…</text>
   <rect x="36" y="416" width="808" height="1" fill="#35334a"/>
-  <text class="t" x="36" y="440" font-size="12" fill="#8b87a3" text-anchor="start">asale-ai/asale · 9c59eac1</text>
-  <text class="t" x="844" y="440" font-size="12" fill="#8b87a3" text-anchor="end">repolish v0.4.1</text>
+  <text class="t" x="36" y="440" font-size="12" fill="#8b87a3" text-anchor="start">asale-ai/asale · fb64b50e</text>
+  <text class="t" x="844" y="440" font-size="12" fill="#8b87a3" text-anchor="end">repolish v0.5.0</text>
   <text class="t" x="36" y="458" font-size="11" fill="#8b87a3" text-anchor="start">Scoring is deterministic. No model is involved.</text>
 </svg>
