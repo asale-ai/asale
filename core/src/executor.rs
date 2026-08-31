@@ -338,6 +338,25 @@ pub fn refusal_outcome(status: u16, body: &str) -> TaskOutcome {
 pub fn unsupported_model(status: u16, body: &str) -> bool {
     let b = body.to_ascii_lowercase();
     match status {
+        // Anthropic charges some models to a separate credit balance and refuses
+        // an account without one as a `429 rate_limit_error` — the same status,
+        // and the same `type`, as a window that empties on its own:
+        //
+        //   {"type":"rate_limit_error","message":"Usage credits are required for
+        //    this model.","details":{"error_code":"credits_required",
+        //    "disabled_reason":"org_level_disabled","model":"claude-fable-5"}}
+        //
+        // It is not a window. Nothing about it resets, so read as a rate limit it
+        // cooled the account, resumed on schedule, re-declared the lane and
+        // collided again — three times on 2026-08-31 for one `claude-fable-5`
+        // lane, whose run therefore never produced a verdict, which left the
+        // model invisible to every buyer. It is a fact about one
+        // `(account, model)`, which is exactly what this predicate is for.
+        429 => {
+            b.contains("credits_required")
+                || b.contains("usage credits are required")
+                || b.contains("org_level_disabled")
+        }
         // The Codex backend refuses a slug the account is not entitled to at
         // validation time, before it is a 404: `"<model> is not supported when
         // using Codex with a ChatGPT account"`.
@@ -632,6 +651,9 @@ pub async fn execute(
     // The first attempt's failure, kept while a second account is tried: if
     // nobody else can serve the lane, this is what the buyer is owed.
     let mut held: Option<HeldFailure> = None;
+    // Only the streaming path leaves this loop. A buffered answer is read, sent
+    // and returned from *inside* it, so a read that breaks part-way can still
+    // fall through to another local account — see the `body:` arm below.
     let (lease, resp, status) = loop {
         let lease = match lease_for_task(tokens, &provider, &model, &mut cancel).await {
             Ok(l) => l,
@@ -872,14 +894,16 @@ pub async fn execute(
             // Pool feedback: 429 cools the account (honoring Retry-After), 5xx
             // applies the transient cooldown, 401/403 flags the token (spec §4).
             let outcome = match status {
-                429 => TaskOutcome::RateLimited { reset_at },
-                // Ahead of everything else 4xx: a model the upstream will not serve
-                // this account is the one 4xx that says something about the lane
+                // Ahead of *everything*: a model the upstream will not serve this
+                // account is the one refusal that says something about the lane
                 // rather than about the request, and it takes the lane off the
-                // market. Ahead of the credential check in particular, because one
-                // vendor says it with a 403 and reading that as a bad credential
-                // would flag a key that is working fine.
+                // market. Ahead of the credential check because one vendor says it
+                // with a 403 and reading that as a bad credential would flag a key
+                // that is working fine — and ahead of the 429 arm because Anthropic
+                // says it with a 429 that no amount of waiting clears. Sitting
+                // below that arm, this predicate could never see one.
                 s if unsupported_model(s, &detail) => TaskOutcome::Unsupported,
+                429 => TaskOutcome::RateLimited { reset_at },
                 401 | 403 => refusal_outcome(status, &detail),
                 s if s >= 500 => TaskOutcome::ServerError,
                 // A 400 that is really "out of credit" — cools the account like the
@@ -964,31 +988,33 @@ pub async fn execute(
             failure.report(out, records, &task_id, &provider, &model).await;
             return;
         }
-        break (lease, resp, status);
-    };
 
-    // A request the consumer did not ask to stream was answered by the upstream
-    // with one JSON object, not an SSE stream. Framing it as `stream_chunk`s
-    // handed the gateway bytes it then tried to read as SSE lines: no `data:`
-    // prefix, so no events, so no text and no usage — the consumer got a 200
-    // carrying an empty message and the gateway failed the task for serving
-    // nothing (`relay::finalize`), which cost the publisher a sale it had
-    // actually made. `http_response` is the frame that exists for this.
-    //
-    // Which of the two arrived is the upstream's decision, not the consumer's.
-    // The gateway forces `stream: true` for Codex, whose ChatGPT backend rejects
-    // a buffered Responses call outright, while the relay envelope still carries
-    // the consumer's own `stream: false`. Branching on `req.stream` alone
-    // therefore buffered an SSE stream into `http_response`, where the gateway
-    // read it as JSON, found none, and settled every non-streaming Codex sale as
-    // an empty answer worth zero tokens.
-    let upstream_is_sse = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|ct| ct.trim_start().starts_with("text/event-stream"));
+        // A request the consumer did not ask to stream was answered by the
+        // upstream with one JSON object, not an SSE stream. Framing it as
+        // `stream_chunk`s handed the gateway bytes it then tried to read as SSE
+        // lines: no `data:` prefix, so no events, so no text and no usage — the
+        // consumer got a 200 carrying an empty message and the gateway failed the
+        // task for serving nothing (`relay::finalize`), which cost the publisher a
+        // sale it had actually made. `http_response` is the frame that exists for
+        // this.
+        //
+        // Which of the two arrived is the upstream's decision, not the consumer's.
+        // The gateway forces `stream: true` for Codex, whose ChatGPT backend
+        // rejects a buffered Responses call outright, while the relay envelope
+        // still carries the consumer's own `stream: false`. Branching on
+        // `req.stream` alone therefore buffered an SSE stream into
+        // `http_response`, where the gateway read it as JSON, found none, and
+        // settled every non-streaming Codex sale as an empty answer worth zero
+        // tokens.
+        let upstream_is_sse = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.trim_start().starts_with("text/event-stream"));
+        if req.stream || upstream_is_sse {
+            break (lease, resp, status);
+        }
 
-    if !req.stream && !upstream_is_sse {
         // The whole generation happens inside this one await for a buffered
         // upstream, so it is the one that matters most to be able to walk away
         // from.
@@ -1002,15 +1028,40 @@ pub async fn execute(
         };
         let body = match read {
             Ok(b) => b,
+            // Read *inside* the failover loop, and this is why. A body that
+            // stops arriving mid-read is this machine's connection to the
+            // vendor breaking, not a verdict on the request: nothing has been
+            // sent to the gateway yet, so another account on this device can
+            // serve it from the top with the buyer none the wiser. Outside the
+            // loop it could not — the one place a local retry is free was the
+            // one place that did not take it, and the task went back as
+            // `UPSTREAM_5XX` for a 200 the upstream was in the middle of
+            // delivering.
+            //
+            // The streaming path below deliberately does *not* get this: by the
+            // time a chunk fails, `stream_start` has already gone out, and a
+            // second attempt would put a second one on the same task. That case
+            // stays the gateway's to transfer.
             Err(e) => {
                 tokens.report(&provider, &lease.account_id, &model, TaskOutcome::ServerError);
-                send_error(out, &task_id, "UPSTREAM_5XX", &format!("body: {e}"), true);
-                if let Some(r) = records {
-                    r.record(&task_id, &provider, &lease.account_id, &model, &Usage::default(), "upstream_error").await;
+                let failure = HeldFailure {
+                    code: "UPSTREAM_5XX",
+                    message: format!("body: {e}"),
+                    detail: String::new(),
+                    retriable: true,
+                    record_status: "upstream_error".into(),
+                    account_id: lease.account_id.clone(),
+                };
+                if failovers_left > 0 && tokens.has_alternate(&provider, &model, &lease.account_id) {
+                    failovers_left -= 1;
+                    held = Some(failure);
+                    continue;
                 }
+                failure.report(out, records, &task_id, &provider, &model).await;
                 return;
             }
         };
+
         let usage = usage_from_body(&body);
         let _ = out.send(Envelope::with_id(
             &task_id,
@@ -1035,7 +1086,7 @@ pub async fn execute(
             r.record(&task_id, &provider, &lease.account_id, &model, &usage, "ok").await;
         }
         return;
-    }
+    };
 
     // stream_start
     let _ = out.send(Envelope::with_id(
@@ -2039,6 +2090,19 @@ mod tests {
         assert!(!unsupported_model(400, r#"{"error":{"message":"messages: at least one message is required"}}"#));
         assert!(!unsupported_model(413, "request entity too large"));
         assert!(!unsupported_model(429, r#"{"error":{"type":"rate_limit_error"}}"#));
+
+        // The entitlement wall Anthropic dresses as a 429, verbatim from
+        // t_730aef60 on 2026-08-31. Same status and same `type` as the plain
+        // rate limit on the line above, and the opposite fact: that one clears
+        // on its own, this one never does.
+        assert!(unsupported_model(
+            429,
+            r#"{"type":"error","error":{"type":"rate_limit_error","message":"Usage credits are required for this model.","details":{"error_code":"credits_required","disabled_reason":"org_level_disabled","model":"claude-fable-5"}}}"#
+        ));
+        // A plain 429 from the Codex backend, also verbatim, must stay a rate
+        // limit: it is a window, and taking the lane off the market for a day
+        // over one would delist a healthy account.
+        assert!(!unsupported_model(429, r#"{"detail":"Rate limit exceeded"}"#));
         // A bare 404 is a wrong URL — a real mistake on a custom endpoint, and
         // not evidence about the model.
         assert!(!unsupported_model(404, "<html><title>404 Not Found</title></html>"));
@@ -2726,6 +2790,43 @@ data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\"
             "the buyer must not hear about a failure another account absorbed"
         );
         assert_eq!(failed.lock().unwrap().as_slice(), ["acc-broke"], "and only the empty key is penalised");
+    }
+
+    /// A buffered answer whose body stops arriving is this machine's connection
+    /// breaking, not a verdict on the request — and nothing has reached the
+    /// gateway yet, so the account beside it can serve the whole call over.
+    ///
+    /// It could not until the read moved inside the failover loop: on
+    /// 2026-08-31 every one of these went back as `UPSTREAM_5XX` from the one
+    /// place where a local retry was free.
+    #[tokio::test]
+    async fn a_truncated_body_falls_through_to_the_next_account() {
+        let url = spawn_http_seq(vec![
+            // Promises 500 bytes, sends 12, hangs up: `resp.bytes()` errors.
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 500\r\nConnection: close\r\n\r\n{\"content\":[]",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 14\r\nConnection: close\r\n\r\n{\"content\":[]}",
+        ])
+        .await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let failed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tok = TwoAccounts { failed: failed.clone() };
+        let mut payload = req(&url, "custom", 0);
+        payload.stream = false;
+        execute(&crate::http::plain(), &tok, payload, &tx, None, &test_verifier(), never_canceled()).await;
+
+        let frames = drain(&mut rx);
+        assert!(
+            frames.iter().all(|f| f.msg_type != protocol::T_ERROR),
+            "the buyer must not hear about a read the next account completed"
+        );
+        assert!(
+            frames.iter().any(|f| f.msg_type == protocol::T_HTTP_RESPONSE),
+            "and must get the answer the second account produced"
+        );
+        // The one assertion that fails if the read never fell through: without
+        // the failover the first account serves the truncated body and is never
+        // reported as broken.
+        assert_eq!(failed.lock().unwrap().as_slice(), ["acc-broke"]);
     }
 
     /// The other half of the same rule: a malformed request fails the same way

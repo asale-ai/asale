@@ -214,6 +214,19 @@ pub mod codes {
     /// The publisher's session is alive but it has produced no frame for this task
     /// for longer than the gateway is willing to wait. Also gateway-only.
     pub const PUBLISHER_STALLED: &str = "PUBLISHER_STALLED";
+    /// The publisher ended the turn cleanly having produced nothing billable.
+    ///
+    /// Gateway-only, and it exists because this was the one way a task could
+    /// reach `status=3` carrying no code and no message at all: `finalize` files
+    /// an ending of `Complete` with zero usage as a failure, and until now wrote
+    /// nothing beside it. On the operator's transaction page that is a row
+    /// saying "failed" and refusing to say why — two of them on 2026-08-31, both
+    /// unanswerable after the fact.
+    ///
+    /// Deliberately absent from [`is_retriable`]: by the time it is known the
+    /// turn ran to its own end, so there is nothing to hand on. It is a label
+    /// for the record, not a routing decision.
+    pub const EMPTY_COMPLETION: &str = "EMPTY_COMPLETION";
 }
 
 /// Whether a 4xx from a provider means "this account cannot pay for the call"
