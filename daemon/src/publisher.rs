@@ -259,7 +259,7 @@ async fn codex_entitlement(store: &LocalStore, tool: &asale_client_core::store::
             return c.models.clone();
         }
     }
-    let stale = || cached.clone().map(|c| c.models).unwrap_or_default();
+    let stale = cached.map(|c| c.models).unwrap_or_default();
     let retry_key = codex_entitlement_retry_key(&tool.account_id);
     let failed_at = store
         .get_setting(&retry_key)
@@ -269,11 +269,28 @@ async fn codex_entitlement(store: &LocalStore, tool: &asale_client_core::store::
         .and_then(|raw| raw.parse::<i64>().ok())
         .unwrap_or(0);
     if now_secs() - failed_at < CODEX_ENTITLEMENT_RETRY_BACKOFF {
-        return stale();
+        return stale;
     }
+    // Refresh *behind* the answer, never in front of it. This runs inside
+    // `rebuild_pool`, which every page load and every switch flip awaits, and
+    // the lookup takes ~15s to time out wherever the Codex backend is
+    // unreachable — which is what froze the Buy page's toggle for 20s after it
+    // was switched off. The backoff marker is written before the task starts,
+    // so the rebuilds that follow within the minute do not each spawn their own
+    // lookup; a success clears it. The caller gets the last good list (or none
+    // on a first run, and the next rebuild has it).
+    let _ = store.set_setting(&retry_key, &now_secs().to_string()).await;
+    let (bg, tool) = (store.clone(), tool.clone());
+    tokio::spawn(async move { refresh_codex_entitlement(&bg, &tool).await });
+    stale
+}
+
+/// Ask the account which slugs it may serve and cache the answer. Runs off the
+/// request path — see `codex_entitlement`.
+async fn refresh_codex_entitlement(store: &LocalStore, tool: &asale_client_core::store::ToolRow) {
     let Some(token) = keychain::get(&tool.keychain_ref).ok().flatten() else {
         tracing::warn!(account = %tool.account_id, "codex entitlement: no token in the secret store");
-        return stale();
+        return;
     };
     let upstream_id = store
         .get_setting(&upstream_acct_key(&tool.provider, &tool.account_id))
@@ -285,21 +302,21 @@ async fn codex_entitlement(store: &LocalStore, tool: &asale_client_core::store::
         .unwrap_or_default();
     match asale_client_core::discovery::codex_servable_models(&token, &upstream_id).await {
         Ok(models) => {
+            let key = codex_entitlement_key(&tool.account_id);
+            let known: Option<CodexEntitlement> =
+                store.get_setting(&key).await.ok().flatten().and_then(|raw| serde_json::from_str(&raw).ok());
             let fresh = CodexEntitlement { fetched_at: now_secs(), models };
-            if cached.as_ref().map(|c| &c.models) != Some(&fresh.models) {
+            if known.as_ref().map(|c| &c.models) != Some(&fresh.models) {
                 tracing::info!(account = %tool.account_id, "codex account serves {:?}", fresh.models);
             }
             if let Ok(raw) = serde_json::to_string(&fresh) {
                 let _ = store.set_setting(&key, &raw).await;
             }
-            let _ = store.set_setting(&retry_key, "0").await;
-            fresh.models
+            let _ = store.set_setting(&codex_entitlement_retry_key(&tool.account_id), "0").await;
         }
-        Err(e) => {
-            tracing::warn!(account = %tool.account_id, "codex entitlement lookup failed: {e}");
-            let _ = store.set_setting(&retry_key, &now_secs().to_string()).await;
-            stale()
-        }
+        // The backoff marker the caller wrote stays as it is: a failed lookup
+        // suppresses the next attempt for a minute, exactly as before.
+        Err(e) => tracing::warn!(account = %tool.account_id, "codex entitlement lookup failed: {e}"),
     }
 }
 
@@ -2426,6 +2443,28 @@ mod tests {
     }
 
     // ── The sell gate ───────────────────────────────────────────────────────
+
+    /// A stale entitlement is answered from cache and refreshed behind the
+    /// answer. `rebuild_pool` is awaited by every page load and every buy
+    /// switch, and this lookup takes ~15s to time out where OpenAI is
+    /// unreachable — so it must never be what the caller waits for.
+    #[tokio::test]
+    async fn stale_codex_entitlement_answers_without_the_network() {
+        let s = asale_client_core::store::LocalStore::open_memory().await.unwrap();
+        s.upsert_tool("codex", "a@b.io", "asale:codex:a@b.io", &["import"], "import").await.unwrap();
+        let tool = s.list_tools().await.unwrap().into_iter().next().unwrap();
+        let old = CodexEntitlement { fetched_at: now_secs() - CODEX_ENTITLEMENT_TTL - 1, models: vec!["gpt-5.5".into()] };
+        s.set_setting(&codex_entitlement_key("a@b.io"), &serde_json::to_string(&old).unwrap()).await.unwrap();
+
+        let began = std::time::Instant::now();
+        assert_eq!(codex_entitlement(&s, &tool).await, vec!["gpt-5.5".to_string()], "the last good list, not an empty one");
+        assert!(began.elapsed().as_secs() < 5, "the caller waited on the upstream lookup");
+        // Written before the refresh starts, so concurrent rebuilds within the
+        // minute reuse this answer instead of each spawning their own lookup.
+        let marker = s.get_setting(&codex_entitlement_retry_key("a@b.io")).await.unwrap();
+        assert!(marker.and_then(|m| m.parse::<i64>().ok()).unwrap_or(0) > 0, "no backoff marker: every rebuild would spawn a lookup");
+    }
+
 
     use asale_client_core::store::LocalStore;
 

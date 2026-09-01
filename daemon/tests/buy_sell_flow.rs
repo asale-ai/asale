@@ -69,11 +69,11 @@ impl Drop for Sandbox {
 }
 
 /// A signed-in state with a cached consumer key, so no server call is needed.
-async fn signed_in_state() -> AppState {
+async fn signed_in_state() -> std::sync::Arc<AppState> {
     let state = AppState::new().await.expect("app state");
     keychain::set("access_token", "test-access-token").unwrap();
     state.store.set_setting("asale_api_key", "sk-asale-test").await.unwrap();
-    state
+    std::sync::Arc::new(state)
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -594,8 +594,16 @@ async fn a_tool_that_is_buying_is_not_a_source_of_sellable_accounts() {
     assert_eq!(skipped[0]["reason"], "buying");
 
     // ── buying off ──
-    let off = commands::set_buy_tool(&state, "claude".into(), false, None).await.expect("buy off");
-    assert_eq!(off["accounts"][0]["account_id"], "me@x.com", "sellable again straight away");
+    // Coming back onto the market is settled behind the answer (it reconnects
+    // the publisher), so this is an eventual assertion — the switch itself has
+    // already restored the config by the time the call returns.
+    commands::set_buy_tool(&state, "claude".into(), false, None).await.expect("buy off");
+    for _ in 0..100 {
+        if auth_store::list().iter().any(|m| m.account_id == "me@x.com") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     let back = get_from(&commands::list_accounts(&state).await.unwrap(), "me@x.com");
     assert_eq!(back["sell_enabled"], true, "under the identity and switch it was hidden with");
     assert_eq!(back["sell_daily_limit"], 500_000, "and the cap");
@@ -706,7 +714,7 @@ async fn legacy_subscription_migrates_to_the_buy_switch() {
 async fn invalid_input_is_rejected_before_touching_anything() {
     let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
     let _sb = Sandbox::new("guards");
-    let state = AppState::new().await.unwrap();
+    let state = std::sync::Arc::new(AppState::new().await.unwrap());
 
     assert!(commands::set_buy_tool(&state, "emacs".into(), true, None).await.is_err());
     // Not signed in: must refuse before rewriting any config file.

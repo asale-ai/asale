@@ -6,6 +6,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use sqlx::SqlitePool;
 use std::str::FromStr;
 
+#[derive(Clone)]
 pub struct LocalStore {
     pub pool: SqlitePool,
 }

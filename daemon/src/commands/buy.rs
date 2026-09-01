@@ -365,13 +365,39 @@ fn opener(path: &std::path::Path) -> std::process::Command {
 ///
 /// On  → mint/reuse the asale consumer key, rewrite the tool's config to point
 ///       at the local proxy, and stash the untouched originals for restore.
+/// What follows a buy switch going *off*: the CLI's own login becomes this
+/// device's to sell again, which re-derives the pool, the `auths` directory and
+/// the market session.
+///
+/// Spawned, not awaited. The config on disk is restored by the time this starts,
+/// so the switch has already done what the user asked; what is left is coming
+/// back onto the market — a pool rebuild and a publisher reconnect, tens of
+/// seconds on a bad link — and awaiting it is what left the Buy page's toggle
+/// greyed out long enough that leaving the page looked like the only way back.
+/// The on path stays synchronous: an account that starts buying has to be off
+/// the market before the call returns.
+fn settle_after_buying_stopped(state: &std::sync::Arc<AppState>, tool: String) {
+    let st = state.clone();
+    tokio::spawn(async move {
+        // A successful import re-derives all of it itself; only its failure
+        // path — a tool with no local login — still needs the sweep.
+        match super::accounts::import_from_cli(&st, tool.clone()).await {
+            Ok(_) => {}
+            Err(e) => {
+                tracing::debug!(tool, "nothing to import after buying stopped: {e}");
+                super::sell::accounts_changed(&st).await;
+            }
+        }
+    });
+}
+
 /// Off → restore those originals byte-for-byte.
 ///
 /// `models` is a multi-select: an empty list means "any model the market
 /// offers"; a non-empty list is enforced by the local proxy, which rejects a
 /// request for a model this tool is not signed up to buy.
 pub async fn set_buy_tool(
-    state: &AppState,
+    state: &std::sync::Arc<AppState>,
     tool: String,
     enabled: bool,
     models: Option<Vec<String>>,
@@ -457,7 +483,9 @@ pub async fn set_buy_tool(
 
         // This tool's synced account stops being sellable the moment it starts
         // buying. Re-derived here rather than at the next scan, so the pool,
-        // the manifest directory and the market session all drop it now.
+        // the manifest directory and the market session all drop it now — and
+        // awaited, unlike the off path: an account that is buying must not be
+        // left on the market for even the second a spawned task would take.
         super::sell::accounts_changed(state).await;
 
         Ok(json!({
@@ -498,18 +526,12 @@ pub async fn set_buy_tool(
         // The tool is back on its own credential, so that credential is this
         // device's to sell again — with the switch and cap it was hidden with,
         // since the account row was never removed. Import too, in case the
-        // switch went on before this tool was ever scanned. Best-effort: a tool
-        // with no local login simply has nothing to bring back.
-        let accounts = match super::accounts::import_from_cli(state, tool.clone()).await {
-            Ok(v) => v["accounts"].clone(),
-            Err(e) => {
-                tracing::debug!(tool, "nothing to import after buying stopped: {e}");
-                super::sell::accounts_changed(state).await;
-                json!([])
-            }
-        };
+        // switch went on before this tool was ever scanned. Off the request
+        // path: bringing the account back puts this device on the market again,
+        // which is a reconnect the user must not watch a dead toggle through.
+        settle_after_buying_stopped(state, tool.clone());
 
-        Ok(json!({ "tool": tool, "enabled": false, "restored": true, "accounts": accounts }))
+        Ok(json!({ "tool": tool, "enabled": false, "restored": true }))
     }
 }
 
