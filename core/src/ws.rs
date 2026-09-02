@@ -785,16 +785,19 @@ fn handle_control(
             crate::seller_status::record(ctrl.score, ctrl.min_score);
             ControlResult::Continue
         }
-        // Every `custom` lane in the last declaration was dropped: selling
-        // through an endpoint of one's own is a platform-operator capability.
-        // Recorded rather than acted on — the daemon reaches the same verdict
-        // from `/me/profile` and is the one that removes the accounts, and it
-        // must keep that decision to itself: a frame is not proof of who sent
-        // it, and the action it would trigger deletes keys. What this is for is
-        // the log, so "my endpoint stopped selling" has an answer in `asaled`'s
-        // own output instead of only in the gateway's.
+        // Lanes in the last declaration were dropped: they belong to a
+        // credential family this account has not been granted. Named for the
+        // one family this used to be about; it now covers every family the
+        // server hands out (`GET /api/v1/me/capabilities`).
+        //
+        // Recorded rather than acted on — the daemon asks that endpoint itself
+        // and is the one that removes the accounts, and it must keep that
+        // decision to itself: a frame is not proof of who sent it, and the
+        // action it would trigger deletes keys. What this is for is the log, so
+        // "my endpoint stopped selling" has an answer in `asaled`'s own output
+        // instead of only in the gateway's.
         "custom.forbidden" => {
-            tracing::warn!("gateway refused this device's custom endpoints: {}", ctrl.reason);
+            tracing::warn!("gateway refused lanes this account is not entitled to: {}", ctrl.reason);
             ControlResult::Continue
         }
         // This lane has not passed model verification, so buyers are not being

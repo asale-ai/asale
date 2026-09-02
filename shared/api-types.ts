@@ -56,6 +56,12 @@ export interface MarketModelPrice {
   discount: number;
 }
 
+/** One entry of [`MarketModel.params`]: what a model accepts for one field. */
+export type ModelParam =
+  | { type: "enum"; values: (string | number)[] }
+  | { type: "range"; min?: number; max?: number }
+  | { type: "boolean" };
+
 /** One row of `GET /api/v1/market/models`. */
 export interface MarketModel {
   /** Bare model id, as it appears in a request body. */
@@ -66,6 +72,40 @@ export interface MarketModel {
   display_name: string;
   context_length: number;
   modality: string;
+  /** Ceiling on what one answer may contain, `0` when the vendor states none.
+   *  The model page's request example is bounded by it. */
+  max_completion_tokens?: number;
+  /** The request fields this model accepts (`temperature`, `tools`, …). Empty
+   *  where the vendor publishes no list, which reads as "no opinion" — the
+   *  page then offers the whole template rather than nothing. */
+  supported_parameters?: string[];
+  /** What this row's prices are *per*: `token` for chat and image models,
+   *  `second` for video and transcription, `character` for speech. The board
+   *  shows one price column for every modality, so the unit travels with the
+   *  row rather than living in the heading. Absent from an older server, which
+   *  reads as `token` — what every row was before the media market existed. */
+  billing_unit?: "token" | "second" | "character";
+  /** What this model accepts beyond its endpoint's always-fields, as one
+   *  descriptor map: `{"aspect_ratio": {"type":"enum","values":["1:1"]},
+   *  "n": {"type":"range","min":1,"max":6}, "seed": {"type":"boolean"}}`.
+   *
+   *  Normalised on the server from the two endpoints that publish it, so a
+   *  reader never has to know which one a row came from. Empty means the
+   *  vendor published none — "no opinion", not "nothing", so a page falls back
+   *  to its modality's template rather than showing an empty form. */
+  params?: Record<string, ModelParam>;
+  /** Voices a speech model answers to. Required on `/audio/speech`, and no
+   *  two vendors agree on a name — empty means the vendor published none, so a
+   *  caller has to look it up rather than be shown a guess. */
+  supported_voices?: string[];
+  /** What the model produces (`["image"]`, `["video"]`, `["speech"]`,
+   *  `["transcription"]`). Empty or absent is text, which is what every row
+   *  meant before the non-text market existed — never "unknown".
+   *
+   *  This is what decides which endpoint buys the model and which credential
+   *  families may sell it; `modality` above is the vendor's prose form of the
+   *  same fact (`"text+image->video"`) and is what the board renders. */
+  output_modalities?: string[];
   prices: MarketModelPrice[];
   /** Market price as a fraction of the vendor's list price, in [0.1, 1.0]. */
   ratio: number;

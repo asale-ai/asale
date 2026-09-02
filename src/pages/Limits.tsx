@@ -9,14 +9,22 @@ import { computePace, resetToMs, formatReset, formatExactReset, type DisplayMode
 import { PageHead, IconAction, Mark, Skeleton } from "../ui";
 import { IconRefresh, IconPlus } from "../icons";
 
-/** Every family a person can connect, in the order the generated provider table
- *  lists them — the same order the Sell page offers them in. */
-const PROVIDERS = ALL_PROVIDERS.filter((p) => p.connectable);
+/** The families this page suggests when nothing is connected yet — the ones a
+ *  stock client offers, in the order the generated provider table lists them,
+ *  which is the order the Sell page offers them in.
+ *
+ *  Deliberately not the set used for *labelling* below: a connected account is
+ *  a connected account whatever the connect screen currently offers, and
+ *  filtering the label lookup by this would leave an account the page cannot
+ *  name. */
+const SUGGESTED = ALL_PROVIDERS.filter((p) => p.offeredByDefault);
 /** Exact id first: several ids are prefixes of others (`kimi`/`kimi_api`,
  *  `claude`/`claude_work`), and a prefix match alone labels the platform-API
  *  rows with the subscription's name. */
 const meta = (id: string) =>
-  PROVIDERS.find((p) => p.id === id) ?? PROVIDERS.find((p) => id.startsWith(p.id)) ?? { label: id };
+  ALL_PROVIDERS.find((p) => p.id === id)
+  ?? ALL_PROVIDERS.find((p) => id.startsWith(p.id))
+  ?? { label: id };
 
 /** Threshold color; in "remaining" mode a low value is bad (mirrored). */
 function barTone(displayPct: number, mode: DisplayMode): "ok" | "warn" | "danger" {
@@ -292,7 +300,7 @@ export function Limits() {
     );
   };
 
-  const providers = data?.providers ?? PROVIDERS.map((p) => ({ id: p.id, connected: false }));
+  const providers = data?.providers ?? SUGGESTED.map((p) => ({ id: p.id, connected: false }));
 
   const connectedCount = providers.filter((p) => p.connected).length;
 
@@ -323,7 +331,7 @@ export function Limits() {
         </div>
         <div className="limit-cards">
           {loading
-            ? PROVIDERS.map((p) => (
+            ? SUGGESTED.map((p) => (
                 <ToolGroup key={p.id} id={p.id} name={p.label}>
                   <div className="limit-status"><Skeleton w={132} h={11} /></div>
                 </ToolGroup>

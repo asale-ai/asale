@@ -96,6 +96,15 @@ pub async fn me_profile(state: &AppState) -> R<Value> {
     authed(state, reqwest::Method::GET, "/api/v1/me/profile", None).await
 }
 
+/// What this account may connect, and the connect forms for it.
+///
+/// The client deliberately holds no opinion of its own about which credential
+/// families an account is entitled to — see `api::capabilities` on the server
+/// for why that rule cannot live in a binary the seller owns.
+pub async fn me_capabilities(state: &AppState) -> R<Value> {
+    authed(state, reqwest::Method::GET, "/api/v1/me/capabilities", None).await
+}
+
 /// This account's invite code, link and referral numbers.
 ///
 /// A straight passthrough, and the only reason the client needs it: the share

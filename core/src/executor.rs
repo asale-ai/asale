@@ -757,7 +757,11 @@ pub async fn execute(
         // market id, so only the outgoing body is rewritten, and only here: the
         // account is what decides the spelling, and this is where the account is
         // known.
-        if let Some(id) = lease.upstream_model.as_deref().filter(|s| !s.is_empty()) {
+        // Nothing to rewrite in a request that carries no body: a media
+        // follow-up (`GET /videos/{id}`) names its job in the path, and the
+        // model it belongs to is the gateway's bookkeeping rather than
+        // anything the upstream is told.
+        if let Some(id) = lease.upstream_model.as_deref().filter(|s| !s.is_empty()).filter(|_| !body.is_empty()) {
             match with_model(&body, id) {
                 Some(patched) => body = patched,
                 // A body whose model could not be replaced would reach the upstream
@@ -1006,11 +1010,18 @@ pub async fn execute(
         // `http_response`, where the gateway read it as JSON, found none, and
         // settled every non-streaming Codex sale as an empty answer worth zero
         // tokens.
-        let upstream_is_sse = resp
+        //
+        // Read once and kept: `resp.bytes()` consumes the response, and the
+        // buffered path below needs this same header — it is the whole
+        // difference between a playable file and a wall of base64 for a media
+        // answer, which the gateway can only pass on if it is told.
+        let content_type = resp
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|ct| ct.trim_start().starts_with("text/event-stream"));
+            .unwrap_or_default()
+            .to_string();
+        let upstream_is_sse = content_type.trim_start().starts_with("text/event-stream");
         if req.stream || upstream_is_sse {
             break (lease, resp, status);
         }
@@ -1070,6 +1081,7 @@ pub async fn execute(
                 "task_id": task_id,
                 "status": status,
                 "body_b64": B64.encode(&body),
+                "content_type": content_type,
                 "usage": {
                     "input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens,
                     "cache_read_tokens": usage.cache_read_tokens, "cache_write_tokens": usage.cache_write_tokens

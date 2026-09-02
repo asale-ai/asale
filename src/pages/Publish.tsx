@@ -56,60 +56,145 @@ const PROVIDERS = ALL_PROVIDERS.filter((p) => p.credential === "oauth");
  *  these two also work when the UI runs in a browser on another machine. */
 const DEVICE_PROVIDERS = ALL_PROVIDERS.filter((p) => p.credential === "device_flow");
 
-/** Custom endpoint — internal.
+/** One described field.
  *
- * An OpenAI-compatible endpoint the platform buys from and resells: same lanes,
- * same terms, same metering as a subscription, and it appears in the account
- * list below like any other. It differs only in where the requests go.
- *
- * One tile, with the base URL typed into it. It used to be one tile per vendor
- * with the URL baked in, which meant a code change and a release for every new
- * endpoint the platform signed up with. The daemon is the one that decides
- * whether a URL is usable anyway: it requires http(s) and probes
- * `GET {base}/models` with the key before storing anything, so a wrong host or
- * a dead key fails at connect time rather than on the first buyer.
- *
- * Only rendered when the daemon is running the feature (`ASALE_CUSTOM_ENDPOINTS`).
- */
-const ENDPOINT_TILE = "custom";
+ *  Six types, all of them an input this page already had. A type it has never
+ *  heard of renders nothing rather than a broken control — which is also why
+ *  the server has a test that every field it describes is one of these. */
+function OfferFieldInput({
+  field, value, onChange, onSubmit,
+}: {
+  field: OfferField;
+  value: string;
+  onChange: (v: string) => void;
+  onSubmit: () => void;
+}) {
+  const id = `offer-${field.key}`;
+  const enter = (e: React.KeyboardEvent) => { if (e.key === "Enter") onSubmit(); };
+  if (field.type === "choice") {
+    return (
+      <div className="field">
+        <label>{field.label}</label>
+        <div className="band-presets">
+          {(field.options ?? []).map((o) => (
+            <button
+              key={o.value}
+              className={`chip ${value === o.value ? "on" : ""}`}
+              onClick={() => onChange(o.value)}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if (field.type === "percent" || field.type === "int") {
+    return (
+      <div className="field">
+        <label htmlFor={id}>{field.label}</label>
+        <div className="input-row">
+          {field.type === "percent" && <span className="band-cap">≥</span>}
+          <input
+            id={id}
+            className="input mono band-input"
+            type="number"
+            min={field.min}
+            max={field.max}
+            value={value}
+            placeholder={field.placeholder}
+            onChange={(e) => onChange(e.target.value)}
+            onKeyDown={enter}
+          />
+          {field.type === "percent" && <span className="unit">%</span>}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="field">
+      <label htmlFor={id}>{field.label}</label>
+      <input
+        id={id}
+        className={`input ${field.type === "text" ? "" : "mono"}`}
+        type={field.type === "secret" ? "password" : "text"}
+        autoComplete="off"
+        spellCheck={false}
+        value={value}
+        placeholder={field.placeholder}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={enter}
+      />
+      {/* Values worth one click. A shortcut for filling the field, never a
+          restriction on what may go in it. */}
+      {field.presets && field.presets.length > 0 && (
+        <div className="band-presets">
+          {field.presets.map((p) => (
+            <button
+              key={p.value}
+              className={`chip ${value.trim() === p.value ? "on" : ""}`}
+              onClick={() => onChange(p.value)}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
-/** Base URLs worth one click — the endpoints the platform itself has an account
- *  with. A shortcut for filling the field, not a restriction on what may go in
- *  it. B.AI keeps one base URL for many keys (its own docs say switching access
- *  method only replaces the key), and each key is a different tier at a
- *  different cost, so each is connected under its own name. */
-const ENDPOINT_PRESETS = [
-  { label: "OpenRouter", base: "https://openrouter.ai/api/v1" },
-  { label: "BAI", base: "https://api.b.ai/v1" },
-];
-
-/** The protocols an endpoint may speak, in the order they are offered.
+/** A connect form the server described, for a family that needs more than a
+ *  pasted key.
  *
- * Vendor names rather than the daemon's ids, because that is what the endpoint's
- * own docs call them: a host advertising "Anthropic-compatible" is `claude`
- * here. `""` is the first option and the default — the probe tries each in turn
- * and keeps the one that answers, which is a better answer than a guess by
- * somebody reading a reseller's marketing page. */
-const ENDPOINT_WIRES = [
-  { id: "", label: "" },
-  { id: "openai", label: "OpenAI" },
-  { id: "claude", label: "Anthropic" },
-  { id: "gemini", label: "Gemini" },
-  { id: "responses", label: "OpenAI Responses" },
-];
+ *  The page does not know what any of it means. It draws six field types and
+ *  posts `{key: value}` to the named command — which is the point: what an
+ *  endpoint is called, which hosts are worth one click and which protocols are
+ *  offered are facts about the platform, and they used to be constants in this
+ *  file. See `api::capabilities` on the server for why they moved.
+ *
+ *  Nothing here is executable. A description crosses the wire; the behaviour is
+ *  this component. */
+type OfferFieldType = "url" | "secret" | "text" | "choice" | "percent" | "int";
+type OfferField = {
+  key: string;
+  type: OfferFieldType;
+  label: string;
+  required?: boolean;
+  placeholder?: string;
+  /** One click each, for a field whose useful values are few and known. */
+  presets?: { label: string; value: string }[];
+  options?: { value: string; label: string }[];
+  min?: number;
+  max?: number;
+};
+type OfferSection = {
+  id: string;
+  provider: string;
+  /** The daemon RPC this form posts to. */
+  command: string;
+  title: string;
+  hint?: string;
+  fields: OfferField[];
+};
+/** What the connect screen may draw, as the daemon last answered. */
+type ConnectOffer = { providers: string[]; sections: OfferSection[] };
 
-/** What to call a protocol the daemon named back. */
-const wireLabel = (id: string) => ENDPOINT_WIRES.find((w) => w.id === id)?.label || id;
+/** What is drawn before the daemon has answered — offline, signed out, or an
+ *  older deployment. The set that is right for everyone. */
+const DEFAULT_OFFER: ConnectOffer = {
+  providers: ALL_PROVIDERS.filter((p) => p.offeredByDefault).map((p) => p.id),
+  sections: [],
+};
 
 /** The metered platform APIs, which issue keys rather than subscriptions.
  *  `keyUrl` is where the key is issued.
  *
  *  Read off the generated provider table rather than listed here: a provider
  *  that can be connected with a pasted key is one this form has to offer, and
- *  the two going out of step is a family nobody can connect. `custom` is
- *  key-connected too and deliberately absent — the platform runs those itself
- *  (`connectable: false`) and they are set up further down this page. */
-const KEY_PROVIDERS = ALL_PROVIDERS.filter((p) => p.credential === "api_key" && p.connectable);
+ *  the two going out of step is a family nobody can connect. *Which* of them
+ *  are drawn is `offer.providers`, not this list. */
+const KEY_PROVIDERS = ALL_PROVIDERS.filter((p) => p.credential === "api_key");
 
 /** "in 4m 12s" — a countdown is what makes an auto-recovering pause read as
  *  "wait" rather than "broken". Returns "" once the instant has passed. */
@@ -909,21 +994,16 @@ export function Publish() {
   const [pasteFlow, setPasteFlow] = useState<{ provider: string; flowId: string } | null>(null);
   const [pasteDraft, setPasteDraft] = useState("");
 
-  // Platform endpoints: whether this account may use them at all, which
-  // endpoint's form is open, and the terms being typed into it.
-  const [endpointsOn, setEndpointsOn] = useState(false);
-  /** Whether the signed-in account is a platform operator. Rides on the same
-   *  poll as the endpoint tile, and gates the families the provider table marks
-   *  `adminOnly` — ones the platform is still trialling. */
-  const [operator, setOperator] = useState(false);
-  const [epProvider, setEpProvider] = useState("");
-  const [epBase, setEpBase] = useState("");
-  const [epWire, setEpWire] = useState("");
-  const [epKey, setEpKey] = useState("");
-  const [epName, setEpName] = useState("");
-  const [epFloor, setEpFloor] = useState("");
-  const [epSlots, setEpSlots] = useState(String(SLOTS_DEFAULT));
-  const [epBusy, setEpBusy] = useState(false);
+  /** What this account may connect, as the daemon last answered. Not a
+   *  compiled-in list: which credential families a login is entitled to is the
+   *  server's answer and the server's rule (`declare_supply` drops the lanes),
+   *  so the page asks rather than deciding. */
+  const [offer, setOffer] = useState<ConnectOffer>(DEFAULT_OFFER);
+  /** Which described form is open, and what is being typed into it. The draft
+   *  is keyed by field, because this page does not know what the fields are. */
+  const [openSection, setOpenSection] = useState("");
+  const [sectionDraft, setSectionDraft] = useState<Record<string, string>>({});
+  const [sectionBusy, setSectionBusy] = useState(false);
 
   // API-key connect: which vendor's form is open, and its draft.
   const [keyProvider, setKeyProvider] = useState("");
@@ -942,15 +1022,13 @@ export function Publish() {
   const [sellerStatus, setSellerStatus] = useState<SellerStatus | null>(null);
   const [importErr, setImportErr] = useState("");
 
-  // Two things decide this — a build flag, which cannot change while the app is
-  // up, and whether the signed-in account is a platform operator, which can:
-  // this page is reachable before signing in, and selling through an endpoint
-  // of one's own is an operator capability the gateway enforces on every
-  // declaration. So it is polled rather than asked once. The cost is a local
-  // RPC; the daemon caches the server's verdict for a minute behind it.
+  // Polled rather than asked once: this page is reachable before signing in,
+  // and what a login is entitled to changes when it signs in, signs out, or is
+  // granted a family. The cost is a local RPC; the daemon caches the server's
+  // answer for a minute behind it.
   //
-  // The failure case keeps the last answer instead of hiding the tile: a
-  // momentarily unreachable daemon is not a demotion, and a tile that
+  // The failure case keeps the last answer instead of falling back: a
+  // momentarily unreachable daemon is not a revocation, and a tile that
   // disappears mid-edit takes the half-typed form with it.
   // Read once, not polled: the catalog's vendor per model changes when the
   // platform lands a new model, not while this page is open, and it is only
@@ -970,11 +1048,14 @@ export function Publish() {
     if (!inTauri) return;
     let alive = true;
     const poll = () =>
-      invoke<{ enabled: boolean; operator?: boolean }>("custom_endpoints_status")
+      invoke<ConnectOffer>("connect_offer")
         .then((r) => {
           if (!alive) return;
-          setEndpointsOn(r.enabled);
-          setOperator(!!r.operator);
+          // A daemon too old to answer this sends back something else; a list
+          // of provider ids is the one shape worth acting on.
+          if (Array.isArray(r?.providers)) {
+            setOffer({ providers: r.providers, sections: r.sections ?? [] });
+          }
         })
         .catch(() => {});
     poll();
@@ -1365,12 +1446,13 @@ export function Publish() {
     } catch (e) { setErr(errText(e)); } finally { setBusy(false); setDeviceCode(null); }
   }
 
-  /** Whether this family can be signed in to again from here. Everything but a
-   *  custom endpoint can: those are booked under `custom` with no per-endpoint
-   *  re-key form, and offering a button that opens a *new* endpoint form would
-   *  be worse than the plain resume they already have. */
+  /** Whether this family can be signed in to again from here. Everything drawn
+   *  as an ordinary tile can; a family that arrived as a described form cannot,
+   *  because re-keying it would mean re-opening the whole form and that is
+   *  worse than the plain resume it already has. */
   const canReauth = (a: AccountStatus) =>
-    a.provider !== ENDPOINT_TILE && !!ALL_PROVIDERS.find((p) => p.id === a.provider);
+    !offer.sections.some((x) => x.provider === a.provider)
+    && !!ALL_PROVIDERS.find((p) => p.id === a.provider);
 
   /** The credential is dead — take the operator back through the same sign-in
    *  that created this account, rather than through remove-and-add.
@@ -1396,15 +1478,20 @@ export function Publish() {
    *  into the one that scrolled out of view would still be sitting in state for
    *  whichever submit button is on screen. Opening either clears the other. */
   function openKeyForm(id: string) {
-    setEpProvider(""); setEpBase(""); setEpKey(""); setEpName(""); setEpFloor("");
+    setOpenSection(""); setSectionDraft({});
     setKeyProvider(id); setKeyDraft(""); setKeyLabel("");
   }
 
-  function openEndpointForm(open: boolean) {
+  /** Open one of the described forms, seeded with whatever defaults its fields
+   *  carry — a `choice` starts on its first option, everything else empty. */
+  function openSectionForm(section: OfferSection | null) {
     setKeyProvider(""); setKeyDraft(""); setKeyLabel("");
-    setEpProvider(open ? ENDPOINT_TILE : "");
-    setEpBase(""); setEpWire(""); setEpKey(""); setEpName(""); setEpFloor("");
-    setEpSlots(String(SLOTS_DEFAULT));
+    setOpenSection(section?.id ?? "");
+    setSectionDraft(
+      Object.fromEntries(
+        (section?.fields ?? []).map((f) => [f.key, f.type === "choice" ? (f.options?.[0]?.value ?? "") : ""])
+      )
+    );
   }
 
   /** Save a pasted API key as an account. The daemon checks it against the
@@ -1442,49 +1529,42 @@ export function Publish() {
     } catch (e) { setImportErr(errText(e)); } finally { setRescanning(false); }
   }
 
-  /** Connect a custom endpoint. The daemon validates the URL and probes
-   *  `GET {base}/models` with the key before storing anything, so a wrong host
-   *  or a dead key fails here rather than on the first buyer. An empty name is
-   *  left to the daemon, which falls back to the endpoint's host — that keeps
-   *  the row stable across re-runs instead of naming it after this form. */
-  async function connectEndpoint() {
-    setErr(""); setMsg(""); setEpBusy(true);
+  /** Post a described form to the command it names.
+   *
+   *  The values are sent under the field keys the server chose, so this page
+   *  never learns what any of them mean. Numeric fields are converted because
+   *  an input yields a string and the daemon's argument types do not — that is
+   *  the only interpretation of the payload that happens here.
+   *
+   *  Validation is the daemon's: it is the side that probes the endpoint and
+   *  checks the key. What this enforces is only `required`, so an obviously
+   *  incomplete form says "not yet" instead of making a round trip to be told. */
+  async function submitSection(section: OfferSection) {
+    setErr(""); setMsg(""); setSectionBusy(true);
     try {
-      const r = await invoke<{
-        account_id: string;
-        wire: string;
-        endpoint_models: number;
-        sellable_models: string[];
-      }>(
-        "connect_custom_endpoint",
-        {
-          baseUrl: epBase.trim(),
-          apiKey: epKey.trim(),
-          // Empty means "find out" — the daemon probes each protocol in turn.
-          wire: epWire,
-          label: epName.trim(),
-          // Empty floor means the default; the daemon clamps it either way.
-          minRatio: epFloor.trim() ? clampRatio(parseInt(epFloor, 10) || RATIO_DEFAULT) : RATIO_DEFAULT,
-          concurrency: clampSlots(parseInt(epSlots, 10) || SLOTS_DEFAULT),
-        },
-      );
-      // The protocol is named back whether it was chosen or found — when it was
-      // found, it is the news, and when it was chosen it is the confirmation
-      // that the endpoint really answered on it.
-      setMsg(t("publish.endpointConnected", {
-        account: r.account_id,
-        wire: wireLabel(r.wire),
-        served: r.endpoint_models,
-        selling: r.sellable_models.length,
-      }));
+      const params: Record<string, string | number> = {};
+      for (const f of section.fields) {
+        const raw = (sectionDraft[f.key] ?? "").trim();
+        if (f.type === "percent" || f.type === "int") {
+          // An empty number field means "the default", which is the daemon's
+          // to pick — sending 0 would be a value, and the wrong one.
+          if (raw === "") continue;
+          const n = parseInt(raw, 10);
+          if (!Number.isNaN(n)) params[f.key] = n;
+          continue;
+        }
+        if (raw !== "") params[f.key] = raw;
+      }
+      const r = await invoke<{ account_id?: string }>(section.command, params);
+      setMsg(t("publish.sectionConnected", { section: section.title, account: r?.account_id ?? "" }));
       // The key is never read back; clear the form rather than leave a secret
       // sitting in a field the next submit would resend.
-      setEpProvider(""); setEpBase(""); setEpWire(""); setEpKey(""); setEpName(""); setEpFloor("");
+      openSectionForm(null);
       loadAccounts();
     } catch (e) {
       setErr(errText(e));
     } finally {
-      setEpBusy(false);
+      setSectionBusy(false);
     }
   }
 
@@ -1507,17 +1587,18 @@ export function Publish() {
   };
 
   const open = KEY_PROVIDERS.find((p) => p.id === keyProvider);
-  const openEp = endpointsOn && epProvider === ENDPOINT_TILE;
-  // http(s) is the daemon's own rule (`connect_custom_endpoint`); checking it
-  // here too means the submit button says "not yet" instead of the endpoint
-  // check failing on something the form could see for itself.
-  const epBaseOk = /^https?:\/\/\S+$/i.test(epBase.trim());
+  const section = offer.sections.find((x) => x.id === openSection) ?? null;
+  /** Whether a described form has everything it said it needed. The daemon
+   *  validates properly — it is the side that probes the endpoint and checks
+   *  the key — so this only stops an obviously incomplete submit. */
+  const sectionReady = (x: OfferSection) =>
+    x.fields.every((f) => !f.required || (sectionDraft[f.key] ?? "").trim() !== "");
 
-  /** A family the platform is still trialling is offered to operators only —
-   *  the same rule as the endpoint tile, read off the generated table so opening
-   *  one up is a flag in `providers.rs` rather than an edit here. */
-  const offered = <T extends { adminOnly: boolean }>(list: T[]) =>
-    list.filter((p) => operator || !p.adminOnly);
+  /** Only what this login has been granted. The list is the server's, so
+   *  opening a family to every seller is a server change rather than a client
+   *  release. */
+  const offered = <T extends { id: string }>(list: T[]) =>
+    list.filter((p) => offer.providers.includes(p.id));
 
   const connectGrid = (
     <>
@@ -1559,20 +1640,22 @@ export function Publish() {
             </span>
           </button>
         ))}
-        {/* Internal: only when the daemon runs the feature. */}
-        {endpointsOn && (
+        {/* Forms the server described, for the families that need more than a
+            pasted key. Empty for a login that has not been granted one. */}
+        {offer.sections.map((x) => (
           <button
-            className={`pick ${openEp ? "active" : ""}`}
-            onClick={() => openEndpointForm(!openEp)}
+            key={x.id}
+            className={`pick ${openSection === x.id ? "active" : ""}`}
+            onClick={() => openSectionForm(openSection === x.id ? null : x)}
             disabled={busy || !inTauri}
           >
-            <span className="pick-ico"><Mark id={ENDPOINT_TILE} /></span>
+            <span className="pick-ico"><Mark id={x.provider} /></span>
             <span>
-              <span className="pick-title">{t("publish.endpointTile")}</span>
-              <span className="pick-sub">{t("publish.connectViaEndpoint")}</span>
+              <span className="pick-title">{x.title}</span>
+              <span className="pick-sub">{t("publish.connectViaKey")}</span>
             </span>
           </button>
-        )}
+        ))}
       </div>
 
       {/* Offered in the desktop shell too. Its callback lands on the same
@@ -1672,130 +1755,35 @@ export function Publish() {
         </div>
       )}
 
-      {/* A custom endpoint takes its terms up front, unlike a subscription:
-          it costs real money per token, so the floor that keeps it from selling
-          under cost is part of connecting it, not something to remember to set
-          afterwards. Both terms are editable later on the account row, like any
-          other account's. */}
-      {openEp && (
+      {/* A described form. Everything specific to it — its title, its fields,
+          which hosts are worth one click — came from the server; what is here
+          is how to draw six field types and where to post them. */}
+      {section && (
         <div className="keyform fade-in">
-          <div className="callout info">
-            <IconInfo />
-            <span>{t("publish.endpointHint")}</span>
-          </div>
-          <div className="field">
-            <label htmlFor="ep-base">{t("publish.endpointBase")}</label>
-            <input
-              id="ep-base"
-              className="input mono"
-              autoComplete="off"
-              spellCheck={false}
-              value={epBase}
-              placeholder="https://openrouter.ai/api/v1"
-              onChange={(e) => setEpBase(e.target.value)}
+          {section.hint && (
+            <div className="callout info">
+              <IconInfo />
+              <span>{section.hint}</span>
+            </div>
+          )}
+          {section.fields.map((f) => (
+            <OfferFieldInput
+              key={f.key}
+              field={f}
+              value={sectionDraft[f.key] ?? ""}
+              onChange={(v) => setSectionDraft((d) => ({ ...d, [f.key]: v }))}
+              onSubmit={() => { if (sectionReady(section) && !sectionBusy) submitSection(section); }}
             />
-            {/* The two the platform has an account with, kept as one click each
-                now that the tiles they used to have are gone. */}
-            <div className="band-presets">
-              <span className="band-cap">{t("publish.bandQuick")}</span>
-              {ENDPOINT_PRESETS.map((p) => (
-                <button
-                  key={p.base}
-                  className={`chip ${epBase.trim() === p.base ? "on" : ""}`}
-                  onClick={() => setEpBase(p.base)}
-                >
-                  {p.label}
-                </button>
-              ))}
-            </div>
-          </div>
-          {/* Left on "find out" unless its operator knows better: a reseller's
-              docs say "OpenAI-compatible" for hosts that answer `/messages`,
-              and the probe settles it in one round trip. Named explicitly, a
-              protocol the endpoint does not actually serve fails at connect
-              rather than on the first sale. */}
-          <div className="field">
-            <label>{t("publish.endpointWire")}</label>
-            <div className="band-presets">
-              {ENDPOINT_WIRES.map((w) => (
-                <button
-                  key={w.id}
-                  className={`chip ${epWire === w.id ? "on" : ""}`}
-                  onClick={() => setEpWire(w.id)}
-                >
-                  {w.label || t("publish.endpointWireAuto")}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="field">
-            <label htmlFor="ep-key">{t("publish.endpointKey")}</label>
-            <input
-              id="ep-key"
-              className="input mono"
-              type="password"
-              autoComplete="off"
-              spellCheck={false}
-              value={epKey}
-              placeholder={t("publish.keyPlaceholder")}
-              onChange={(e) => setEpKey(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && epBaseOk && epKey.trim()) connectEndpoint(); }}
-            />
-          </div>
-          <div className="ep-terms">
-            <div className="field">
-              <label htmlFor="ep-name">{t("publish.keyName")}</label>
-              <input
-                id="ep-name"
-                className="input"
-                value={epName}
-                placeholder={t("publish.endpointNamePlaceholder")}
-                onChange={(e) => setEpName(e.target.value)}
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="ep-floor">{t("publish.endpointFloor")}</label>
-              <div className="input-row">
-                <span className="band-cap">≥</span>
-                <input
-                  id="ep-floor"
-                  className="input mono band-input"
-                  type="number"
-                  min={RATIO_MIN}
-                  max={RATIO_MAX}
-                  value={epFloor}
-                  placeholder={String(RATIO_DEFAULT)}
-                  onChange={(e) => setEpFloor(e.target.value)}
-                />
-                <span className="unit">%</span>
-              </div>
-            </div>
-            <div className="field">
-              <label htmlFor="ep-slots">{t("publish.lanesLabel")}</label>
-              <div className="input-row">
-                <input
-                  id="ep-slots"
-                  className="input mono band-input"
-                  type="number"
-                  min={SLOTS_MIN}
-                  max={SLOTS_MAX}
-                  value={epSlots}
-                  onChange={(e) => setEpSlots(e.target.value)}
-                />
-                <span className="unit">{t("publish.unitRequests")}</span>
-              </div>
-            </div>
-          </div>
-          <div className="hint">{t("publish.endpointTermsHint")}</div>
+          ))}
           <div className="keyform-actions">
             <button
               className="btn sm"
-              onClick={connectEndpoint}
-              disabled={epBusy || !epBaseOk || !epKey.trim()}
+              onClick={() => submitSection(section)}
+              disabled={sectionBusy || !sectionReady(section)}
             >
-              {epBusy ? t("publish.endpointChecking") : t("publish.keyConnect")}
+              {sectionBusy ? t("publish.sectionChecking") : t("publish.keyConnect")}
             </button>
-            <button className="btn sm ghost" onClick={() => openEndpointForm(false)} disabled={epBusy}>
+            <button className="btn sm ghost" onClick={() => openSectionForm(null)} disabled={sectionBusy}>
               {t("publish.keyCancel")}
             </button>
           </div>

@@ -23,6 +23,6 @@ pub mod payload;
 pub mod providers;
 
 pub use frame::{codes, is_out_of_credit, is_retriable, Envelope, MAX_FRAME_BYTES};
-pub use ids::{Provider, TokenType, Vendor};
+pub use ids::{Modality, Provider, TokenType, Vendor};
 pub use providers::{spec, spec_of, Credential, ProviderSpec, QuotaSource, WindowCap, PROVIDERS};
 pub use payload::{ControlPayload, HttpRequestPayload, SupplyItem, UpstreamPayload, Usage};

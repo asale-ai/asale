@@ -804,9 +804,9 @@ async fn rpc(
             )
             .await?
         },
-        // An endpoint of the operator's own, sold as if it were a subscription.
-        // On unless the client was built with ASALE_CUSTOM_ENDPOINTS=0 — see
-        // `commands::accounts`.
+        // An endpoint of its owner's own, sold as if it were a subscription.
+        // Refused unless the server has granted this login the family — see
+        // `commands::accounts::require_granted`.
         "connect_custom_endpoint" => {
             let p: CustomEndpointArgs = args(&a)?;
             commands::connect_custom_endpoint(
@@ -823,7 +823,12 @@ async fn rpc(
         },
         "list_custom_endpoints" => commands::list_custom_endpoints(st).await?,
         // Always answerable, so the UI can decide whether to offer the tab.
-        "custom_endpoints_status" => commands::custom_endpoints_status(st).await?,
+        // What the connect screen may draw, and the forms for it. Named for
+        // what it answers rather than for one family — see
+        // `commands::accounts::connect_offer`.
+        "connect_offer" => commands::connect_offer(st).await?,
+        // Kept under its old name for a frontend that has not been rebuilt.
+        "custom_endpoints_status" => commands::connect_offer(st).await?,
         "refresh_custom_endpoint" => {
             let p: EndpointArgs = args(&a)?;
             commands::refresh_custom_endpoint(st, p.account_id).await?

@@ -16,7 +16,7 @@ use crate::keychain;
 use crate::state::AppState;
 use asale_client_core::discovery::{self, RefreshedToken, ToolAdapter};
 use asale_client_core::protocol::{SupplyItem, Usage};
-use asale_protocol::ids::Vendor;
+use asale_protocol::ids::{Modality, Vendor};
 use asale_protocol::providers::CUSTOM_WINDOW_TOKENS;
 use asale_client_core::store::LocalStore;
 use asale_client_core::{
@@ -122,15 +122,39 @@ fn providers_for_vendor(vendor: &str) -> &'static [Provider] {
     }
 }
 
-/// Whether a catalog row answers in text. A subscription relays chat traffic;
-/// an image/audio endpoint is a different API surface the executor cannot
-/// serve. An unknown modality is treated as text rather than dropped, so a
-/// sparse catalog row does not silently remove sellable capacity.
-fn produces_text(modality: &str) -> bool {
-    match modality.split_once("->") {
-        Some((_, out)) => out.contains("text"),
-        None => true,
+/// The credential families that may advertise a catalog row of this modality.
+///
+/// A chat subscription relays chat traffic and nothing else: Anthropic's
+/// Messages endpoint has no image route, and a Codex bearer offered a
+/// text-to-video model would answer 404 after a buyer had already been matched
+/// to it. Only the aggregator serves those, so only the aggregator may declare
+/// them — which is also what makes the non-text market operator-supplied for
+/// now (`ProviderSpec::admin_only`).
+///
+/// Text is every family's to sell, including the aggregator's, and an
+/// unreadable modality is text: a sparse catalog row must not silently remove
+/// capacity that has been selling all along.
+fn providers_for_modality(m: Modality) -> Option<&'static [Provider]> {
+    match m {
+        Modality::Text => None,
+        _ => Some(&[Provider::Openrouter]),
     }
+}
+
+/// What a catalog row produces, from whichever of the two fields the server
+/// sent. `output_modalities` is the authority — it is the column the gateway's
+/// own routing reads — and the `modality` string is the fallback for a server
+/// too old to send it.
+fn row_modality(row: &serde_json::Value) -> Modality {
+    let outputs: Vec<&str> = row
+        .get("output_modalities")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if !outputs.is_empty() {
+        return Modality::of_outputs(&outputs);
+    }
+    Modality::of_modality_str(row.get("modality").and_then(|v| v.as_str()).unwrap_or_default())
 }
 
 /// Models this provider may advertise right now.
@@ -560,7 +584,11 @@ async fn endpoint_models(
         tracing::warn!(account = %tool.account_id, provider = %tool.provider, "no key in the secret store");
         return stale();
     };
-    match asale_client_core::discovery::custom_endpoint_models(base, &key_value, wire).await {
+    let listed = match lists_every_modality(&tool.provider) {
+        true => asale_client_core::discovery::aggregator_endpoint_models(base, &key_value, wire).await,
+        false => asale_client_core::discovery::custom_endpoint_models(base, &key_value, wire).await,
+    };
+    match listed {
         Ok(models) => match store_custom_models(store, &tool.account_id, &models).await {
             Ok(fresh) => {
                 if cached.as_ref().map(|c| &c.aliases) != Some(&fresh.aliases) {
@@ -634,6 +662,17 @@ async fn vendor_endpoint_models(
     endpoint_models(store, tool, spec.api_base, spec.wire).await
 }
 
+/// Whether this family's `/models` answers with the whole catalogue or only its
+/// text half.
+///
+/// One family needs the difference: OpenRouter serves image, video, speech and
+/// transcription models on result sets of their own, and an account probed the
+/// ordinary way lists chat models and not one of the things it is connected
+/// here to sell.
+fn lists_every_modality(provider: &str) -> bool {
+    provider == Provider::Openrouter.as_str()
+}
+
 /// The cached catalog, or None when nothing has been pulled yet.
 async fn load_catalog(store: &LocalStore) -> Option<SellableCatalog> {
     store
@@ -661,8 +700,17 @@ pub async fn refresh_sellable_catalog(store: &LocalStore, api_base: &str) -> any
     for row in rows {
         let model = row.get("model").and_then(|v| v.as_str()).unwrap_or_default();
         let vendor = row.get("provider").and_then(|v| v.as_str()).unwrap_or_default();
-        let modality = row.get("modality").and_then(|v| v.as_str()).unwrap_or_default();
-        if model.is_empty() || !produces_text(modality) {
+        let modality = row_modality(row);
+        if model.is_empty() {
+            continue;
+        }
+        // An image, video or speech row goes to the one family that has an
+        // endpoint for it, and to nobody else — the vendor map is about *whose
+        // model* it is, which is a different question from who can serve it.
+        if let Some(allowed) = providers_for_modality(modality) {
+            for p in allowed {
+                by_provider.entry(p.as_str().to_string()).or_default().push(model.to_string());
+            }
             continue;
         }
         // A custom endpoint is not tied to one of the built-in subscription
@@ -1528,6 +1576,13 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
             p if p == Provider::Qwen.as_str() => {
                 Some(vendor_endpoint_models(store, tool, Provider::Qwen).await)
             }
+            // Every id an aggregator key can serve is `vendor/model`, and the
+            // market trades the bare half — so without its own `/models` there
+            // is no alias table, and every request would go upstream under a
+            // name OpenRouter has never heard of.
+            p if p == Provider::Openrouter.as_str() => {
+                Some(vendor_endpoint_models(store, tool, Provider::Openrouter).await)
+            }
             _ => None,
         };
         // An OpenAI-schema endpoint with no `/responses` route cannot serve the
@@ -2283,25 +2338,45 @@ mod tests {
 
     #[test]
     fn only_the_vendors_a_subscription_can_serve_are_mapped() {
-        assert_eq!(
-            providers_for_vendor("anthropic"),
-            &[Provider::Claude, Provider::ClaudeWork, Provider::ClaudeExtra]
-        );
-        assert_eq!(providers_for_vendor("openai"), &[Provider::Codex]);
-        assert_eq!(providers_for_vendor("google"), &[Provider::Gemini]);
+        // Every vendor also maps to the aggregator, which resells all of them
+        // — see `providers::resells_other_vendors`. What follows is the
+        // vendor's *own* families, in the order the Sell page offers them.
+        let own = |vendor: &str| -> Vec<Provider> {
+            providers_for_vendor(vendor)
+                .iter()
+                .copied()
+                .filter(|p| *p != Provider::Openrouter)
+                .collect()
+        };
+        assert_eq!(own("anthropic"), [Provider::Claude, Provider::ClaudeWork, Provider::ClaudeExtra]);
+        assert_eq!(own("openai"), [Provider::Codex]);
+        assert_eq!(own("google"), [Provider::Gemini]);
         // Both flavours of a vendor serve its catalog rows — the subscription
         // and the metered platform key differ only in which host they reach.
-        assert_eq!(providers_for_vendor("moonshotai"), &[Provider::Kimi, Provider::KimiApi]);
-        assert_eq!(providers_for_vendor("qwen"), &[Provider::Qwen]);
+        assert_eq!(own("moonshotai"), [Provider::Kimi, Provider::KimiApi]);
+        assert_eq!(own("qwen"), [Provider::Qwen]);
         // The catalog spells this one with a hyphen; `xai` is not the slug.
-        assert_eq!(providers_for_vendor("x-ai"), &[Provider::Xai, Provider::XaiApi]);
+        assert_eq!(own("x-ai"), [Provider::Xai, Provider::XaiApi]);
         // DeepSeek's slug and its credential family are the same word — the
         // company ships no subscription for a metered key to be told apart from.
-        assert_eq!(providers_for_vendor("deepseek"), &[Provider::Deepseek]);
+        assert_eq!(own("deepseek"), [Provider::Deepseek]);
+        for vendor in ["anthropic", "openai", "google", "moonshotai", "qwen", "x-ai", "deepseek"] {
+            assert!(
+                providers_for_vendor(vendor).contains(&Provider::Openrouter),
+                "an aggregator key serves `{vendor}` too"
+            );
+        }
         assert!(providers_for_vendor("xai").is_empty());
         // OpenRouter routing aliases are not ids any vendor API accepts.
         assert!(providers_for_vendor("~anthropic").is_empty());
-        assert!(providers_for_vendor("meta-llama").is_empty());
+        assert!(providers_for_vendor("nope").is_empty());
+        // A vendor nobody sells a subscription to is the aggregator's alone —
+        // `meta-llama` and the other chat vendors only OpenRouter serves used
+        // to land here, in the empty case, which meant a seller with an
+        // aggregator key never advertised a row of theirs.
+        for vendor in ["meta-llama", "tencent", "perplexity", "recraft"] {
+            assert_eq!(providers_for_vendor(vendor), [Provider::Openrouter]);
+        }
     }
 
     /// Every provider the Sell page can connect must resolve to an adapter, or
@@ -2317,13 +2392,50 @@ mod tests {
         assert!(adapter_for("nope").is_none());
     }
 
+    /// The reading of [`providers_for_modality`] the assertions below want:
+    /// "may this credential family advertise a row of this modality".
+    fn can_serve_modality(provider: &str, m: Modality) -> bool {
+        match providers_for_modality(m) {
+            None => true,
+            Some(allowed) => Provider::from_str_opt(provider).is_some_and(|p| allowed.contains(&p)),
+        }
+    }
+
     #[test]
-    fn only_text_answering_models_are_sellable() {
-        assert!(produces_text("text->text"));
-        assert!(produces_text("text+image->text"));
-        assert!(!produces_text("text->image"));
-        // An unknown modality must not silently remove capacity.
-        assert!(produces_text(""));
+    fn a_chat_subscription_never_advertises_a_model_it_has_no_endpoint_for() {
+        // Text is everyone's to sell — a subscription, a pasted key, a custom
+        // endpoint, the aggregator.
+        for p in ["claude", "codex", "custom", "openrouter"] {
+            assert!(can_serve_modality(p, Modality::Text), "`{p}` must still sell chat");
+        }
+        // Everything else is the aggregator's alone. Offering a Codex bearer a
+        // text-to-video model buys a 404 and costs that seller the failure.
+        for m in [Modality::Image, Modality::Video, Modality::Speech, Modality::Transcription] {
+            assert!(can_serve_modality("openrouter", m), "the aggregator serves `{m}`");
+            for p in ["claude", "codex", "gemini", "custom", "qwen"] {
+                assert!(!can_serve_modality(p, m), "`{p}` has no `{m}` endpoint");
+            }
+        }
+        // A provider string nothing answers to sells nothing but text, which is
+        // the same answer an older build would have given.
+        assert!(can_serve_modality("nope", Modality::Text));
+        assert!(!can_serve_modality("nope", Modality::Image));
+    }
+
+    #[test]
+    fn a_catalog_row_is_read_from_the_column_the_gateway_routes_on() {
+        // `output_modalities` wins where the server sent it.
+        assert_eq!(
+            row_modality(&json!({"modality": "text->text", "output_modalities": ["video"]})),
+            Modality::Video
+        );
+        // And the `modality` string is the fallback for a server that predates
+        // the column.
+        assert_eq!(row_modality(&json!({"modality": "text->image"})), Modality::Image);
+        // Neither one present is text, never "unroutable": a sparse row must
+        // not silently remove capacity that has been selling all along.
+        assert_eq!(row_modality(&json!({})), Modality::Text);
+        assert_eq!(row_modality(&json!({"output_modalities": []})), Modality::Text);
     }
 
     /// A cached catalog is the answer even when it lists nothing for this

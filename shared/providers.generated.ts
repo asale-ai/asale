@@ -17,25 +17,29 @@ export interface ProviderInfo {
   keyUrl: string;
   /** Catalog vendor slug this credential serves, `""` for none. */
   vendor: string;
-  /** False for families the platform runs itself and never offers. */
-  connectable: boolean;
-  /** Offered on the connect screen to platform operators only. */
-  adminOnly: boolean;
+  /** Whether the connect screen draws this without being told to.
+   *
+   *  `false` is "no opinion, wait to be told" — the list of families
+   *  an account may connect comes from `GET /api/v1/me/capabilities`,
+   *  and this is only the fallback for a client that has not got an
+   *  answer yet: offline, signed out, or an older deployment. */
+  offeredByDefault: boolean;
 }
 
 export const PROVIDERS: ProviderInfo[] = [
-  { id: "claude", label: "Claude Code", credential: "oauth", keyUrl: "", vendor: "anthropic", connectable: true, adminOnly: false },
-  { id: "claude_work", label: "Claude Work", credential: "oauth", keyUrl: "", vendor: "anthropic", connectable: true, adminOnly: false },
-  { id: "claude_extra", label: "Claude Extra Usage", credential: "oauth", keyUrl: "", vendor: "anthropic", connectable: true, adminOnly: false },
-  { id: "codex", label: "Codex / OpenAI", credential: "oauth", keyUrl: "", vendor: "openai", connectable: true, adminOnly: false },
-  { id: "gemini", label: "Gemini", credential: "oauth", keyUrl: "", vendor: "google", connectable: true, adminOnly: false },
-  { id: "kimi", label: "Kimi Code", credential: "device_flow", keyUrl: "", vendor: "moonshotai", connectable: true, adminOnly: false },
-  { id: "kimi_api", label: "Moonshot API", credential: "api_key", keyUrl: "https://platform.moonshot.cn/console/api-keys", vendor: "moonshotai", connectable: true, adminOnly: false },
-  { id: "xai", label: "Grok CLI", credential: "device_flow", keyUrl: "", vendor: "x-ai", connectable: true, adminOnly: false },
-  { id: "xai_api", label: "xAI API", credential: "api_key", keyUrl: "https://console.x.ai", vendor: "x-ai", connectable: true, adminOnly: false },
-  { id: "qwen", label: "Alibaba Cloud Model Studio", credential: "api_key", keyUrl: "https://bailian.console.aliyun.com/?tab=model#/api-key", vendor: "qwen", connectable: true, adminOnly: true },
-  { id: "deepseek", label: "DeepSeek", credential: "api_key", keyUrl: "https://platform.deepseek.com/api_keys", vendor: "deepseek", connectable: true, adminOnly: true },
-  { id: "custom", label: "Custom endpoint", credential: "api_key", keyUrl: "", vendor: "", connectable: false, adminOnly: false },
+  { id: "claude", label: "Claude Code", credential: "oauth", keyUrl: "", vendor: "anthropic", offeredByDefault: true },
+  { id: "claude_work", label: "Claude Work", credential: "oauth", keyUrl: "", vendor: "anthropic", offeredByDefault: true },
+  { id: "claude_extra", label: "Claude Extra Usage", credential: "oauth", keyUrl: "", vendor: "anthropic", offeredByDefault: true },
+  { id: "codex", label: "Codex / OpenAI", credential: "oauth", keyUrl: "", vendor: "openai", offeredByDefault: true },
+  { id: "gemini", label: "Gemini", credential: "oauth", keyUrl: "", vendor: "google", offeredByDefault: true },
+  { id: "kimi", label: "Kimi Code", credential: "device_flow", keyUrl: "", vendor: "moonshotai", offeredByDefault: true },
+  { id: "kimi_api", label: "Moonshot API", credential: "api_key", keyUrl: "https://platform.moonshot.cn/console/api-keys", vendor: "moonshotai", offeredByDefault: true },
+  { id: "xai", label: "Grok CLI", credential: "device_flow", keyUrl: "", vendor: "x-ai", offeredByDefault: true },
+  { id: "xai_api", label: "xAI API", credential: "api_key", keyUrl: "https://console.x.ai", vendor: "x-ai", offeredByDefault: true },
+  { id: "qwen", label: "Alibaba Cloud Model Studio", credential: "api_key", keyUrl: "https://bailian.console.aliyun.com/?tab=model#/api-key", vendor: "qwen", offeredByDefault: false },
+  { id: "deepseek", label: "DeepSeek", credential: "api_key", keyUrl: "https://platform.deepseek.com/api_keys", vendor: "deepseek", offeredByDefault: false },
+  { id: "openrouter", label: "OpenRouter", credential: "api_key", keyUrl: "https://openrouter.ai/settings/keys", vendor: "openrouter", offeredByDefault: false },
+  { id: "custom", label: "Custom endpoint", credential: "api_key", keyUrl: "", vendor: "", offeredByDefault: false },
 ];
 
 /** Catalog vendor slug → brand casing. */
@@ -50,4 +54,60 @@ export const VENDOR_LABELS: Record<string, string> = {
   "z-ai": "Z.ai",
   "minimax": "MiniMax",
   "xiaomi": "Xiaomi",
+  "openrouter": "OpenRouter",
+  "alibaba": "Alibaba",
+  "black-forest-labs": "Black Forest Labs",
+  "bytedance": "ByteDance",
+  "bytedance-seed": "ByteDance Seed",
+  "canopylabs": "Canopy Labs",
+  "deepgram": "Deepgram",
+  "fish-audio": "Fish Audio",
+  "heygen": "HeyGen",
+  "hexgrad": "Hexgrad",
+  "krea": "Krea",
+  "kwaivgi": "KwaiVGI",
+  "meta": "Meta",
+  "microsoft": "Microsoft",
+  "mistralai": "Mistral",
+  "nvidia": "NVIDIA",
+  "recraft": "Recraft",
+  "runway": "Runway",
+  "sesame": "Sesame",
+  "sourceful": "Sourceful",
+  "ai21": "AI21",
+  "aion-labs": "AionLabs",
+  "allenai": "AllenAI",
+  "amazon": "Amazon",
+  "anthracite-org": "Anthracite",
+  "arcee-ai": "Arcee AI",
+  "baidu": "Baidu",
+  "cognitivecomputations": "Cognitive Computations",
+  "cohere": "Cohere",
+  "deepcogito": "Deep Cogito",
+  "gryphe": "Gryphe",
+  "ibm-granite": "IBM Granite",
+  "inception": "Inception",
+  "inclusionai": "InclusionAI",
+  "inflection": "Inflection",
+  "kwaipilot": "KwaiPilot",
+  "mancer": "Mancer",
+  "meituan": "Meituan",
+  "meta-llama": "Meta Llama",
+  "morph": "Morph",
+  "nex-agi": "NEX AGI",
+  "nousresearch": "Nous Research",
+  "perceptron": "Perceptron",
+  "perplexity": "Perplexity",
+  "poolside": "Poolside",
+  "rekaai": "Reka",
+  "relace": "Relace",
+  "sakana": "Sakana AI",
+  "sao10k": "Sao10K",
+  "stepfun": "StepFun",
+  "tencent": "Tencent",
+  "thedrummer": "TheDrummer",
+  "thinkingmachines": "Thinking Machines",
+  "undi95": "Undi95",
+  "upstage": "Upstage",
+  "writer": "Writer",
 };

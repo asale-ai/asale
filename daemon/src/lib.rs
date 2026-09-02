@@ -301,7 +301,7 @@ pub async fn start(bind: SocketAddr) -> anyhow::Result<StartedDaemon> {
                 // and what takes them off the sell page rather than leaving an
                 // account there that can never earn. Costs a local read on a
                 // device with no custom endpoint, which is nearly all of them.
-                commands::enforce_custom_endpoint_policy(&st).await;
+                commands::enforce_provider_policy(&st).await;
                 if !commands::publish_wanted(&st).await {
                     continue;
                 }

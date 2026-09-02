@@ -123,6 +123,16 @@ pub struct ProviderSpec {
     /// other vendor has a single host. Empty for the OAuth families, whose
     /// credential is not pasted.
     pub verify_hosts: &'static [&'static str],
+    /// The path under `verify_hosts` that answers `401` to a bad key.
+    ///
+    /// `/models` for every vendor API, because it is the one endpoint an
+    /// OpenAI-compatible host exposes for free and it is authenticated. An
+    /// aggregator is the exception and has to be: OpenRouter publishes its
+    /// catalog to the world, so `/models` answers `200` to a key that does not
+    /// exist — and a probe that cannot fail is a probe that accepts a typo,
+    /// puts the lane on the market, and 401s every buyer matched to it. `/key`
+    /// is the endpoint that actually asks who is calling.
+    pub verify_path: &'static str,
     pub window_cap: WindowCap,
     pub quota: QuotaSource,
     /// LIKE-prefix that attributes a served model to this family, for local
@@ -142,13 +152,23 @@ pub struct ProviderSpec {
     /// Either way an unlisted id is matched, preauthorized, routed — and only
     /// then refused, with the publisher wearing a failure it did not cause.
     pub native_models: Option<&'static [&'static str]>,
-    /// Offered on the connect screen to platform operators only.
+    /// Whether the connect screen draws this family without being told to.
     ///
-    /// Not a boundary — the gateway does not refuse these lanes, and a fork can
-    /// skip the check — but the same rule `custom` follows: a family the
-    /// platform is still trialling is not put in front of every seller. Clearing
-    /// the flag is what opens it to everyone.
-    pub admin_only: bool,
+    /// `false` does not mean "hidden": it means the client has no opinion and
+    /// waits to be told. The list of families a given account may connect comes
+    /// from the server (`GET /api/v1/me/capabilities`), which is also what
+    /// enforces it — `wsrelay::session::declare_supply` drops a lane from a
+    /// family the declaring account is not entitled to.
+    ///
+    /// It reads that way round because a client is the seller's own and can be
+    /// patched. A flag compiled in here can only ever decide what a *stock*
+    /// build draws before it has asked; it has never been a boundary and must
+    /// not be read as one.
+    ///
+    /// The default is what a client falls back to with no answer from the
+    /// server — offline, signed out, or an older deployment — so it is the set
+    /// that is right for everyone.
+    pub offered_by_default: bool,
 }
 
 impl ProviderSpec {
@@ -192,12 +212,13 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         user_agent: CLAUDE_CLI_USER_AGENT,
         extra_headers: &[("anthropic-version", "2023-06-01")],
         verify_hosts: &[],
+        verify_path: "/models",
         window_cap: WindowCap::Plan,
         quota: QuotaSource::Endpoint,
         model_prefix: Some("claude"),
         fallback_models: &["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
         native_models: None,
-        admin_only: false,
+        offered_by_default: true,
     },
     ProviderSpec {
         provider: Provider::ClaudeWork,
@@ -218,12 +239,13 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         user_agent: CLAUDE_CLI_USER_AGENT,
         extra_headers: &[("anthropic-version", "2023-06-01")],
         verify_hosts: &[],
+        verify_path: "/models",
         window_cap: WindowCap::Plan,
         quota: QuotaSource::Endpoint,
         model_prefix: Some("claude"),
         fallback_models: &["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
         native_models: None,
-        admin_only: false,
+        offered_by_default: true,
     },
     ProviderSpec {
         provider: Provider::ClaudeExtra,
@@ -240,6 +262,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         user_agent: CLAUDE_CLI_USER_AGENT,
         extra_headers: &[("anthropic-version", "2023-06-01")],
         verify_hosts: &[],
+        verify_path: "/models",
         // Metered, not windowed. Extra usage is what an account spends *after*
         // its plan window is gone, so reading the plan window would take a lane
         // off the market at exactly the point it starts being worth something —
@@ -249,7 +272,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         model_prefix: Some("claude"),
         fallback_models: &["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
         native_models: None,
-        admin_only: false,
+        offered_by_default: true,
     },
     ProviderSpec {
         provider: Provider::Codex,
@@ -271,6 +294,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         user_agent: "codex_cli_rs/0.146.0",
         extra_headers: &[],
         verify_hosts: &[],
+        verify_path: "/models",
         window_cap: WindowCap::Plan,
         // No endpoint a ChatGPT bearer may read; the numbers ride back on the
         // headers of calls this device has served.
@@ -281,7 +305,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         // what the account is actually granted as soon as it answers.
         fallback_models: &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
         native_models: None,
-        admin_only: false,
+        offered_by_default: true,
     },
     ProviderSpec {
         provider: Provider::Gemini,
@@ -297,12 +321,13 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         user_agent: "google-genai-cli/1.0",
         extra_headers: &[],
         verify_hosts: &[],
+        verify_path: "/models",
         window_cap: WindowCap::Plan,
         quota: QuotaSource::Endpoint,
         model_prefix: Some("gemini"),
         fallback_models: &["gemini-2.5-pro", "gemini-2.5-flash"],
         native_models: None,
-        admin_only: false,
+        offered_by_default: true,
     },
     ProviderSpec {
         provider: Provider::Kimi,
@@ -319,12 +344,13 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         // knows which account is being used.
         extra_headers: &[("x-msh-platform", "kimi-cli"), ("x-msh-version", "1.0")],
         verify_hosts: &[],
+        verify_path: "/models",
         window_cap: WindowCap::Fixed(500_000),
         quota: QuotaSource::Endpoint,
         model_prefix: Some("kimi"),
         fallback_models: &["kimi-k2.7-code", "kimi-k2-thinking", "kimi-k3"],
         native_models: None,
-        admin_only: false,
+        offered_by_default: true,
     },
     ProviderSpec {
         provider: Provider::KimiApi,
@@ -341,12 +367,13 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         user_agent: "kimi-cli/1.0",
         extra_headers: &[],
         verify_hosts: &["https://api.moonshot.cn/v1", "https://api.moonshot.ai/v1"],
+        verify_path: "/models",
         window_cap: WindowCap::Fixed(500_000),
         quota: QuotaSource::None,
         model_prefix: Some("kimi"),
         fallback_models: &["kimi-k2.7-code", "kimi-k2-thinking", "kimi-k3"],
         native_models: None,
-        admin_only: false,
+        offered_by_default: true,
     },
     ProviderSpec {
         provider: Provider::Xai,
@@ -360,6 +387,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         user_agent: "xai-grok-workspace/0.2.93",
         extra_headers: &[],
         verify_hosts: &[],
+        verify_path: "/models",
         window_cap: WindowCap::Fixed(500_000),
         // The `rest/rate-limits` call the Grok web app makes is authorised by a
         // web session, not by the CLI's bearer, so what a served response
@@ -378,7 +406,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
             "grok-3-mini-fast",
             "grok-composer-2.5-fast",
         ]),
-        admin_only: false,
+        offered_by_default: true,
     },
     ProviderSpec {
         provider: Provider::XaiApi,
@@ -392,6 +420,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         user_agent: "grok-cli/1.0",
         extra_headers: &[],
         verify_hosts: &["https://api.x.ai/v1"],
+        verify_path: "/models",
         window_cap: WindowCap::Fixed(500_000),
         quota: QuotaSource::Headers("x-ratelimit-"),
         model_prefix: Some("grok"),
@@ -407,7 +436,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
             "grok-3-mini-fast",
             "grok-composer-2.5-fast",
         ]),
-        admin_only: false,
+        offered_by_default: true,
     },
     ProviderSpec {
         provider: Provider::Qwen,
@@ -425,12 +454,13 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         user_agent: "asale/1.0",
         extra_headers: &[],
         verify_hosts: &["https://dashscope.aliyuncs.com/compatible-mode/v1"],
+        verify_path: "/models",
         window_cap: WindowCap::Fixed(CUSTOM_WINDOW_TOKENS),
         quota: QuotaSource::None,
         model_prefix: Some("qwen"),
         fallback_models: &["qwen3.8-max", "qwen3.7-plus"],
         native_models: None,
-        admin_only: true,
+        offered_by_default: false,
     },
     ProviderSpec {
         provider: Provider::Deepseek,
@@ -446,6 +476,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         user_agent: "asale/1.0",
         extra_headers: &[],
         verify_hosts: &["https://api.deepseek.com/v1"],
+        verify_path: "/models",
         // Metered against a balance, like `custom`: no rolling window exists,
         // and a realistic-looking one would take a busy key off the market
         // every afternoon for a limit the vendor does not impose.
@@ -458,15 +489,54 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         // `deepseek-v4-pro` to access the latest version" —
         // <https://api-docs.deepseek.com/quick_start/models>).
         native_models: Some(&["deepseek-v4-flash", "deepseek-v4-pro"]),
-        admin_only: true,
+        offered_by_default: false,
+    },
+    ProviderSpec {
+        provider: Provider::Openrouter,
+        id: "openrouter",
+        label: "OpenRouter",
+        // Its own rows (`openrouter/auto`) — but the vendor field is the
+        // *narrowest* claim this table makes, and it is not what decides what
+        // the lane may sell: `resells_other_vendors` is, and it says "anything
+        // the platform prices that this key's own /models answers to".
+        vendor: Some(Vendor::Openrouter),
+        credential: Credential::ApiKey { key_url: "https://openrouter.ai/settings/keys" },
+        wire: Wire::Openai,
+        api_base: "https://openrouter.ai/api/v1",
+        chat_url: "https://openrouter.ai/api/v1/chat/completions",
+        // No vendor CLI to impersonate: OpenRouter *is* the aggregator, and it
+        // routes on the key rather than on who is calling.
+        user_agent: "asale/1.0",
+        extra_headers: &[],
+        verify_hosts: &["https://openrouter.ai/api/v1"],
+        // Not `/models`: the aggregator's catalog is public and answers `200`
+        // to anybody. See `verify_path`.
+        verify_path: "/key",
+        // Metered against a credit balance, like `deepseek` and `custom`. A
+        // rolling window would take a funded key off the market for a limit
+        // that does not exist.
+        window_cap: WindowCap::Fixed(CUSTOM_WINDOW_TOKENS),
+        quota: QuotaSource::None,
+        // Serves every vendor's models, so no single prefix attributes them.
+        model_prefix: None,
+        // What a fresh install offers before its first catalog pull. Market
+        // ids, as everywhere else: the key's own `/models` supplies the
+        // `vendor/model` spelling the aggregator wants, and the executor puts
+        // it back into the body (`AccountRuntime::model_aliases`).
+        fallback_models: &["claude-opus-5", "gpt-5.5", "gemini-2.5-pro"],
+        // Every id this key can serve is `vendor/model`, never the bare market
+        // id — so the set is not a constant, it is whatever the account's own
+        // `/models` lists, and the alias map is what carries it.
+        native_models: None,
+        offered_by_default: false,
     },
     ProviderSpec {
         provider: Provider::Custom,
         id: "custom",
         label: "Custom endpoint",
-        // Tied to no vendor: the platform runs these itself to put supply
-        // behind models its subscription sellers happen not to cover, so what
-        // it may sell is everything the platform prices.
+        // Tied to no vendor, so what it may sell is everything the platform
+        // prices — narrowed, like every reseller lane, to what the endpoint's
+        // own `/models` actually answers to.
         vendor: None,
         credential: Credential::ApiKey { key_url: "" },
         // Only the default. Its operator points it at whatever host they hold a
@@ -481,6 +551,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         user_agent: "asale/1.0",
         extra_headers: &[],
         verify_hosts: &[],
+        verify_path: "/models",
         window_cap: WindowCap::Fixed(CUSTOM_WINDOW_TOKENS),
         quota: QuotaSource::None,
         model_prefix: None,
@@ -489,7 +560,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         // advertises nothing rather than guessing.
         fallback_models: &[],
         native_models: None,
-        admin_only: false,
+        offered_by_default: false,
     },
 ];
 
@@ -512,15 +583,15 @@ pub fn spec(p: Provider) -> &'static ProviderSpec {
 /// Whether this credential family serves models the catalog files under *other*
 /// vendors.
 ///
-/// Two of them do. A `custom` endpoint belongs to no vendor at all, and one
+/// Three of them do. A `custom` endpoint belongs to no vendor at all, one
 /// Model Studio key serves GLM, MiniMax, MiMo, DeepSeek and Kimi alongside
-/// Alibaba's own models — which is why `Vendor::providers` may map a vendor to
+/// Alibaba's own models, and an OpenRouter key reaches every vendor there is — which is why `Vendor::providers` may map a vendor to
 /// a family whose own `vendor` field names someone else. Nothing widens on the
 /// strength of this alone: what such a lane may advertise is still narrowed to
 /// the endpoint's own `/models`, so a model the key cannot serve is never put
 /// on the market.
 pub fn resells_other_vendors(p: Provider) -> bool {
-    matches!(p, Provider::Qwen | Provider::Custom)
+    matches!(p, Provider::Qwen | Provider::Custom | Provider::Openrouter)
 }
 
 /// Credential families that must not serve a buyer arriving from this tool.
@@ -605,6 +676,10 @@ mod tests {
     /// A pasted key is probed before it is saved, so a key-connected family
     /// with nowhere to probe would accept a dead key silently. The reverse also
     /// holds: an OAuth family has no key to probe.
+    ///
+    /// The path is checked with the hosts: a probe pointed at an endpoint that
+    /// answers the same to everyone is the same silent acceptance wearing a
+    /// request.
     #[test]
     fn a_pasted_key_has_somewhere_to_be_probed() {
         for s in PROVIDERS {
@@ -613,6 +688,11 @@ mod tests {
                 // operator's, so there is no host written down here to probe.
                 Credential::ApiKey { .. } if s.provider != Provider::Custom => {
                     assert!(!s.verify_hosts.is_empty(), "`{}` has no host to verify a key against", s.id);
+                    assert!(
+                        s.verify_path.starts_with('/'),
+                        "`{}` has no path to probe a key on",
+                        s.id
+                    );
                     assert!(!s.key_url().is_empty(), "`{}` gives no link to where its key is issued", s.id);
                 }
                 _ => assert!(s.verify_hosts.is_empty(), "`{}` has no pasted key to probe", s.id),
@@ -676,20 +756,29 @@ mod tests {
         }
     }
 
-    /// Which families are operator-only, written down so opening one to every
-    /// seller is a deliberate edit rather than a flag flipped in passing.
+    /// Which families a stock build draws before it has asked the server, so
+    /// that changing the set is a deliberate edit rather than a flag flipped in
+    /// passing.
     ///
-    /// Both are pasted-key vendors the platform is still trialling: the sell
-    /// page draws no tile for them, and `connect_api_key` refuses one, unless
-    /// the signed-in account is a platform operator.
+    /// The four that are not are exactly the metered, pasted-key ones. What a
+    /// given account may actually connect is the server's answer
+    /// (`GET /api/v1/me/capabilities`), and what it may actually *sell* is
+    /// enforced when the lane is declared — neither is decided here.
     #[test]
-    fn only_the_families_still_being_trialled_are_operator_only() {
-        let gated: Vec<&str> = PROVIDERS.iter().filter(|s| s.admin_only).map(|s| s.id).collect();
-        assert_eq!(gated, ["qwen", "deepseek"]);
-        // A family nobody can connect cannot be gated *into* being connectable:
-        // `custom` is hidden by `connectable`, and marking it here too would
-        // read as though clearing the flag were enough to offer it.
-        assert!(PROVIDERS.iter().all(|s| !(s.admin_only && s.vendor.is_none())));
+    fn the_default_offer_is_the_subscription_families() {
+        let waits: Vec<&str> =
+            PROVIDERS.iter().filter(|s| !s.offered_by_default).map(|s| s.id).collect();
+        assert_eq!(waits, ["qwen", "deepseek", "openrouter", "custom"]);
+        // Every one of them is a key somebody pastes. A family connected by
+        // signing in has nothing to wait for: the vendor's own consent screen
+        // is the gate.
+        for s in PROVIDERS.iter().filter(|s| !s.offered_by_default) {
+            assert!(
+                matches!(s.credential, Credential::ApiKey { .. }),
+                "`{}` is not connected by a pasted key",
+                s.id
+            );
+        }
     }
 
     /// The frontends render this table rather than retyping it, so the file
@@ -758,10 +847,13 @@ pub fn render_typescript() -> String {
          \x20 keyUrl: string;\n\
          \x20 /** Catalog vendor slug this credential serves, `\"\"` for none. */\n\
          \x20 vendor: string;\n\
-         \x20 /** False for families the platform runs itself and never offers. */\n\
-         \x20 connectable: boolean;\n\
-         \x20 /** Offered on the connect screen to platform operators only. */\n\
-         \x20 adminOnly: boolean;\n\
+         \x20 /** Whether the connect screen draws this without being told to.\n\
+         \x20  *\n\
+         \x20  *  `false` is \"no opinion, wait to be told\" — the list of families\n\
+         \x20  *  an account may connect comes from `GET /api/v1/me/capabilities`,\n\
+         \x20  *  and this is only the fallback for a client that has not got an\n\
+         \x20  *  answer yet: offline, signed out, or an older deployment. */\n\
+         \x20 offeredByDefault: boolean;\n\
          }\n\
          \n\
          export const PROVIDERS: ProviderInfo[] = [\n",
@@ -772,16 +864,14 @@ pub fn render_typescript() -> String {
             Credential::DeviceFlow => "device_flow",
             Credential::ApiKey { .. } => "api_key",
         };
-        let connectable = s.vendor.is_some();
         out.push_str(&format!(
-            "  {{ id: {:?}, label: {:?}, credential: {:?}, keyUrl: {:?}, vendor: {:?}, connectable: {}, adminOnly: {} }},\n",
+            "  {{ id: {:?}, label: {:?}, credential: {:?}, keyUrl: {:?}, vendor: {:?}, offeredByDefault: {} }},\n",
             s.id,
             s.label,
             credential,
             s.key_url(),
             s.vendor.map(|v| v.as_str()).unwrap_or(""),
-            connectable,
-            s.admin_only,
+            s.offered_by_default,
         ));
     }
     out.push_str("];\n\n/** Catalog vendor slug → brand casing. */\nexport const VENDOR_LABELS: Record<string, string> = {\n");

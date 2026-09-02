@@ -22,13 +22,14 @@ pub enum FlowStatus {
     Failed(crate::commands::CmdError),
 }
 
-/// `(fetched_at, verdict)` for [`AppState::operator`].
+/// `(fetched_at, answer)` for [`AppState::capabilities`].
 ///
 /// `None` — either as the whole option or as the inner answer — means "not
-/// established": nobody has asked yet, nobody is signed in, or `/me/profile`
-/// did not answer. It is deliberately not the same as `Some(false)`, because
-/// the one thing a non-answer must never do is delete somebody's endpoints.
-pub type OperatorCache = Arc<RwLock<Option<(i64, Option<bool>)>>>;
+/// established": nobody has asked yet, nobody is signed in, or the server did
+/// not answer. It is deliberately not the same as an answer listing nothing,
+/// because the one thing a non-answer must never do is delete somebody's keys.
+pub type CapabilityCache =
+    Arc<RwLock<Option<(i64, Option<crate::commands::Capabilities>)>>>;
 
 pub struct AppState {
     pub cfg: ClientConfig,
@@ -60,10 +61,9 @@ pub struct AppState {
     /// enough; failures are cached too, so being signed out or offline costs a
     /// timeout at that same rate rather than one per poll.
     pub sold_cache: Arc<RwLock<std::collections::HashMap<String, (i64, Option<serde_json::Value>)>>>,
-    /// Whether the signed-in account is a platform operator (`users.role ==
-    /// "admin"` server-side). Gates the custom-endpoint commands; see
-    /// `commands::accounts::platform_operator`.
-    pub operator: OperatorCache,
+    /// What the signed-in account may connect, as the server last answered
+    /// (`GET /api/v1/me/capabilities`). See `commands::accounts::capabilities`.
+    pub capabilities: CapabilityCache,
     /// In-flight browser OAuth flows: flow_id → status. Entries are removed
     /// when the frontend collects a terminal result.
     pub oauth_flows: Arc<RwLock<HashMap<String, FlowStatus>>>,
@@ -135,7 +135,7 @@ impl AppState {
             pool,
             limits_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             sold_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            operator: Arc::new(RwLock::new(None)),
+            capabilities: Arc::new(RwLock::new(None)),
             oauth_flows: Arc::new(RwLock::new(HashMap::new())),
             oauth_submitters: Arc::new(RwLock::new(HashMap::new())),
             lane_tx,

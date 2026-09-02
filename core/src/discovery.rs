@@ -492,12 +492,47 @@ pub async fn codex_servable_models(token: &str, chatgpt_account_id: &str) -> any
 /// the market can actually trade is the caller's job: that answer belongs to the
 /// platform's catalog, not to the endpoint.
 pub async fn custom_endpoint_models(base_url: &str, api_key: &str, wire: Wire) -> anyhow::Result<Vec<String>> {
+    models_at(base_url, "", api_key, wire).await
+}
+
+/// Every model an aggregator serves, across every modality.
+///
+/// One extra call per non-text modality, because `GET /models` answers with the
+/// **text** catalogue and nothing else: OpenRouter's image, video, speech and
+/// transcription models are separate result sets behind `?output_modalities=`,
+/// and an aggregator account probed the ordinary way lists 421 chat models and
+/// not one of the things this platform sells it for.
+///
+/// The text call is the one that decides success. A media set that fails to
+/// load costs those lanes until the next refresh, which is the right trade
+/// against failing the whole account over one of five requests — and against
+/// the opposite failure, where a transient error on the *text* call would land
+/// an aggregator account advertising only its video models.
+pub async fn aggregator_endpoint_models(base_url: &str, api_key: &str, wire: Wire) -> anyhow::Result<Vec<String>> {
+    let mut models = models_at(base_url, "", api_key, wire).await?;
+    for modality in asale_protocol::Modality::ALL.iter().filter(|m| m.upstream_path().is_some()) {
+        match models_at(base_url, &format!("?output_modalities={modality}"), api_key, wire).await {
+            Ok(more) => models.extend(more),
+            Err(e) => tracing::warn!(%modality, "could not list the aggregator's {modality} models: {e}"),
+        }
+    }
+    models.sort();
+    models.dedup();
+    Ok(models)
+}
+
+async fn models_at(
+    base_url: &str,
+    query: &str,
+    api_key: &str,
+    wire: Wire,
+) -> anyhow::Result<Vec<String>> {
     let base = base_url.trim().trim_end_matches('/');
     anyhow::ensure!(
         base.starts_with("http://") || base.starts_with("https://"),
         "base URL must start with http:// or https://"
     );
-    let url = format!("{base}/models");
+    let url = format!("{base}/models{query}");
     let req = crate::http::upstream().get(&url).timeout(Duration::from_secs(30));
     // The same key, in the header each dialect's hosts read it from — the probe
     // has to fail for the *right* reason, and a bearer sent to an Anthropic

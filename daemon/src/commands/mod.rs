@@ -72,18 +72,18 @@ pub use wallet::*;
 ///
 /// One machine serves whoever is signed in at the time, and the caches here are
 /// keyed to nothing — so without this an answer about the previous account
-/// outlives them. That is not a cosmetic staleness: `platform_operator`'s
-/// verdict decides whether the supervisor deletes this device's custom
-/// endpoints, and a stale `Some(false)` carried across a sign-in would delete an
-/// operator's endpoints and the keys they pasted into them. The inverse is
-/// milder but still wrong — a stale `Some(true)` offers an ordinary seller a
-/// form whose every result the gateway refuses.
+/// outlives them. That is not a cosmetic staleness: the capability answer
+/// decides whether the supervisor deletes the accounts on this device, and a
+/// stale one carried across a sign-in would delete an operator's accounts and
+/// the keys they pasted into them. The inverse is milder but still wrong — a
+/// stale grant offers an ordinary seller a form whose every result the gateway
+/// refuses.
 ///
 /// Not the consumer API key: that one is per-account too, but it lives in the
 /// encrypted store as well as in memory, so it is dropped through
 /// [`wallet::forget_key`] rather than here.
 pub(crate) async fn forget_account_cache(state: &crate::state::AppState) {
-    *state.operator.write().await = None;
+    *state.capabilities.write().await = None;
 }
 
 /// Every command returns either a JSON value or a failure the frontend puts on
