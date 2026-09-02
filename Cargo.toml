@@ -15,7 +15,7 @@ resolver = "2"
 members = ["protocol", "core", "daemon", "cli", "src-tauri"]
 
 [workspace.package]
-version = "0.7.2"
+version = "0.7.3"
 edition = "2021"
 
 [workspace.dependencies]

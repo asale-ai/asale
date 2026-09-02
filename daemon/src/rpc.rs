@@ -335,9 +335,12 @@ fn serve_asset(path: &str) -> Response {
                 .header("x-frame-options", "DENY")
                 .header(
                     header::CONTENT_SECURITY_POLICY,
+                    // frame-src: 「对话」页把 Studio 嵌进 iframe（src/pages/Studio.tsx）。
+                    // 没有这一条时 default-src 'self' 兜底把它拦掉，页面一片空白。
                     "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; \
                      script-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:* \
-                     ws://127.0.0.1:* ws://localhost:*; frame-ancestors 'none'; base-uri 'none'",
+                     ws://127.0.0.1:* ws://localhost:*; frame-src https://studio.asale.ai; \
+                     frame-ancestors 'none'; base-uri 'none'",
                 )
                 .body(Body::from(f.data.into_owned()))
                 .unwrap()
