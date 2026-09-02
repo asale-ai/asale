@@ -24,6 +24,19 @@ export const GATEWAY_URL = (import.meta.env.VITE_ASALE_GATEWAY as string | undef
   || DEFAULT_GATEWAY;
 
 /**
+ * Where the Studio bundle is served from.
+ *
+ * Unlike everything else in this file, this one *is* navigated to — into an
+ * iframe, not the main webview. Studio is a separate origin with a separate
+ * store and no access to this app's daemon; what it gets is one API key, handed
+ * over by `postMessage`. See `pages/Studio.tsx`.
+ *
+ * Overridable so a developer can point the tab at `pnpm dev` in `asale-studio`.
+ */
+export const STUDIO_URL = (import.meta.env.VITE_ASALE_STUDIO as string | undefined)?.replace(/\/+$/, "")
+  || "https://studio.asale.ai";
+
+/**
  * A page on the site, in the reader's language.
  *
  * The web app prefixes every route with a locale and ships the same four ids

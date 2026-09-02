@@ -17,7 +17,10 @@
     "groupFinance": "資金",
     "apikeys": "API キー",
     "betaTip": "Asale は現在ベータ版のため、更新が頻繁に行われます。不具合や料金計算の誤りがありましたら、support@asale.ai までメールでご連絡ください。",
-    "security": "セキュリティ"
+    "security": "セキュリティ",
+    "studio": "チャット",
+    "collapse": "サイドバーを折りたたむ",
+    "expand": "サイドバーを開く"
   },
   "dashboard": {
     "title": "ダッシュボード",
@@ -167,7 +170,7 @@
     "scanning": "スキャン中…",
     "cliNone": "CLI の資格情報が見つかりませんでした。",
     "envWarning": "警告：環境変数 {{vars}} が設定されており、CLI の保存済み資格情報を上書きします。",
-    "cliSkippedBuying": "{{tools}} は asale 経由で購入中のため、そのローカルアカウントは販売に出されません。購入をオフにすると再び販売できます。",
+    "cliSkippedBuying": "{{tools}} は Asale 経由で購入中のため、そのローカルアカウントは販売に出されません。購入をオフにすると再び販売できます。",
     "connectVia": "ブラウザでログイン",
     "connectViaKey": "API キーで接続",
     "connectViaCode": "ブラウザでコードを確認",
@@ -1375,5 +1378,9 @@
     "downloadedOf": "{{done}} / {{total}} MB",
     "downloaded": "{{done}} MB",
     "installing": "ダウンロードが完了しました。Asale を終了してアップデートを適用し、再度起動します。"
+  },
+  "studio": {
+    "sub": "マーケットのすべてのモデルで、チャット・翻訳・画像生成。",
+    "unavailable": "このビルドでは Studio を利用できません。"
   }
 }

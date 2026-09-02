@@ -346,7 +346,42 @@ p, li, .sub { text-wrap: pretty; }
   display: flex;
   flex-direction: column;
   gap: 1px;
+  transition: width var(--dur) var(--ease);
 }
+/* Collapsed: the icon column and nothing else. The width is the two-column
+   grid with the label column taken away — rail padding + item padding + the
+   icon slot — so every glyph stays on the exact x it sits on when expanded and
+   the rail does not appear to shuffle as it narrows. */
+.sidebar.collapsed { width: 66px; }
+.sidebar.collapsed .nav-label,
+.sidebar.collapsed .su-text,
+.sidebar.collapsed .logo span { display: none; }
+/* The group labels are the only separation between the four blocks, so they
+   leave a rule behind rather than disappearing. */
+.sidebar.collapsed .nav-group-label { font-size: 0; padding: var(--s10) var(--s8) var(--s8); }
+.sidebar.collapsed .nav-group-label::before {
+  content: ""; display: block; height: 1px; background: var(--line);
+}
+/* No label to sit at the end of, so the marker rides the glyph. */
+.sidebar.collapsed .nav-dot { position: absolute; top: 4px; right: 4px; margin: 0; }
+/* Folded, the name comes back on hover. Written out rather than left to
+   `title`: this app is a macOS webview, and a webview never draws one. The
+   rows clip their own labels when expanded, so the clip has to go first. */
+.sidebar.collapsed .navitem,
+.sidebar.collapsed .sidebar-user { overflow: visible; position: relative; }
+.sidebar.collapsed [data-tip]::after {
+  content: attr(data-tip);
+  position: absolute; left: calc(100% + 8px); top: 50%;
+  padding: var(--s6) var(--s10); border-radius: var(--r-sm);
+  background: var(--surface); color: var(--fg);
+  border: 1px solid var(--line-2); box-shadow: var(--shadow-pop);
+  font-size: var(--fs-meta); font-weight: 500; line-height: 1.4;
+  letter-spacing: 0; white-space: nowrap;
+  opacity: 0; transform: translate(-3px, -50%); pointer-events: none; z-index: 60;
+  transition: opacity var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+.sidebar.collapsed [data-tip]:hover::after,
+.sidebar.collapsed [data-tip]:focus-visible::after { opacity: 1; transform: translate(0, -50%); }
 /* The sidebar is a two-column list: a --nav-ico-w icon column starting at the
    row padding, then the label. The logo, every nav item and the user card all
    use it, so their labels share one left edge. */
@@ -392,6 +427,7 @@ p, li, .sub { text-wrap: pretty; }
   padding: var(--s16) var(--s8) var(--s4);
 }
 .navitem {
+  position: relative;
   display: flex; align-items: center; gap: var(--s12);
   padding: var(--s8) var(--s8); border-radius: var(--r-sm); cursor: pointer;
   color: var(--fg-2); border: none; background: none; text-align: left;
@@ -2707,3 +2743,38 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 }
 .tabs button.active .tab-count { color: var(--fg-2); }
 .fw-more { margin-top: var(--s8); }
+
+/* ── Studio ─────────────────────────────────────────────────────────────────
+   The one tab that is an application rather than a page. It is served from
+   studio.asale.ai and framed here, so it brings its own sidebar, its own scroll
+   and its own 100dvh layout — which means it must not be drawn inside the
+   980px reading column the rest of the app uses, and must not be the thing that
+   makes `.main` scroll.
+
+   `:has` rather than a class on `.main`, because the tab is state in App.tsx
+   and the container is rendered above it; the alternative was threading a
+   modifier through two components to express "the child asked for the room".
+   ────────────────────────────────────────────────────────────────────────── */
+.main:has(> .main-inner.full) { display: flex; flex-direction: column; overflow: hidden; }
+.main-inner.full {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+  max-width: none; padding: 0;
+  /* `.main-inner` centres the reading column with `margin: 0 auto`, and an auto
+     cross-axis margin on a flex item beats `align-items: stretch` — so without
+     this the frame shrank to its own content width and sat in the middle of a
+     half-empty window. */
+  margin: 0;
+}
+.studio-page { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* The frame is full-bleed; anything the page shows *instead* of it (the error,
+   the "no Studio in this build" note) is ordinary page content and keeps the
+   margin the rest of the app is drawn with. */
+.studio-page > :not(.studio-frame) { margin: var(--s24); }
+.studio-frame {
+  flex: 1; width: 100%; min-height: 0; border: none;
+  background: var(--bg);
+}
+/* Studio owns the window: the app's own top bar is hidden while it is open, so
+   the frame runs edge to edge, top to bottom. Hidden rather than unmounted —
+   the status readout inside it polls, and remounting would restart the poll. */
+.topbar.hidden { display: none; }

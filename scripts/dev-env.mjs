@@ -133,9 +133,20 @@ export function applyStack(env, { prod }) {
       process.exit(1);
     }
     console.warn("⚠ --prod: this build trades on the LIVE market");
+    // `--prod` means packaging's values, so the compiled default (the live
+    // Studio bundle) has to win — a shell that happens to carry the dev pin
+    // would otherwise frame a localhost bundle in a production run.
+    delete env.VITE_ASALE_STUDIO;
     return env;
   }
   for (const key of STACK_KEYS) delete env[key];
+  // Where the Studio tab's iframe loads from. A stack choice like the four
+  // above, but a *frontend* one — the daemon knows nothing about it, and
+  // `links.ts` defaults to studio.asale.ai for a packaged build. Framing the
+  // production bundle from a dev client is not merely inconsistent: that copy
+  // is built against api/gw.asale.ai, so a locally-minted key would be sent to
+  // the live gateway, which has never heard of it.
+  pinAll(env, { VITE_ASALE_STUDIO: "http://localhost:9500" });
   const pubkey = localQuotaPubkey();
   if (pubkey) {
     pinAll(env, { ASALE_QUOTA_PUBKEY: pubkey });

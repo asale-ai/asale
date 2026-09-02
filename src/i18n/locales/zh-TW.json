@@ -17,7 +17,10 @@
     "groupFinance": "資金",
     "apikeys": "API 金鑰",
     "betaTip": "Asale 目前處於 Beta 階段，更新會比較頻繁。若遇到問題，或是費用計算有誤，可以寄信到 support@asale.ai 與我們聯絡。",
-    "security": "安全控制"
+    "security": "安全控制",
+    "studio": "對話",
+    "collapse": "收合側欄",
+    "expand": "展開側欄"
   },
   "dashboard": {
     "title": "總覽",
@@ -167,7 +170,7 @@
     "scanning": "掃描中…",
     "cliNone": "本機未發現 CLI 憑證。",
     "envWarning": "警告：環境變數 {{vars}} 已設定，會覆寫 CLI 的本機憑證。",
-    "cliSkippedBuying": "{{tools}} 正在透過 asale 買入，其本機帳號不會用於賣出。關閉買入後即可重新賣出。",
+    "cliSkippedBuying": "{{tools}} 正在透過 Asale 買入，其本機帳號不會用於賣出。關閉買入後即可重新賣出。",
     "connectVia": "透過瀏覽器登入",
     "connectViaKey": "使用 API Key 連接",
     "connectViaCode": "在瀏覽器中確認驗證碼",
@@ -1375,5 +1378,9 @@
     "downloadedOf": "{{done}} / {{total}} MB",
     "downloaded": "{{done}} MB",
     "installing": "下載完成，Asale 將關閉、安裝更新，然後自動重新開啟。"
+  },
+  "studio": {
+    "sub": "用市場上的全部模型對話、翻譯和繪圖。",
+    "unavailable": "這個版本沒有 Studio。"
   }
 }

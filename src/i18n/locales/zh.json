@@ -17,7 +17,10 @@
     "groupFinance": "资金",
     "apikeys": "API 密钥",
     "betaTip": "Asale 目前处于 Beta 阶段，更新会比较频繁。如果遇到问题，或者费用计算有误，可以发邮件到 support@asale.ai 联系我们。",
-    "security": "安全控制"
+    "security": "安全控制",
+    "studio": "对话",
+    "collapse": "收起侧栏",
+    "expand": "展开侧栏"
   },
   "dashboard": {
     "title": "概览",
@@ -167,7 +170,7 @@
     "scanning": "扫描中…",
     "cliNone": "本机未发现 CLI 凭证。",
     "envWarning": "警告：环境变量 {{vars}} 已设置，会覆盖 CLI 的本地凭证。",
-    "cliSkippedBuying": "{{tools}} 正在通过 asale 买入，其本地账号不会用于卖出。关闭买入后即可重新卖出。",
+    "cliSkippedBuying": "{{tools}} 正在通过 Asale 买入，其本地账号不会用于卖出。关闭买入后即可重新卖出。",
     "connectVia": "通过浏览器登录",
     "connectViaKey": "使用 API Key 连接",
     "connectViaCode": "在浏览器中确认验证码",
@@ -1375,5 +1378,9 @@
     "downloadedOf": "{{done}} / {{total}} MB",
     "downloaded": "{{done}} MB",
     "installing": "下载完成，Asale 将关闭、安装更新，然后自动重新打开。"
+  },
+  "studio": {
+    "sub": "用市场上的全部模型对话、翻译和绘画。",
+    "unavailable": "这个版本没有 Studio。"
   }
 }

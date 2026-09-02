@@ -17,7 +17,10 @@
     "groupFinance": "Finance",
     "apikeys": "API keys",
     "betaTip": "Asale is still in beta, so updates ship often. If you hit a problem — or a charge looks wrong — email us at support@asale.ai.",
-    "security": "Security"
+    "security": "Security",
+    "studio": "Chat",
+    "collapse": "Collapse sidebar",
+    "expand": "Expand sidebar"
   },
   "dashboard": {
     "title": "Dashboard",
@@ -167,7 +170,7 @@
     "scanning": "Scanning…",
     "cliNone": "No CLI credentials found on this machine.",
     "envWarning": "Warning: {{vars}} is set in the environment and overrides the CLI's stored credentials.",
-    "cliSkippedBuying": "{{tools}} is buying through asale, so its local account is not offered for sale. Turn buying off to sell it again.",
+    "cliSkippedBuying": "{{tools}} is buying through Asale, so its local account is not offered for sale. Turn buying off to sell it again.",
     "connectVia": "Sign in via browser",
     "connectViaKey": "Connect with an API key",
     "connectViaCode": "Confirm a code in the browser",
@@ -1375,5 +1378,9 @@
     "downloadedOf": "{{done}} / {{total}} MB",
     "downloaded": "{{done}} MB",
     "installing": "Download finished. Asale will close, install the update, and reopen."
+  },
+  "studio": {
+    "sub": "Chat, translate and draw with every model on the market.",
+    "unavailable": "Studio is not available in this build."
   }
 }

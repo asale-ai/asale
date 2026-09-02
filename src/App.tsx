@@ -4,7 +4,8 @@ import { invoke, inTauri, isDaemonDown, waitForDaemon, type Profile } from "./li
 import {
   IconDashboard, IconPublish, IconConsume, IconWallet,
   IconRecords, IconUsage, IconGauge, IconAccount, IconSettings,
-  IconGlobe, IconGithub, IconShare, IconKey, IconShield,
+  IconGlobe, IconGithub, IconShare, IconKey, IconShield, IconSparkle,
+  IconArrowLeft, IconArrowRight,
 } from "./icons";
 import { openExternal } from "./shell";
 import { SITE_URL, REPO_URL } from "./links";
@@ -25,16 +26,20 @@ const Limits = lazy(() => import("./pages/Limits").then((m) => ({ default: m.Lim
 const Account = lazy(() => import("./pages/Account").then((m) => ({ default: m.Account })));
 const Settings = lazy(() => import("./pages/Settings").then((m) => ({ default: m.Settings })));
 const Security = lazy(() => import("./pages/Security").then((m) => ({ default: m.Security })));
+const Studio = lazy(() => import("./pages/Studio").then((m) => ({ default: m.Studio })));
 // Lazy for the same reason the pages are: the sheet carries fifteen brand
 // marks and a QR encoder, and most sessions never open it.
 const EarningsShareDialog = lazy(() =>
   import("./components/EarningsShareDialog").then((m) => ({ default: m.EarningsShareDialog })),
 );
 
-type Tab = "dashboard" | "publish" | "consume" | "apikeys" | "usage" | "limits" | "wallet" | "records" | "security" | "account" | "settings";
+const NAV_COLLAPSED = "asale:nav-collapsed";
+
+type Tab = "dashboard" | "studio" | "publish" | "consume" | "apikeys" | "usage" | "limits" | "wallet" | "records" | "security" | "account" | "settings";
 
 const ICONS: Record<Tab, JSX.Element> = {
   dashboard: <IconDashboard />,
+  studio: <IconSparkle />,
   publish: <IconPublish />,
   consume: <IconConsume />,
   apikeys: <IconKey />,
@@ -51,7 +56,12 @@ const ICONS: Record<Tab, JSX.Element> = {
 // `account` is not listed here — it is rendered as the user card at the very
 // bottom of the sidebar (see App below).
 const NAV: Array<{ label?: string; items: Tab[] } | "spacer"> = [
-  { items: ["dashboard"] },
+  // Studio rides with the overview rather than under a group label. It is the
+  // only tab that is a *place to do work* rather than a readout or a switch,
+  // and filing it beside the two trading switches would have suggested it is
+  // one of them. Labelled "Chat" for the same reason the website labels it
+  // that way: every other item in this rail names an activity, not a product.
+  { items: ["dashboard", "studio"] },
   { label: "groupTrade", items: ["publish", "consume"] },
   { label: "groupUsage", items: ["usage", "limits"] },
   { label: "groupFinance", items: ["wallet", "records"] },
@@ -78,6 +88,15 @@ export function App() {
   // them renders its "daemon down" / "signed out" branch for a second first.
   const [booted, setBooted] = useState(false);
   const [sharing, setSharing] = useState(false);
+  // Rail width, remembered. A person who collapses it wants it collapsed
+  // tomorrow too, and the sidebar is the one piece of chrome that is on screen
+  // on every page — re-collapsing it every launch would be the app forgetting
+  // the only layout choice it offers.
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem(NAV_COLLAPSED) === "1");
+  const toggleNav = () => setCollapsed((c) => {
+    localStorage.setItem(NAV_COLLAPSED, c ? "0" : "1");
+    return !c;
+  });
 
   useEffect(() => {
     if (!inTauri) { setBooted(true); return; }
@@ -139,13 +158,14 @@ export function App() {
         key={id}
         className={`navitem ${tab === id ? "active" : ""}`}
         onClick={() => setTab(id)}
-        title={flagged ? t("update.navHint", { version: update.latest }) : undefined}
+        title={flagged && !collapsed ? t("update.navHint", { version: update.latest }) : undefined}
+        data-tip={collapsed ? t(`nav.${id}`) : undefined}
       >
         {/* Fixed-width icon slot: nav glyphs are 17px but the logo mark and the
             user avatar are 26px, so without it the three label columns in the
             sidebar start at three different x. */}
         <span className="nav-ico">{ICONS[id]}</span>
-        {t(`nav.${id}`)}
+        <span className="nav-label">{t(`nav.${id}`)}</span>
         {flagged && <span className="nav-dot" aria-label={t("update.navHint", { version: update.latest })} />}
       </button>
     );
@@ -166,7 +186,8 @@ export function App() {
     <button
       className={`sidebar-user ${tab === "account" ? "active" : ""}`}
       onClick={() => setTab("account")}
-      title={profile ? profile.email : t("nav.account")}
+      title={collapsed ? undefined : profile ? profile.email : t("nav.account")}
+      data-tip={collapsed ? (profile ? (profile.name || profile.email) : t("account.signIn")) : undefined}
     >
       {profile?.avatar_url
         ? <img className="su-avatar" src={profile.avatar_url} alt="" />
@@ -186,7 +207,7 @@ export function App() {
           driven from several pages, and from the user's terminal besides — so
           there is no page this could sensibly belong to. */}
       {upgrade && <UpgradeRequiredDialog notice={upgrade} />}
-      <aside className="sidebar">
+      <aside className={`sidebar${collapsed ? " collapsed" : ""}`}>
         <div className="logo">
           <img className="logo-mark" src="/logo.svg" alt="Asale" />
           <span>Asale</span>
@@ -212,6 +233,19 @@ export function App() {
           ),
         )}
         {userCard}
+        {/* Last item of the rail rather than a handle on its edge: it is the
+            one control here that acts on the rail itself, and a hover-only
+            handle is a control nobody finds. */}
+        <button
+          className="navitem nav-toggle"
+          onClick={toggleNav}
+          title={collapsed ? undefined : t("nav.collapse")}
+          data-tip={collapsed ? t("nav.expand") : undefined}
+          aria-label={t(collapsed ? "nav.expand" : "nav.collapse")}
+        >
+          <span className="nav-ico">{collapsed ? <IconArrowRight /> : <IconArrowLeft />}</span>
+          <span className="nav-label">{t("nav.collapse")}</span>
+        </button>
       </aside>
       <main className="main">
         {/* Outside the keyed page container on purpose: the status readout is
@@ -221,7 +255,7 @@ export function App() {
             strip is draggable while the buttons inside it stay clickable. It is
             what replaces the title bar removed in tauri.conf.json: without it
             a maximised window on macOS could only be moved by its top 28px. */}
-        <div className="topbar" data-tauri-drag-region>
+        <div className={`topbar${tab === "studio" ? " hidden" : ""}`} data-tauri-drag-region>
           <div className="topbar-inner">
             <div className="topbar-links">
               <button
@@ -263,12 +297,16 @@ export function App() {
             <EarningsShareDialog onClose={() => setSharing(false)} />
           </Suspense>
         )}
-        <div className="main-inner fade-in" key={booted ? tab : "boot"}>
+        {/* Studio takes the window: it is an application inside the app, with
+            its own rail and its own scroll, so it opts out of the 980px reading
+            column every other page is drawn in. See `.main-inner.full`. */}
+        <div className={`main-inner fade-in${tab === "studio" ? " full" : ""}`} key={booted ? tab : "boot"}>
           {!booted ? <PageSkeleton /> : (
             <Suspense fallback={<PageSkeleton />}>
               {/* The overview map calls out the reader's own country, and the
                   only place that is known is the profile polled above. */}
               {tab === "dashboard" && <Dashboard onNavigate={setTab} region={profile?.region ?? ""} />}
+              {tab === "studio" && <Studio />}
               {tab === "publish" && <Publish />}
               {tab === "consume" && <Consume />}
               {tab === "apikeys" && <ApiKeys />}
