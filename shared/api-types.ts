@@ -56,6 +56,19 @@ export interface MarketModelPrice {
   discount: number;
 }
 
+/** One entry of [`MarketModel.video_tiers`]: a rate, and what a request must
+ *  say for it to apply. */
+export interface VideoTier {
+  /** Multiple of the row's own per-second price. */
+  mult: number;
+  /** `true`/`false` where the rate depends on a soundtrack, else `null`. */
+  audio?: boolean | null;
+  /** `"720p"`, `"4k"`, … where the rate is a resolution tier, else `null`. */
+  res?: string | null;
+  /** `"i2v"`, `"t2v"`, … where the rate is for one request shape. */
+  mode?: string | null;
+}
+
 /** One entry of [`MarketModel.params`]: what a model accepts for one field. */
 export type ModelParam =
   | { type: "enum"; values: (string | number)[] }
@@ -94,6 +107,13 @@ export interface MarketModel {
    *  vendor published none — "no opinion", not "nothing", so a page falls back
    *  to its modality's template rather than showing an empty form. */
   params?: Record<string, ModelParam>;
+  /** The dearer per-second rates a video model sells, as multiples of the
+   *  price beside them: `veo-3.1` is one price silent, twice it with audio and
+   *  three times it in 4K with audio. A `null` qualifier is one the rate does
+   *  not depend on, so it applies to any request; the dearest rung a request
+   *  matches is the one it is billed at (`gateway::media`). Empty — every
+   *  non-video row and half the video ones — means one price. */
+  video_tiers?: VideoTier[];
   /** Voices a speech model answers to. Required on `/audio/speech`, and no
    *  two vendors agree on a name — empty means the vendor published none, so a
    *  caller has to look it up rather than be shown a guess. */
