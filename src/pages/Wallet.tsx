@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  invoke, inTauri, fmtUsdt,
+  invoke, inTauri, realTauri, fmtUsdt,
   type Wallet, type WalletHistory,
 } from "../lib";
 import { Card, Skeleton, PageHead, IconAction, Empty } from "../ui";
@@ -73,6 +73,49 @@ export function WalletPage() {
   useEffect(() => { refresh(); }, [refresh]);
 
   const availableMicros = w?.balance ?? 0;
+
+  /* 网关的充提面板是在**外部浏览器**里打开的（webview 装不下第三方支付页，
+     而网关的 frame-ancestors 里也没有 tauri://localhost），所以这一页没有任何
+     办法知道那边发生了什么。回到窗口就重读一遍余额 —— 这是唯一一个「他大概
+     做完了」的信号，而余额本来就是这一页要回答的问题。 */
+  const [awaitingPanel, setAwaitingPanel] = useState(false);
+  useEffect(() => {
+    if (!awaitingPanel) return;
+    const onFocus = () => refresh();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [awaitingPanel, refresh]);
+
+  const [panelBusy, setPanelBusy] = useState<WalletMode | null>(null);
+
+  /* 点「虚拟币充值 / 提现」。
+   *
+   * 网关开着就要一张面板地址并在浏览器里打开，否则回到 asale 自己那两条链上
+   * 通道 —— 那套代码一行没删（老地址上还有真钱，asale-chain 必须继续扫），
+   * 只是没人从这里走了。
+   *
+   * 充值和提现是**两张授权**，不是一张带参数的：发地址是幂等的，把钱付出去
+   * 不是。`withdraw: false` 时网关那页上「提现」标签根本不出现。 */
+  const openFunding = async (mode: WalletMode) => {
+    if (!hist?.paygate) {
+      setPane(mode);
+      return;
+    }
+    setPanelBusy(mode);
+    setErr("");
+    try {
+      const out = await invoke<{ url: string }>("wallet_paygate_panel", {
+        withdraw: mode === "withdraw",
+        openLocal: realTauri,
+      });
+      if (!realTauri) window.open(out.url, "_blank", "noopener,noreferrer");
+      setAwaitingPanel(true);
+    } catch (e) {
+      setErr(errText(e));
+    } finally {
+      setPanelBusy(null);
+    }
+  };
 
   // Deposits and withdrawals merged into one time-ordered feed.
   const flows = useMemo<Flow[]>(() => {
@@ -144,16 +187,28 @@ export function WalletPage() {
                 <button className="btn" onClick={() => setCardOpen(true)} disabled={!inTauri}>
                   <IconDownload />{t("wallet.depositCard")}
                 </button>
-                <button className="btn ghost" onClick={() => setPane("deposit")} disabled={!inTauri}>
+                <button
+                  className="btn ghost"
+                  onClick={() => void openFunding("deposit")}
+                  disabled={!inTauri || panelBusy !== null}
+                >
                   <IconWallet />{t("wallet.depositCrypto")}
                 </button>
               </>
             ) : (
-              <button className="btn" onClick={() => setPane("deposit")} disabled={!inTauri}>
+              <button
+                className="btn"
+                onClick={() => void openFunding("deposit")}
+                disabled={!inTauri || panelBusy !== null}
+              >
                 <IconDownload />{t("wallet.tabDeposit")}
               </button>
             )}
-            <button className="btn ghost" onClick={() => setPane("withdraw")} disabled={!inTauri}>
+            <button
+              className="btn ghost"
+              onClick={() => void openFunding("withdraw")}
+              disabled={!inTauri || panelBusy !== null}
+            >
               <IconArrowRight />{t("wallet.tabWithdraw")}
             </button>
             {/* Beside the two money verbs, because this is where the number
@@ -177,6 +232,7 @@ export function WalletPage() {
           <CardTopUpDialog
             open={cardOpen}
             limits={hist?.card ?? null}
+            paygate={hist?.paygate === true}
             onClose={() => setCardOpen(false)}
             onDone={() => refresh()}
           />

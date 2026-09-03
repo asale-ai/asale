@@ -393,6 +393,15 @@ export interface WalletHistory {
   limits: WithdrawLimits;
   /** The card rail, when the deployment has one configured. */
   card?: CardLimits | null;
+  /** 网关这条路开着没有。
+   *
+   *  开着的时候钱包上那三个动作全部落到 `pay.asale.ai` 上：卡充值走
+   *  `wallet_paygate_session`，虚拟币充值和提现走 `wallet_paygate_panel`。
+   *  关着就回到直连的通道 —— 那套代码一行没删，只是没人走了。
+   *
+   *  比网关这条路老的服务器不报这个字段，缺省当作关：猜错的方向要选安全的那
+   *  个，把它当成开着会让三个按钮全去调一批不存在的接口。 */
+  paygate?: boolean;
 }
 
 /** What `wallet_card_session` answers with: the session to poll, plus the

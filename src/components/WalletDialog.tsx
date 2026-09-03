@@ -544,10 +544,16 @@ function PayReceipt({
  * Kept in sync with asale-web's `CardTopUpDialog`.
  */
 export function CardTopUpDialog({
-  open, limits, onClose, onDone,
+  open, limits, paygate, onClose, onDone,
 }: {
   open: boolean;
   limits: CardLimits | null;
+  /** 走网关的收银台，还是直连 Dodo 的托管页。见 `WalletHistory.paygate`。
+   *
+   *  额度与费率两条路共用 `limits` —— 收的是同一笔钱、按同一条 `charge_for`
+   *  加附加费（服务端 `create_paygate_session` 直接读 dodo 那份配置），换的
+   *  只是谁来收。所以这一层之下只有 `start()` 一个分支。 */
+  paygate: boolean;
   onClose: () => void;
   onDone: () => void;
 }) {
@@ -565,15 +571,16 @@ export function CardTopUpDialog({
 
   if (!open) return null;
   return createPortal(
-    <CardTopUpSheet limits={limits} onClose={onClose} onDone={onDone} />,
+    <CardTopUpSheet limits={limits} paygate={paygate} onClose={onClose} onDone={onDone} />,
     document.body,
   );
 }
 
 function CardTopUpSheet({
-  limits, onClose, onDone,
+  limits, paygate, onClose, onDone,
 }: {
   limits: CardLimits | null;
+  paygate: boolean;
   onClose: () => void;
   onDone: () => void;
 }) {
@@ -620,7 +627,15 @@ function CardTopUpSheet({
       // The daemon opens the checkout in the real browser on the desktop build
       // (the webview cannot host a third party's card form); in a browser this
       // window does it.
-      const s = await invoke<CardSession>("wallet_card_session", { amount: micros, openLocal: realTauri });
+      // 两条路返回同一个形状（会话 + checkout_url + 报价），所以下面的等待室、
+      // 轮询和收据一行都不必分叉。区别只在谁来收这笔钱。
+      //
+      // 两条都在真浏览器里开：webview 装不下第三方的卡表单（CSP 挡 frame，而
+      // 且别人的壳里套一张卡表单正是钓鱼页的形状），网关那页同理 —— 它的
+      // frame-ancestors 里写的是 asale.ai，没有 tauri://localhost。
+      const s = paygate
+        ? await invoke<CardSession>("wallet_paygate_session", { amount: micros, openLocal: realTauri })
+        : await invoke<CardSession>("wallet_card_session", { amount: micros, openLocal: realTauri });
       setSession(s);
       if (!realTauri) window.open(s.checkout_url, "_blank", "noopener,noreferrer");
     } catch (e) {

@@ -187,6 +187,80 @@ pub async fn wallet_card_session(state: &AppState, amount: Option<i64>, open_loc
     Ok(out)
 }
 
+/// Open a top-up through the gateway at `pay.asale.ai` (server §10).
+///
+/// Same shape as [`wallet_card_session`] and the same polling afterwards — the
+/// reply is a session plus a `checkout_url` plus the `fee`/`charge` breakdown,
+/// and nothing is credited here either. What changes is who the user pays: the
+/// gateway puts Dodo, PayPal and WeChat on one page of ours and picks between
+/// them, so the desktop learns the outcome in one vocabulary regardless.
+///
+/// `amount` is **not** optional on this rail, unlike the card one. The gateway
+/// carries a sealed order and there is no order to seal without a figure — the
+/// server rejects a missing amount rather than deferring it to the next page.
+///
+/// Opened in the real browser for the same reason the card rail is: the Tauri
+/// webview cannot host somebody else's payment page (its CSP forbids the frame,
+/// and a card form inside another app's shell is the shape a phishing page has).
+/// asale-web embeds this same URL in an iframe instead — it can, because
+/// `pay.asale.ai` names `asale.ai` in its `frame-ancestors` and does not name
+/// `tauri://localhost`.
+pub async fn wallet_paygate_session(state: &AppState, amount: i64, open_local: bool) -> R<Value> {
+    let out = authed(
+        state,
+        reqwest::Method::POST,
+        "/api/v1/wallet/paygate-session",
+        Some(json!({ "amount": amount })),
+    )
+    .await?;
+    open_checkout(&out, open_local);
+    Ok(out)
+}
+
+/// The gateway's deposit/withdraw panel (server §10) — the crypto door.
+///
+/// One URL, two authorisations behind it, and the split is the server's:
+/// a deposit envelope is always sealed (handing out an address is idempotent),
+/// a withdrawal envelope only when `withdraw` is set, and it seals **this
+/// user's ceiling for this one time**. Without it the gateway's page does not
+/// show a withdraw tab at all.
+///
+/// So this is two calls, not one call with a flag the client may forget to
+/// pass: asking to look at a deposit address and asking to move money out are
+/// different requests, and the second one is the one that cannot be taken back.
+pub async fn wallet_paygate_panel(state: &AppState, withdraw: bool, open_local: bool) -> R<Value> {
+    let out = authed(
+        state,
+        reqwest::Method::POST,
+        "/api/v1/wallet/paygate-panel",
+        Some(json!({ "withdraw": withdraw })),
+    )
+    .await?;
+    open_checkout(&out, open_local);
+    Ok(out)
+}
+
+/// Hand a reply's URL to this machine's browser, if asked and if there is one.
+///
+/// Best effort by design: the URL is in the reply either way and every sheet
+/// shows it as a link, so a headless box (where this can do nothing) is still
+/// a box someone can pay from.
+fn open_checkout(out: &Value, open_local: bool) {
+    if !open_local {
+        return;
+    }
+    // `checkout_url` on the two session rails, `url` on the panel.
+    let url = out
+        .get("checkout_url")
+        .or_else(|| out.get("url"))
+        .and_then(|u| u.as_str());
+    if let Some(url) = url {
+        if let Err(e) = open::that_detached(url) {
+            tracing::warn!("could not open the gateway page: {e}");
+        }
+    }
+}
+
 /// Poll one session. Each read advances it against what is on chain, so this
 /// call is the whole detection mechanism — there is no background job.
 pub async fn wallet_deposit_session_get(state: &AppState, session_ref: String) -> R<Value> {

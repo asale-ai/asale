@@ -519,6 +519,19 @@ rpc_args! {
         #[serde(default)] amount: Option<i64>,
         #[serde(default, alias = "open_local")] open_local: bool,
     }
+    // The gateway's own top-up. `amount` is required here, unlike the card
+    // rail: a sealed order has to name a figure, and the server refuses one
+    // that does not.
+    PaygateSessionArgs {
+        amount: i64,
+        #[serde(default, alias = "open_local")] open_local: bool,
+    }
+    // The gateway's crypto panel. `withdraw` is the whole request, not a
+    // detail of it — it decides whether a spending authorisation is minted.
+    PaygatePanelArgs {
+        #[serde(default)] withdraw: bool,
+        #[serde(default, alias = "open_local")] open_local: bool,
+    }
     PaySessionRefArgs { #[serde(alias = "session_ref")] session_ref: String }
     WithdrawArgs   {
         chain: String,
@@ -917,6 +930,16 @@ async fn rpc(
         "wallet_card_session" => {
             let p: CardSessionArgs = args(&a)?;
             commands::wallet_card_session(st, p.amount, p.open_local).await?
+        },
+        // The gateway rails. Same two verbs, but the customer picks the
+        // processor on a page of ours instead of us picking it for them.
+        "wallet_paygate_session" => {
+            let p: PaygateSessionArgs = args(&a)?;
+            commands::wallet_paygate_session(st, p.amount, p.open_local).await?
+        },
+        "wallet_paygate_panel" => {
+            let p: PaygatePanelArgs = args(&a)?;
+            commands::wallet_paygate_panel(st, p.withdraw, p.open_local).await?
         },
         "wallet_deposit_session_get" => {
             let p: PaySessionRefArgs = args(&a)?;
