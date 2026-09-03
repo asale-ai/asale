@@ -11,7 +11,7 @@ import {
 import { Card, Ok, Err, SkeletonRows, PageHead, IconAction, Empty, Mark, CopyChip, FoldToggle } from "../ui";
 import {
   IconTrash, IconShield, IconChip, IconRefresh, IconPlus, IconPencil, IconInfo,
-  IconZap, IconX, IconCheck, IconAlert,
+  IconZap, IconX, IconCheck, IconAlert, IconChevronDown,
 } from "../icons";
 import { ModelMultiSelect, type ModelOption } from "../components/ModelPicker";
 import { errText } from "../errors";
@@ -950,6 +950,20 @@ export function Publish() {
   const [gate, setGate] = useState("");
   const [verification, setVerification] = useState<VerifyOverview | null>(null);
 
+  /** Which account tiles the operator has folded open or shut, by the same key.
+   *
+   *  Only the ones they touched: the rest fall back to the count rule below, so
+   *  a tile does not change state under them when an account is added or
+   *  removed. */
+  const [openAcct, setOpenAcct] = useState<Record<string, boolean>>({});
+  /** Whether a tile nobody has touched starts open.
+   *
+   *  Two subscriptions fit on a screen with their settings showing, and seeing
+   *  them is the point of the page. Past that the page is a wall of identical
+   *  editors and the list stops being scannable — so the default flips, and the
+   *  folded head keeps the parts worth comparing across accounts. */
+  const openByDefault = accounts.length <= 2;
+
   // Per-model lane state. `now` ticks once a second so the countdowns on
   // cooling lanes actually count down between the 4s account polls.
   const [lanes, setLanes] = useState<Lane[]>([]);
@@ -1468,8 +1482,13 @@ export function Publish() {
     if (cred === "oauth") return void connect(a.provider);
     if (cred === "device_flow") return void connectDevice(a.provider);
     // Key families: the form lives in the connect card above this one, so the
-    // button has to bring it into view as well as open it.
-    openKeyForm(a.provider);
+    // button has to bring it into view as well as open it. A family that
+    // arrived as a described form goes back through *that* form rather than the
+    // plain key box — its fields (base URL, model list, whatever the manifest
+    // asked for) are the connection, and a bare key would rebuild it wrong.
+    const described = offer.sections.find((x) => x.provider === a.provider);
+    if (described) openSectionForm(described);
+    else openKeyForm(a.provider);
     connectCard.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
@@ -1596,9 +1615,17 @@ export function Publish() {
 
   /** Only what this login has been granted. The list is the server's, so
    *  opening a family to every seller is a server change rather than a client
-   *  release. */
+   *  release.
+   *
+   *  A family the server also described a form for is drawn by that form and
+   *  not here: `custom` is a granted family *and* a described section, and a
+   *  plain paste-a-key tile for it is both a second "Custom endpoint" in the
+   *  grid and a dead end — it has no `base_url` to connect to. The section
+   *  wins wherever both exist. */
   const offered = <T extends { id: string }>(list: T[]) =>
-    list.filter((p) => offer.providers.includes(p.id));
+    list.filter(
+      (p) => offer.providers.includes(p.id) && !offer.sections.some((x) => x.provider === p.id),
+    );
 
   const connectGrid = (
     <>
@@ -1913,6 +1940,7 @@ export function Publish() {
               // meant a restart quietly dropped the banner and left six lanes
               // labelled "sign-in needed" with nothing on the page saying why.
               const deadCred = a.status === "expired" || own.some((l) => l.paused_reason === "auth");
+              const open = openAcct[k] ?? openByDefault;
               return (
                 <div key={k} className={`acct ${a.sell_enabled ? "selling" : ""}`}>
                   <div className="acct-head">
@@ -1934,6 +1962,15 @@ export function Publish() {
                       </div>
                     </div>
                     <div className="acct-actions">
+                      <button
+                        className={`icon-btn sm acct-fold${open ? " on" : ""}`}
+                        onClick={() => setOpenAcct((o) => ({ ...o, [k]: !open }))}
+                        aria-expanded={open}
+                        title={open ? t("publish.foldHide") : t("publish.foldShow")}
+                        aria-label={open ? t("publish.foldHide") : t("publish.foldShow")}
+                      >
+                        <IconChevronDown />
+                      </button>
                       <label className="switch" title={t("publish.sellSwitch")}>
                         <input
                           type="checkbox"
@@ -1954,6 +1991,20 @@ export function Publish() {
                         aria-label={t("publish.test.open")}
                       >
                         <IconZap />
+                      </button>
+                      {/* Walk the same sign-in that created this account, on
+                          demand rather than only once it has visibly died: a
+                          subscription whose plan changed upstream, or whose
+                          scopes were re-granted, reads as healthy here and
+                          still needs the credential taken round again. */}
+                      <button
+                        className="icon-btn sm"
+                        onClick={() => reconnect(a)}
+                        disabled={!inTauri || busy}
+                        title={t("publish.reconnect")}
+                        aria-label={t("publish.reconnect")}
+                      >
+                        <IconRefresh />
                       </button>
                       <button className="icon-btn ghost-danger" onClick={() => removeAccount(a)} title={t("publish.remove")}>
                         <IconTrash />
@@ -1993,9 +2044,37 @@ export function Publish() {
                     </div>
                   )}
 
+                  {/* Folded, the tile still has to answer the questions a seller
+                      asks across accounts rather than inside one: how loaded it
+                      is, what it will not sell below, how much it serves at
+                      once, and how many of its models are actually on offer.
+                      The banners above are deliberately *not* folded away — a
+                      dead credential is not a detail. */}
+                  {!open && (
+                    <div className="acct-sum">
+                      <span className="mono tabular">
+                        {upstream || denom > 0
+                          ? `${Math.round(Math.min(100, pct))}%`
+                          : fmtTokens(used)}
+                        <span className="faint">
+                          {" "}
+                          {upstream ? (a.window_key ?? "") : t("publish.limitUsedToday")}
+                        </span>
+                      </span>
+                      <span className="mono tabular">{`\u2265 ${floor}%`} <span className="faint">{t("publish.unitOfList")}</span></span>
+                      <span className="mono tabular">{slots} <span className="faint">{t("publish.unitRequests")}</span></span>
+                      <span>
+                        {a.sell_models.length > 0
+                          ? t("publish.sellModelsSome", { n: a.sell_models.length, total: modelOptions.length })
+                          : t("publish.sellModelsAll", { n: modelOptions.length })}
+                      </span>
+                    </div>
+                  )}
+
                   {/* Throughput first — it is the number this whole page exists
                       to move. Against the 5h window for a subscription, against
                       the operator's daily cap for a key. */}
+                  {open && (
                   <div className="acct-usage">
                     <div className="au-head">
                       <span>
@@ -2028,7 +2107,9 @@ export function Publish() {
                       />
                     </div>
                   </div>
+                  )}
 
+                  {open && (
                   <div className="acct-grid">
                     {/* Daily cap: a value with a pencil, an input once clicked */}
                     <div className="field">
@@ -2267,12 +2348,13 @@ export function Publish() {
                           and it was wrong by an order of magnitude. */}
                     </div>
                   </div>
+                  )}
 
                   {/* Per-model price and state, then where the credential came
                       from. Both sit below a hairline: the chart answers "which
                       of my models is the market paying for" when that is the
                       question, and stays quiet the rest of the time. */}
-                  {(own.length > 0 || a.sources.length > 0) && (
+                  {open && (own.length > 0 || a.sources.length > 0) && (
                     <div className="acct-detail">
                       {own.length > 0 && (
                         <DiscountRank

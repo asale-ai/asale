@@ -1062,6 +1062,17 @@ select.input {
 .acct-meta .pill { background: transparent; padding-left: 0; padding-right: 0; }
 .acct-actions { display: flex; align-items: center; gap: var(--s8); flex-shrink: 0; }
 .acct-actions .icon-btn { background: transparent; }
+.acct-fold svg { transition: transform var(--dur) var(--ease); }
+.acct-fold.on svg { transform: rotate(180deg); }
+
+/* The folded tile's one line. Reads as a row of readings rather than a
+   sentence, so the same figure sits under the same eye down the list — which is
+   the whole reason a long list folds. */
+.acct-sum {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--s8) var(--s16);
+  font-size: var(--fs-meta); color: var(--fg-2);
+}
+.acct-sum .mono { color: var(--fg); font-weight: 500; }
 
 /* Today's throughput: the label/number line and its track read as one unit. */
 .acct-usage { display: flex; flex-direction: column; gap: var(--s8); }

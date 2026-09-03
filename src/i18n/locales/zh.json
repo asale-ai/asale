@@ -162,6 +162,7 @@
     "usedTodayFact": "今日已售出（UTC）",
     "expiredHint": "该凭证已失效或无法自动刷新，请重新连接账号后再卖出。",
     "reauth": "重新登录",
+    "reconnect": "重新连接该账号",
     "blockedHint": "上游拒绝了本机发出的请求（地区限制或网络出口被拦截），拒绝的是这台机器而不是凭证——登录仍然有效。请检查到上游的网络出口，处理好后点「恢复」。",
     "statusAvailable": "可用",
     "statusCooldown": "冷却中",
@@ -197,6 +198,8 @@
     "cliRescanHint": "重新扫描本机 CLI 凭据并导入（启动时已自动执行一次）",
     "cliImportedN": "已从本机导入 {{n}} 个账号。",
     "sellSwitch": "卖出该账号",
+    "foldShow": "展开设置",
+    "foldHide": "收起设置",
     "test": {
       "open": "测试卖出",
       "title": "测试卖出",

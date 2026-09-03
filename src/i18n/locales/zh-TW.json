@@ -162,6 +162,7 @@
     "usedTodayFact": "今日已售出（UTC）",
     "expiredHint": "此憑證已失效或無法自動更新，請重新連接帳號後再賣出。",
     "reauth": "重新登入",
+    "reconnect": "重新連接該帳號",
     "blockedHint": "上游拒絕了本機發出的請求（地區限制或網路出口被攔截），拒絕的是這台機器而不是憑證——登入仍然有效。請檢查到上游的網路出口，處理好後點「恢復」。",
     "statusAvailable": "可用",
     "statusCooldown": "冷卻中",
@@ -197,6 +198,8 @@
     "cliRescanHint": "重新掃描本機 CLI 憑證並匯入（啟動時已自動執行一次）",
     "cliImportedN": "已從本機匯入 {{n}} 個帳號。",
     "sellSwitch": "賣出此帳號",
+    "foldShow": "展開設定",
+    "foldHide": "收起設定",
     "test": {
       "open": "測試賣出",
       "title": "測試賣出",

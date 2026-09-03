@@ -162,6 +162,7 @@
     "usedTodayFact": "Served today (UTC)",
     "expiredHint": "This credential has expired or could not be refreshed — reconnect the account before selling again.",
     "reauth": "Sign in again",
+    "reconnect": "Reconnect this account",
     "blockedHint": "The provider refused requests from this machine (a region block or a network filter), not the credential — the sign-in is still valid. Check the network route to the provider, then press Resume.",
     "statusAvailable": "available",
     "statusCooldown": "cooldown",
@@ -197,6 +198,8 @@
     "cliRescanHint": "Re-scan this machine's CLI credentials and import them (already done once at startup)",
     "cliImportedN": "Imported {{n}} account(s) from this machine.",
     "sellSwitch": "Sell this account",
+    "foldShow": "Show settings",
+    "foldHide": "Hide settings",
     "test": {
       "open": "Test selling",
       "title": "Test selling",
