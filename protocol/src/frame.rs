@@ -270,6 +270,43 @@ pub fn is_out_of_credit(status: u16, body: &str) -> bool {
     .any(|needle| body.contains(needle))
 }
 
+/// The words a vendor uses when it is talking about the *credential* rather
+/// than about the request. Deliberately narrow: a geo refusal or a malformed
+/// body never contains them.
+const CREDENTIAL_MARKERS: [&str; 7] = [
+    "authentication_error",
+    "permission_error",
+    "invalid_api_key",
+    "invalid_token",
+    "expired",
+    "api key",
+    "oauth",
+];
+
+/// Whether a 4xx means "this account's credential is wrong", whatever status
+/// the vendor chose to say it in.
+///
+/// `401` is the status that means exactly this; the rest have to be read. xAI
+/// answers an invalid key with a `400 invalid-argument` — which the catch-all
+/// reads as "the buyer's request was bad", so the lane keeps its supply entry,
+/// wins the next match and fails it again, and the buyer is never handed to a
+/// seller whose key works. On 2026-09-02/03 one xAI key did that 33 times
+/// across `grok-4.5` and `grok-build-0.1`, every one a lost request.
+///
+/// Lives here for the same reason [`is_out_of_credit`] does: the publisher
+/// flags the account on it, and the gateway re-reads the frame so sellers on an
+/// older client are covered without waiting for uptake.
+pub fn is_bad_credential(status: u16, body: &str) -> bool {
+    if status == 401 {
+        return true;
+    }
+    if !(400..500).contains(&status) {
+        return false;
+    }
+    let b = body.to_ascii_lowercase();
+    CREDENTIAL_MARKERS.iter().any(|m| b.contains(m))
+}
+
 /// Whether an error code is retriable (drives failure transfer).
 pub fn is_retriable(code: &str) -> bool {
     matches!(

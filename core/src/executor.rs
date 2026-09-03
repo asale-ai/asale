@@ -297,22 +297,9 @@ pub enum TaskOutcome {
 /// `AuthFailed` by saying something about permissions or keys; anything else it
 /// says, including nothing at all, reads as the machine being refused.
 pub fn refusal_outcome(status: u16, body: &str) -> TaskOutcome {
-    if status != 403 {
-        return TaskOutcome::AuthFailed;
-    }
-    let b = body.to_ascii_lowercase();
-    // Deliberately narrow. These are the words a provider uses when it is
-    // talking about the *credential*; a geo refusal never contains them.
-    const CREDENTIAL_MARKERS: [&str; 7] = [
-        "authentication_error",
-        "permission_error",
-        "invalid_api_key",
-        "invalid_token",
-        "expired",
-        "api key",
-        "oauth",
-    ];
-    if CREDENTIAL_MARKERS.iter().any(|m| b.contains(m)) {
+    // The vocabulary lives in the protocol crate: the gateway reads the same
+    // body off the error frame for sellers still on an older client.
+    if asale_protocol::is_bad_credential(status, body) {
         TaskOutcome::AuthFailed
     } else {
         TaskOutcome::Blocked
@@ -913,6 +900,11 @@ pub async fn execute(
                 // A 400 that is really "out of credit" — cools the account like the
                 // 429 it should have been. See [`quota_exhausted`].
                 s if quota_exhausted(s, &detail) => TaskOutcome::QuotaExhausted { reset_at },
+                // A 4xx that is really "your key is wrong" — xAI says it with a
+                // `400 invalid-argument`. Read by the catch-all it became the
+                // buyer's problem: no failover, no blame, and the lane stayed on
+                // the market to fail the next buyer the same way.
+                s if asale_protocol::is_bad_credential(s, &detail) => TaskOutcome::AuthFailed,
                 _ => TaskOutcome::Success { tokens_used: 0 },
             };
             // What the gateway acts on is the code, not the status. A quota wall
