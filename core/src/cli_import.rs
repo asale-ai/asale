@@ -294,6 +294,18 @@ pub struct RefreshedCred<'a> {
     pub now_secs: i64,
 }
 
+/// Read the credential a provider's own CLI file currently holds — the shape
+/// [`patch_cli_credentials`] knows how to write, so a write-back can first
+/// check *whose* login it is about to overwrite (C1).
+pub fn parse_for(provider: &str, raw: &str) -> anyhow::Result<CliCred> {
+    match provider {
+        "claude" => parse_claude_credentials(raw),
+        "codex" => parse_codex_auth(raw),
+        "gemini" => parse_gemini_oauth_creds(raw),
+        other => anyhow::bail!("no credential file shape known for {other}"),
+    }
+}
+
 /// Rewrite `raw` (the CLI's own credential file) with `cred`, leaving every
 /// other field exactly as it was.
 ///

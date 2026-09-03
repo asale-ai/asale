@@ -85,9 +85,16 @@ pub const COOLDOWN_RATE_LIMIT_SECS: i64 = 900;
 /// means a model that comes back — or an entitlement that is granted — stays
 /// unsold until the daemon restarts.
 pub const COOLDOWN_UNSUPPORTED_SECS: i64 = 24 * 3600;
-/// Auto-recovery cooldowns for the first transient failures of a lane, seconds.
-/// Running out of rungs trips the breaker.
+/// Auto-recovery cooldowns for the first refusals aimed at the machine
+/// (`Blocked`), seconds. Running out of rungs trips the breaker.
 pub const LANE_COOLDOWN_LADDER: [i64; 2] = [30, 120];
+/// Backoff for upstream 5xx / transport failures, seconds. Capped, not a
+/// ladder: a run of 5xx is the vendor's bad minute, and it clears on its own —
+/// the lane stays at the last rung until a call succeeds, never the breaker.
+pub const SERVER_ERROR_BACKOFF: [i64; 3] = [30, 120, 600];
+/// The longest an *account-wide* cooldown may last, seconds. A lane keeps the
+/// upstream's own `Retry-After`; the account does not.
+pub const ACCOUNT_COOLDOWN_CAP_SECS: i64 = 3600;
 /// Consecutive transient failures that pause a lane for good (until resumed) —
 /// one past the last rung, so the two cannot drift apart.
 pub const LANE_BREAKER_THRESHOLD: u32 = LANE_COOLDOWN_LADDER.len() as u32 + 1;
@@ -744,12 +751,12 @@ impl AccountPool {
     /// Called right after `set_accounts` (which restores the hysteresis state
     /// this reads) on every pool rebuild, so a lane's verdict is never older
     /// than the last price the device managed to read.
-    pub fn apply_prices(&mut self, ratios: &BTreeMap<String, i32>) {
+    pub fn apply_prices(&mut self, ratios: &BTreeMap<String, i32>, now: i64) {
         // The price each lane is *offered* at, which is not always the market's:
         // a lane whose cheapest account asks more than the market pays is still
         // on offer at that ask, and judging its accounts against the market
         // would withhold the very lane the ask belongs to. See the module note.
-        let floors = self.lane_floors();
+        let floors = self.lane_floors(now);
         for a in &mut self.accounts {
             let band = (a.sell_min_ratio, a.sell_max_ratio);
             for (model, lane) in &mut a.lanes {
@@ -770,15 +777,21 @@ impl AccountPool {
     /// market is asked to pay for it, and the one price its accounts are judged
     /// against.
     ///
-    /// ponytail: liveness is only what can be answered without a clock — the
-    /// account's sell switch, its model selection and a dead credential. A lane
-    /// whose cheapest account is *cooling* still sets the ask, so the dearer ones
-    /// stay withheld for as long as that lasts. Worth threading `now` through if
-    /// that shows up in the wild; it has not.
-    fn lane_floors(&self) -> BTreeMap<(String, String), i64> {
+    /// C7: only accounts that can serve the lane *now* set its floor — the same
+    /// liveness the declaration's `ask_ratio` uses. A cooling cheap account
+    /// used to keep setting the ask, so the dearer one was withheld against a
+    /// price nothing could serve and the lane vanished. `price_withheld` is
+    /// deliberately not part of the test: it is this function's own output.
+    fn lane_floors(&self, now: i64) -> BTreeMap<(String, String), i64> {
         let mut out: BTreeMap<(String, String), i64> = BTreeMap::new();
-        for a in self.accounts.iter().filter(|a| a.sell_enabled && !a.auth_failed) {
-            for model in a.lanes.keys().filter(|m| a.sells_model(m)) {
+        for a in self.accounts.iter().filter(|a| a.sell_enabled && !a.auth_failed && a.available(now)) {
+            let live = |m: &&String| {
+                a.sells_model(m)
+                    && a.lanes.get(*m).is_some_and(|l| {
+                        l.pause_at(now).is_none() && !l.cooldown_until.is_some_and(|c| c > now)
+                    })
+            };
+            for model in a.lanes.keys().filter(live) {
                 out.entry((a.provider.clone(), model.clone()))
                     .and_modify(|f| *f = (*f).min(a.sell_min_ratio))
                     .or_insert(a.sell_min_ratio);
@@ -1020,7 +1033,12 @@ impl AccountPool {
                 let until = reset_at
                     .filter(|r| *r > now)
                     .unwrap_or(now + COOLDOWN_RATE_LIMIT_SECS);
-                a.cooldown_until = Some(until.max(a.cooldown_until.unwrap_or(0)));
+                // C5: capped account-wide. A model-scoped window (Opus's own
+                // weekly cap) arrives as a 429 with a days-long Retry-After, and
+                // that must not take Sonnet/Haiku down with it; the lane below
+                // keeps the upstream's instant.
+                let account_until = until.min(now + ACCOUNT_COOLDOWN_CAP_SECS);
+                a.cooldown_until = Some(account_until.max(a.cooldown_until.unwrap_or(0)));
                 let lane = a.lanes.entry(model.to_string()).or_default();
                 lane.last_error = detail.to_string();
                 // Not a fault: the upstream told us when to come back, so this
@@ -1034,15 +1052,24 @@ impl AccountPool {
             // that keeps coming back means this lane is broken; a refusal aimed
             // at the machine means the operator has a network to fix. Saying
             // which is the entire value of the pause the seller reads.
-            UpstreamErrorKind::ServerError | UpstreamErrorKind::Blocked => {
-                let stuck = match kind {
-                    UpstreamErrorKind::Blocked => PauseReason::Blocked,
-                    _ => PauseReason::Breaker,
-                };
-                // Lane-scoped on purpose: a 5xx on one model says nothing about
-                // the account's other models, and cooling the whole account
-                // here used to take healthy capacity off the market with it.
-                // The ladder below is what backs this lane off.
+            // C4: a 5xx (Anthropic's 529 included) or a transport failure is
+            // the upstream's bad minute, not a fault the operator can fix. It
+            // backs the lane off on a capped cycle and comes back by itself —
+            // never the breaker, which needs a human and survives a restart.
+            UpstreamErrorKind::ServerError => {
+                let lane = a.lanes.entry(model.to_string()).or_default();
+                lane.last_error = detail.to_string();
+                lane.fail_streak += 1;
+                let rung = (lane.fail_streak as usize - 1).min(SERVER_ERROR_BACKOFF.len() - 1);
+                lane.cooldown_until = Some(now + SERVER_ERROR_BACKOFF[rung]);
+                None
+            }
+            UpstreamErrorKind::Blocked => {
+                let stuck = PauseReason::Blocked;
+                // Lane-scoped on purpose: a refusal on one model says nothing
+                // about the account's other models, and cooling the whole
+                // account here used to take healthy capacity off the market
+                // with it. The ladder below is what backs this lane off.
                 let lane = a.lanes.entry(model.to_string()).or_default();
                 lane.last_error = detail.to_string();
                 lane.fail_streak += 1;
@@ -1091,6 +1118,18 @@ impl AccountPool {
                 Some(PauseReason::Auth)
             }
         }
+    }
+
+    /// The call was handed to another local account after this lane's upstream
+    /// failed transiently. Releases the slot and cools the lane just long
+    /// enough for the retry to land elsewhere — without advancing the failure
+    /// streak, which belongs to whichever account fails the request for good
+    /// (C4: one request must not move two accounts up the backoff at once).
+    pub fn on_handoff(&mut self, provider: &str, account_id: &str, model: &str, now: i64) {
+        let Some(a) = self.find(provider, account_id) else { return };
+        a.in_use = a.in_use.saturating_sub(1);
+        let lane = a.lanes.entry(model.to_string()).or_default();
+        lane.cooldown_until = Some(lane.cooldown_until.unwrap_or(0).max(now + SERVER_ERROR_BACKOFF[0]));
     }
 
     /// Put a lane out of service explicitly (operator switch, spent quota, a
@@ -1526,7 +1565,7 @@ mod tests {
         p.set_accounts(vec![banded("cheap", (60, 100)), banded("dear", (90, 100))]);
         // 38% of list — under both floors, and under the old rule that withheld
         // every one of these lanes and left the model looking unsold.
-        p.apply_prices(&prices(&[(OPUS, 38), (HAIKU, 95)]));
+        p.apply_prices(&prices(&[(OPUS, 38), (HAIKU, 95)]), now);
 
         let views = p.lane_views(now);
         assert_eq!(view(&views, "cheap", OPUS).status, "selling", "the ask is the offer");
@@ -1556,18 +1595,18 @@ mod tests {
         let now = 1_000;
         let mut p = AccountPool::new(Strategy::RoundRobin);
         p.set_accounts(vec![banded("cheap", (20, 100)), banded("dear", (60, 100))]);
-        p.apply_prices(&prices(&[(OPUS, 38)]));
+        p.apply_prices(&prices(&[(OPUS, 38)]), now);
         assert_eq!(view(&p.lane_views(now), "dear", OPUS).status, "withheld");
 
         // Back inside the band, but only just: the margin keeps a price parked
         // on the edge from flapping the account on and off.
-        p.apply_prices(&prices(&[(OPUS, 60)]));
+        p.apply_prices(&prices(&[(OPUS, 60)]), now);
         assert_eq!(view(&p.lane_views(now), "dear", OPUS).status, "withheld", "on the edge is not back");
 
         // Clear of the edge — and that is the whole condition. Waiting the
         // price out cost sellers the peak they were waiting for: the server
         // reprices every minute and a peak lasts one or two.
-        p.apply_prices(&prices(&[(OPUS, 70)]));
+        p.apply_prices(&prices(&[(OPUS, 70)]), now);
         assert_eq!(view(&p.lane_views(now), "dear", OPUS).status, "selling");
         // The cheap one never left.
         assert_eq!(view(&p.lane_views(now), "cheap", OPUS).status, "selling");
@@ -1581,17 +1620,17 @@ mod tests {
         let now = 1_000;
         let mut p = AccountPool::new(Strategy::RoundRobin);
         p.set_accounts(vec![banded("cheap", (20, 100)), banded("atcost", (100, 100))]);
-        p.apply_prices(&prices(&[(OPUS, 100)]));
+        p.apply_prices(&prices(&[(OPUS, 100)]), now);
         assert_eq!(view(&p.lane_views(now), "atcost", OPUS).status, "selling", "at the floor is selling");
 
         // Demand eases, the price comes off the ceiling: withheld at once.
-        p.apply_prices(&prices(&[(OPUS, 73)]));
+        p.apply_prices(&prices(&[(OPUS, 73)]), now);
         assert_eq!(view(&p.lane_views(now), "atcost", OPUS).status, "withheld");
 
         // And back the moment it returns — this is the case the old dwell made
         // unreachable, because the price never held at 100% for the three to
         // six minutes it demanded.
-        p.apply_prices(&prices(&[(OPUS, 100)]));
+        p.apply_prices(&prices(&[(OPUS, 100)]), now);
         assert_eq!(view(&p.lane_views(now), "atcost", OPUS).status, "selling", "the peak is short; catch it");
     }
 
@@ -1604,7 +1643,7 @@ mod tests {
         let now = 1_000;
         let mut p = AccountPool::new(Strategy::RoundRobin);
         p.set_accounts(vec![banded("only", (90, 100))]);
-        p.apply_prices(&prices(&[(OPUS, 34)]));
+        p.apply_prices(&prices(&[(OPUS, 34)]), now);
         assert_eq!(view(&p.lane_views(now), "only", OPUS).status, "selling");
         assert_eq!(view(&p.lane_views(now), "only", OPUS).min_ratio, 90, "declared ask");
         assert!(p.pick_for_sale("claude", OPUS, None, now).is_some());
@@ -1615,14 +1654,14 @@ mod tests {
         let now = 1_000;
         let mut p = AccountPool::new(Strategy::RoundRobin);
         p.set_accounts(vec![banded("cheap", (20, 100)), banded("dear", (60, 100))]);
-        p.apply_prices(&prices(&[(OPUS, 38)]));
+        p.apply_prices(&prices(&[(OPUS, 38)]), now);
         assert_eq!(view(&p.lane_views(now), "dear", OPUS).status, "withheld");
 
         // The operator lowers their own floor. That is a decision about what
         // they will accept, not a market move, so it clears the hysteresis
         // outright rather than being judged against the edge they just left.
         p.set_accounts(vec![banded("cheap", (20, 100)), banded("dear", (30, 100))]);
-        p.apply_prices(&prices(&[(OPUS, 38)]));
+        p.apply_prices(&prices(&[(OPUS, 38)]), now);
         assert_eq!(view(&p.lane_views(now), "dear", OPUS).status, "selling");
     }
 
@@ -1655,10 +1694,10 @@ mod tests {
         let now = 1_000;
         let mut p = AccountPool::new(Strategy::RoundRobin);
         p.set_accounts(vec![banded("a", (60, 100))]);
-        p.apply_prices(&prices(&[(OPUS, 38)]));
+        p.apply_prices(&prices(&[(OPUS, 38)]), now);
         // The market went unreachable: being offline is not a reason to stop
         // selling on the terms this device already had.
-        p.apply_prices(&BTreeMap::new());
+        p.apply_prices(&BTreeMap::new(), now);
         assert!(p.pick_for_sale("claude", OPUS, None, now + 10).is_some());
         assert_eq!(p.lane_views(now + 10)[0].ratio, None);
     }
@@ -1671,7 +1710,7 @@ mod tests {
         a.sell_enabled = true;
         p.set_accounts(vec![a]);
         // The two ends of what the server's `mkt_ratio` clamp allows.
-        p.apply_prices(&prices(&[(OPUS, 10), (HAIKU, 100)]));
+        p.apply_prices(&prices(&[(OPUS, 10), (HAIKU, 100)]), now);
         assert!(p.lane_views(now).iter().all(|v| v.status == "selling"));
     }
 
@@ -1684,7 +1723,7 @@ mod tests {
         let mut a = banded("a", (60, 100));
         a.quota_remaining = 0;
         p.set_accounts(vec![a]);
-        p.apply_prices(&prices(&[(OPUS, 38), (HAIKU, 38)]));
+        p.apply_prices(&prices(&[(OPUS, 38), (HAIKU, 38)]), now);
         assert!(p.lane_views(now).iter().all(|v| v.status == "exhausted"));
     }
 
@@ -1857,17 +1896,89 @@ mod tests {
         assert!(p.any_sellable("claude", HAIKU, now));
     }
 
+    /// C4: a run of 5xx backs the lane off on a capped cycle and never needs
+    /// the operator — the fourth failure sits at the last rung, and the lane
+    /// is back on its own once that passes.
+    #[test]
+    fn server_errors_back_off_on_a_capped_cycle_and_never_trip_the_breaker() {
+        let now = 1000;
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        p.set_accounts(vec![sellable("a")]);
+        let mut at = now;
+        let expect = SERVER_ERROR_BACKOFF.iter().chain(SERVER_ERROR_BACKOFF.last());
+        for (i, rung) in expect.enumerate() {
+            p.pick_for_sale("claude", OPUS, None, at).unwrap();
+            assert_eq!(p.on_error("claude", "a", OPUS, UpstreamErrorKind::ServerError, "500", at), None, "failure {i}");
+            assert!(p.pick_for_sale("claude", OPUS, None, at + rung - 1).is_none(), "failure {i} still cooling");
+            at += rung + 1;
+            assert!(p.pick_for_sale("claude", OPUS, None, at).is_some(), "failure {i} must clear on its own");
+            p.find("claude", "a").unwrap().in_use -= 1;
+        }
+        let view = p.lane_views(at).into_iter().find(|v| v.model == OPUS).unwrap();
+        assert!(!view.requires_user, "nothing here needs a human");
+    }
+
+    /// C4: a call handed to another account releases the slot and steps the
+    /// lane aside, but the streak belongs to whoever fails the request for good.
+    #[test]
+    fn a_handoff_releases_the_slot_without_charging_the_streak() {
+        let now = 1000;
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        p.set_accounts(vec![sellable("a")]);
+        p.pick_for_sale("claude", OPUS, None, now).unwrap();
+        p.on_handoff("claude", "a", OPUS, now);
+        let a = p.find("claude", "a").unwrap();
+        assert_eq!(a.in_use, 0, "the slot is back");
+        assert_eq!(a.lanes[OPUS].fail_streak, 0, "no streak for a hand-off");
+        assert!(p.pick_for_sale("claude", OPUS, None, now).is_none(), "but the retry lands elsewhere");
+        assert!(p.pick_for_sale("claude", OPUS, None, now + SERVER_ERROR_BACKOFF[0] + 1).is_some());
+    }
+
+    /// C5: a 429 with a days-long Retry-After is a model window (Opus's weekly
+    /// cap). The lane keeps the upstream's instant; the account does not.
+    #[test]
+    fn a_long_retry_after_cools_the_lane_but_caps_the_account() {
+        let now = 1000;
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        p.set_accounts(vec![sellable("a")]);
+        let reset = now + 3 * 86_400;
+        p.pick_for_sale("claude", OPUS, None, now).unwrap();
+        p.on_error("claude", "a", OPUS, UpstreamErrorKind::RateLimited { reset_at: Some(reset) }, "429", now);
+        let after_cap = now + ACCOUNT_COOLDOWN_CAP_SECS + 1;
+        assert!(p.pick_for_sale("claude", HAIKU, None, now + 60).is_none(), "the account cools for a while");
+        assert!(p.pick_for_sale("claude", HAIKU, None, after_cap).is_some(), "Haiku is back after the cap");
+        assert!(p.pick_for_sale("claude", OPUS, None, after_cap).is_none(), "Opus waits for the upstream's reset");
+        assert!(p.pick_for_sale("claude", OPUS, None, reset + 1).is_some());
+    }
+
+    /// C7: a cooling cheap account no longer sets the lane's ask, so the dearer
+    /// one is judged against its own floor and keeps the lane on the market.
+    #[test]
+    fn a_cooling_cheap_account_does_not_set_the_floor_for_the_dear_one() {
+        let now = 1_000;
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        p.set_accounts(vec![banded("cheap", (60, 100)), banded("dear", (90, 100))]);
+        p.pick_for_sale("claude", OPUS, None, now).unwrap();
+        p.find("claude", "cheap").unwrap().in_use = 0;
+        p.on_error("claude", "cheap", OPUS, UpstreamErrorKind::ServerError, "500", now);
+        p.apply_prices(&prices(&[(OPUS, 38)]), now);
+        let views = p.lane_views(now);
+        assert_eq!(view(&views, "dear", OPUS).status, "selling", "dear sets the ask while cheap is cooling");
+        assert!(p.any_sellable("claude", OPUS, now), "so the lane stays on offer");
+    }
+
     #[test]
     fn transient_failures_back_off_then_trip_the_breaker() {
         let now = 1000;
         let mut p = AccountPool::new(Strategy::RoundRobin);
         p.set_accounts(vec![sellable("a")]);
 
-        // First two failures self-heal on the ladder.
+        // First two refusals self-heal on the ladder. (`Blocked` is the kind
+        // that still ladders into a breaker; a 5xx no longer does — see above.)
         let mut at = now;
         for (i, rung) in LANE_COOLDOWN_LADDER.iter().enumerate() {
             p.pick_for_sale("claude", OPUS, None, at).unwrap();
-            assert_eq!(p.on_error("claude", "a", OPUS, UpstreamErrorKind::ServerError, "500", at), None);
+            assert_eq!(p.on_error("claude", "a", OPUS, UpstreamErrorKind::Blocked, "403", at), None);
             assert!(p.pick_for_sale("claude", OPUS, None, at + rung - 1).is_none(), "rung {i} still cooling");
             at += rung + 1;
             assert!(p.pick_for_sale("claude", OPUS, None, at).is_some(), "rung {i} must clear on its own");
@@ -1876,19 +1987,19 @@ mod tests {
             p.find("claude", "a").unwrap().in_use -= 1;
         }
 
-        // The third consecutive failure is not a bad minute — it is a broken
-        // lane, and it stays out until someone looks at it.
+        // The third consecutive refusal is not a bad minute — the machine is
+        // refused, and it stays out until someone looks at it.
         p.pick_for_sale("claude", OPUS, None, at).unwrap();
         assert_eq!(
-            p.on_error("claude", "a", OPUS, UpstreamErrorKind::ServerError, "500", at),
-            Some(PauseReason::Breaker)
+            p.on_error("claude", "a", OPUS, UpstreamErrorKind::Blocked, "403", at),
+            Some(PauseReason::Blocked)
         );
         assert_eq!(p.find("claude", "a").unwrap().lanes[OPUS].fail_streak, LANE_BREAKER_THRESHOLD);
         assert!(p.pick_for_sale("claude", OPUS, None, at + 86_400).is_none(), "a breaker does not time out");
 
         let view = p.lane_views(at).into_iter().find(|v| v.model == OPUS).unwrap();
         assert_eq!(view.status, "paused");
-        assert_eq!(view.paused_reason.as_deref(), Some("breaker"));
+        assert_eq!(view.paused_reason.as_deref(), Some("blocked"));
         assert!(view.requires_user, "the UI must offer a resume button for this");
 
         // …and the operator's resume puts it straight back.

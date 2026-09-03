@@ -14,7 +14,7 @@ pub fn client_config(state: &AppState) -> Value {
         "gateway_api_base": state.cfg.gateway_api_base,
         "gateway_ws_url": state.cfg.gateway_ws_url,
         "proxy_port": state.cfg.proxy_port,
-        "device_id": state.device_id,
+        "device_id": state.device_id(),
     })
 }
 

@@ -255,13 +255,58 @@ async fn decide_direct(st: &ProxyState, path: &str) -> Option<&'static str> {
     }
 }
 
+/// The caller gate on the local proxy (S5).
+///
+/// Two rules, both cheap. A request carrying `Origin`, or a `Sec-Fetch-Site`
+/// other than `none`/`same-origin`, was issued by a browser page — every
+/// browser sets those on cross-site fetches and no CLI ever does — and is
+/// refused outright. A request whose `Host` is not this machine's loopback
+/// (DNS rebinding, or the daemon bound wide) must present the consumer key
+/// the buy switch wrote into the tools' configs, under whichever header that
+/// tool uses. Plain loopback callers without a key are left alone: some
+/// harnesses send none, and the buy switch is what admitted them.
+fn refuse_foreign_caller(headers: &HeaderMap, uri: &axum::http::Uri, local_key: Option<&str>) -> Option<Response> {
+    let fetch_site = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()).unwrap_or("");
+    if headers.contains_key(axum::http::header::ORIGIN) || matches!(fetch_site, "cross-site" | "same-site") {
+        return Some((StatusCode::FORBIDDEN, "browser-originated requests are not accepted by the local proxy").into_response());
+    }
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| uri.authority().map(|a| a.to_string()))
+        .unwrap_or_default();
+    let name = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(&host).trim_matches(|c| c == '[' || c == ']');
+    if matches!(name, "127.0.0.1" | "localhost" | "::1") {
+        return None;
+    }
+    let presented = |h: &str| {
+        headers.get(h).and_then(|v| v.to_str().ok()).map(|v| v.strip_prefix("Bearer ").unwrap_or(v).trim())
+    };
+    let ok = local_key.is_some_and(|k| {
+        !k.is_empty()
+            && ["authorization", "x-asale-token", "x-api-key", "x-goog-api-key"]
+                .into_iter()
+                .filter_map(presented)
+                .any(|v| v == k)
+    });
+    (!ok).then(|| (StatusCode::UNAUTHORIZED, "a non-loopback caller must present the local asale key").into_response())
+}
+
 async fn forward(
     State(st): State<ProxyState>,
     method: axum::http::Method,
     uri: axum::http::Uri,
-    _headers: HeaderMap,
+    headers: HeaderMap,
     body: Body,
 ) -> Response {
+    // S5: ahead of *every* exemption below (count_tokens included). A browser
+    // page can POST here without a preflight and spend the wallet; a CLI never
+    // sends `Origin`, and a request that names a foreign host has to prove it
+    // holds the key the buy switch wrote into the tools' configs.
+    if let Some(refused) = refuse_foreign_caller(&headers, &uri, st.asale_key.read().await.as_deref()) {
+        return refused;
+    }
     // The tool is read from the *raw* path — the `/{tool}` prefix is the only
     // thing that carries it — and everything downstream sees the path without
     // it, because that prefix is ours and means nothing to the gateway.
@@ -311,15 +356,24 @@ async fn forward(
     // `count_tokens` is exempt for the same reason the buy gate exempts it: it
     // is a preflight carrying the same body the real call is about to carry, so
     // gating it would refuse the request twice and at the more confusing point.
+    // Where this request is going, decided once: the firewall wants the real
+    // target host (H6), and the routing below wants the same answer.
+    let direct = decide_direct(&st, &path).await;
+    let target_host = match direct {
+        Some(p) if !p.is_empty() => direct_upstream(p, &path, &path_and_query).map(|(u, _)| u),
+        _ => Some(st.server_api_base.clone()),
+    }
+    .and_then(|u| reqwest::Url::parse(&u).ok())
+    .and_then(|u| u.host_str().map(String::from));
     if let (Some(tool), false) = (tool, is_count_tokens) {
-        match crate::firewall::guard(&st.store, tool, &bytes, None).await {
+        match crate::firewall::guard(&st.store, tool, &bytes, target_host.as_deref()).await {
             crate::firewall::Guard::Pass => {}
             crate::firewall::Guard::Rewrite(masked) => bytes = masked.into(),
             crate::firewall::Guard::Refuse(why) => return (StatusCode::FORBIDDEN, why).into_response(),
         }
     }
 
-    if let Some(provider) = decide_direct(&st, &path).await {
+    if let Some(provider) = direct {
         if provider.is_empty() {
             return (StatusCode::SERVICE_UNAVAILABLE, "consume mode is 'direct' but no local subscription can serve this endpoint").into_response();
         }
@@ -552,7 +606,7 @@ async fn send_market(
     // by the API key above, and the server only accepts this id for a device the
     // key's account already owns.
     if let Some(app) = &st.app {
-        req = req.header(asale_protocol::frame::H_DEVICE, app.device_id.clone());
+        req = req.header(asale_protocol::frame::H_DEVICE, app.device_id());
     }
     // Which tool is buying. Matching needs it because one vendor refuses traffic
     // from a client that is not its own: a Claude subscription bearer serving an
@@ -1488,6 +1542,43 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, router(st)).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         port
+    }
+
+    /// S5: a browser page cannot spend the wallet through the loopback proxy,
+    /// a caller naming a foreign host has to hold the local key, and the
+    /// ordinary CLI shape — loopback, no Origin, no key — is untouched.
+    #[tokio::test]
+    async fn browser_and_foreign_host_callers_are_refused_before_anything_is_spent() {
+        let st = state(Some("sk-asale-test")).await;
+        let store = st.store.clone();
+        let port = serve(st).await;
+        let body = serde_json::json!({"model": "claude-sonnet-4-5", "messages": []});
+        let url = format!("http://127.0.0.1:{port}/v1/messages");
+        let http = asale_client_core::http::plain();
+
+        // 1. A cross-site fetch: `Origin` is set by every browser, never by a CLI.
+        let resp = http.post(&url).header("origin", "https://evil.example").json(&body).send().await.unwrap();
+        assert_eq!(resp.status(), 403, "a browser-originated request is refused");
+        let resp = http.post(&url).header("sec-fetch-site", "cross-site").json(&body).send().await.unwrap();
+        assert_eq!(resp.status(), 403, "so is one that only carries Sec-Fetch-Site");
+
+        // 2. DNS rebinding / a wide bind: a foreign Host needs the local key.
+        let resp = http.post(&url).header("host", "evil.example:9787").json(&body).send().await.unwrap();
+        assert_eq!(resp.status(), 401, "no key, foreign host -> refused");
+        let resp = http
+            .post(&url)
+            .header("host", "evil.example:9787")
+            .header("authorization", "Bearer sk-asale-test")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 502, "with the key it reaches routing (market target unreachable in tests)");
+
+        // 3. The CLI shape: loopback, no Origin, no key — still admitted.
+        let resp = post_message(port, "claude-sonnet-4-5").await;
+        assert_eq!(resp.status(), 502, "a plain loopback caller is not gated on the key");
+        assert_eq!(store.agg_totals(&["used"], None).await.unwrap(), (0, 0, 0), "nothing refused was metered");
     }
 
     #[tokio::test]

@@ -201,6 +201,13 @@ pub fn load(provider: &str) -> anyhow::Result<(CliCred, String)> {
         .ok_or_else(|| anyhow::anyhow!("no {provider} CLI credentials found on this machine"))
 }
 
+/// Whether `source` is one of Claude Code's *own* stores — the keychain item
+/// or `~/.claude/*` — as opposed to another tool (opencode) holding a Claude
+/// login of its own. Only those are what `~/.claude.json` describes (C10).
+pub fn is_claude_code_store(source: &str) -> bool {
+    source == "keychain:Claude Code-credentials" || source.starts_with(&format!("{}/.claude/", home()))
+}
+
 /// The account the locally installed Claude Code CLI is signed in as, read from
 /// `~/.claude.json`. The credential stores themselves carry no identity, so
 /// this is the offline fallback when the profile endpoint can't be reached —

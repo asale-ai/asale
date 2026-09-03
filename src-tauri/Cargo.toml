@@ -21,6 +21,8 @@ asale-daemon = { path = "../daemon" }
 asale-client-core = { path = "../core" }
 
 reqwest.workspace = true
+# Update downloads are checked against the manifest's sha256 (S6).
+sha2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

@@ -33,7 +33,7 @@ fn map() -> &'static std::sync::Mutex<HashMap<String, String>> {
 }
 
 /// Settings key holding one account's Claude session id.
-fn session_key(account_id: &str) -> String {
+pub(crate) fn session_key(account_id: &str) -> String {
     format!("claudesession:{account_id}")
 }
 

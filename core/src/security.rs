@@ -52,6 +52,12 @@ impl DeviceIdentity {
         self.signing.verifying_key()
     }
 
+    /// Sign an arbitrary message with the device key; returns base64. Used for
+    /// the device re-bind proof (`{device_id}|{ts}|{nonce}`, M1).
+    pub fn sign_b64(&self, msg: &[u8]) -> String {
+        B64.encode(self.signing.sign(msg).to_bytes())
+    }
+
     /// Sign the handshake; returns base64.
     ///
     /// `audience` is the gateway host this client means to reach and

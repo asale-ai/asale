@@ -23,8 +23,12 @@ pub(crate) const KEY_SETTING: &str = "asale_api_key";
 const KEY_ORIGIN_SETTING: &str = "asale_api_key_origin";
 
 /// Cache a freshly minted key, stamped with the server that issued it.
+///
+/// H3: the key itself goes to the encrypted secret store — it spends the
+/// wallet, and `asale.db` is a plain SQLite file. Only the origin stamp stays
+/// in `settings`.
 pub(crate) async fn remember_key(state: &AppState, key: &str) -> R<()> {
-    state.store.set_setting(KEY_SETTING, key).await.map_err(err)?;
+    keychain::set(KEY_SETTING, key).map_err(err)?;
     state.store.set_setting(KEY_ORIGIN_SETTING, &state.cfg.server_api_base).await.map_err(err)?;
     *state.asale_key.write().await = Some(key.to_string());
     Ok(())
@@ -33,9 +37,22 @@ pub(crate) async fn remember_key(state: &AppState, key: &str) -> R<()> {
 /// Drop the cached key everywhere, so the next `ensure_*` mints a new one.
 /// Called on sign-out and whenever the gateway tells us the key is unknown.
 pub(crate) async fn forget_key(state: &AppState) -> R<()> {
-    state.store.set_setting(KEY_SETTING, "").await.map_err(err)?;
+    keychain::delete(KEY_SETTING).map_err(err)?;
     state.store.set_setting(KEY_ORIGIN_SETTING, "").await.map_err(err)?;
     *state.asale_key.write().await = None;
+    Ok(())
+}
+
+/// One-time move of a key an older build left in `settings` (H3). Runs at
+/// startup before the proxy loads the key; a machine that never had one there
+/// does nothing.
+pub(crate) async fn migrate_key_to_secret_store(state: &AppState) -> R<()> {
+    let Some(legacy) = state.store.get_setting(KEY_SETTING).await.map_err(err)? else { return Ok(()) };
+    if !legacy.is_empty() && keychain::get(KEY_SETTING).map_err(err)?.is_none() {
+        keychain::set(KEY_SETTING, &legacy).map_err(err)?;
+    }
+    state.store.delete_setting(KEY_SETTING).await.map_err(err)?;
+    tracing::info!("moved the cached asale api key out of settings into the secret store");
     Ok(())
 }
 
@@ -51,7 +68,10 @@ pub(crate) async fn forget_key(state: &AppState) -> R<()> {
 /// An unstamped key predates this check; re-stamp it rather than forcing a
 /// pointless re-mint on upgrade.
 pub(crate) async fn cached_key(state: &AppState) -> R<Option<String>> {
-    let key = state.store.get_setting(KEY_SETTING).await.map_err(err)?.unwrap_or_default();
+    // Lazily, not only at startup: one `settings` read, and it is what keeps
+    // a key an older build cached from being re-minted on the first use.
+    migrate_key_to_secret_store(state).await?;
+    let key = keychain::get(KEY_SETTING).map_err(err)?.unwrap_or_default();
     if key.is_empty() {
         return Ok(None);
     }
@@ -116,6 +136,7 @@ pub async fn ensure_api_key(state: &AppState) -> R<Value> {
 
 /// Load the cached asale key into the running proxy (on startup).
 pub async fn load_api_key(state: &AppState) -> R<bool> {
+    migrate_key_to_secret_store(state).await?;
     match cached_key(state).await? {
         Some(key) => {
             *state.asale_key.write().await = Some(key);

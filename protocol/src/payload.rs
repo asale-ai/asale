@@ -202,6 +202,12 @@ pub struct ControlPayload {
     /// For `lane.pause`: which model the gateway took out of rotation.
     #[serde(default)]
     pub model: String,
+    /// For `lane.pause`: the lane the gateway means, `{device}|{provider}`.
+    /// The trailing segment is what lets a client selling one model through
+    /// two providers pause only the one the gateway named (C3). Empty from an
+    /// older gateway, which pauses every provider's lane for the model.
+    #[serde(default)]
+    pub lane: String,
     /// For `lane.pause`: whether it stays out until the operator acts.
     #[serde(default)]
     pub resume_requires_user: bool,

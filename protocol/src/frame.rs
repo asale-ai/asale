@@ -204,6 +204,12 @@ pub mod codes {
     /// a credential that is working. Retriable, and a fault of the lane: the
     /// gateway transfers the request and penalises the lane it left.
     pub const LANE_UNUSABLE: &str = "LANE_UNUSABLE";
+    /// Every local slot for this lane stayed busy for as long as the publisher
+    /// was willing to queue the call (P1-8). Healthy lane, no capacity right
+    /// now: retriable, and the gateway counts it as a limited call rather
+    /// than a lane failure. Also sent for calls that arrive while a session is
+    /// draining for a node handover (P0-4).
+    pub const LANE_BUSY: &str = "LANE_BUSY";
     /// The publisher's WS session went away with this task still in flight.
     ///
     /// Only ever produced by the gateway, never sent by a publisher — a client that
@@ -324,6 +330,8 @@ pub fn is_retriable(code: &str) -> bool {
             // Nothing about it says the request is bad — only that this lane
             // is the wrong one to ask.
             | codes::LANE_UNUSABLE
+            // Full, not broken: somebody else has a slot right now.
+            | codes::LANE_BUSY
             // A publisher that cannot verify the grant it was handed is one
             // whose own machine is misconfigured — no quota public key injected,
             // or a clock far enough off that a valid grant reads as expired. It
@@ -333,4 +341,20 @@ pub fn is_retriable(code: &str) -> bool {
             // refuses it the same way and the attempt budget ends the search.
             | codes::QUOTA_SIG_INVALID
     )
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::is_bad_credential;
+
+    /// The exact bodies seen on 2026-09-03: xAI says a bad key with a 400, and
+    /// only the wording tells it apart from a malformed request.
+    #[test]
+    fn xai_says_bad_key_with_a_400() {
+        let xai = r#"{"code":"invalid-argument","error":"Incorrect API key provided. You can obtain an API key from https://console.x.ai."}"#;
+        assert!(is_bad_credential(400, xai));
+        assert!(is_bad_credential(401, ""));
+        assert!(!is_bad_credential(400, r#"{"error":"messages: field required"}"#));
+        assert!(!is_bad_credential(200, "[]"));
+    }
 }

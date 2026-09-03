@@ -42,9 +42,11 @@ pub struct AppState {
     /// Background token-refresh loop handle (runs while publishing).
     pub refresh_task: Arc<RwLock<Option<JoinHandle<()>>>>,
     /// Device Ed25519 identity (seed persisted in the encrypted secret store).
-    pub identity: Arc<DeviceIdentity>,
-    /// device_id for this install.
-    pub device_id: String,
+    /// Behind a lock because sign-out replaces it (M1) — read through
+    /// [`AppState::identity`].
+    pub identity: std::sync::RwLock<Arc<DeviceIdentity>>,
+    /// device_id for this install; same story, read through [`AppState::device_id`].
+    pub device_id: std::sync::RwLock<String>,
     /// Multi-account pool (spec §4) shared by the executor and consumer proxy.
     /// std Mutex: `TokenProvider` is a sync trait and holders never await.
     pub pool: Arc<std::sync::Mutex<AccountPool>>,
@@ -85,7 +87,35 @@ impl AppState {
     pub fn take_lane_rx(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<crate::publisher::LaneEvent>> {
         self.lane_rx.lock().ok()?.take()
     }
+
+    pub fn device_id(&self) -> String {
+        self.device_id.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn identity(&self) -> Arc<DeviceIdentity> {
+        self.identity.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Become a new device (M1). Called on sign-out so the next account on this
+    /// machine registers a device of its own instead of re-binding the previous
+    /// owner's — which is what split one machine's earnings and verifications
+    /// between two users. Persisted first, then swapped in memory.
+    pub async fn rotate_device_identity(&self) -> anyhow::Result<()> {
+        let id = format!("dev-{}", uuid::Uuid::new_v4().simple());
+        let identity = DeviceIdentity::generate();
+        keychain::set(keychain::DEVICE_SEED, &identity.seed_b64())?;
+        self.store.set_setting("device_id", &id).await?;
+        self.store.delete_setting(DEVICE_OWNER_SETTING).await?;
+        *self.identity.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(identity);
+        *self.device_id.write().unwrap_or_else(|e| e.into_inner()) = id;
+        Ok(())
+    }
 }
+
+/// Settings key: the asale user (`sub` of the access token) this device was
+/// last registered under. A registration under another user is a re-bind and
+/// carries the old key's signature (M1).
+pub const DEVICE_OWNER_SETTING: &str = "device_owner";
 
 impl AppState {
     pub async fn new() -> anyhow::Result<AppState> {
@@ -95,6 +125,13 @@ impl AppState {
         cfg.validate()?;
         let dir = data_dir();
         std::fs::create_dir_all(&dir).ok();
+        // H3: the store beside the secrets holds per-account state and the API
+        // key origin; nothing in here is another local user's business.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
         let db_path = format!("{}/asale.db", dir);
         let store = Arc::new(LocalStore::open(&db_path).await?);
 
@@ -130,8 +167,8 @@ impl AppState {
             asale_key: Arc::new(RwLock::new(None)),
             publisher: Arc::new(RwLock::new(None)),
             refresh_task: Arc::new(RwLock::new(None)),
-            identity,
-            device_id,
+            identity: std::sync::RwLock::new(identity),
+            device_id: std::sync::RwLock::new(device_id),
             pool,
             limits_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             sold_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),

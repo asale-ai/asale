@@ -186,19 +186,18 @@ pub fn gen_pkce() -> Pkce {
 /// machine finish a login: its `localhost` is its own machine, so the redirect
 /// lands nowhere and the user pastes the address back instead.
 #[derive(Clone)]
-pub struct CodeSubmitter(Arc<std::sync::Mutex<Option<oneshot::Sender<(String, String)>>>>);
+pub struct CodeSubmitter(Arc<std::sync::Mutex<Option<oneshot::Sender<(String, String)>>>>, String);
 
 impl CodeSubmitter {
     /// False when the flow is already over — the callback beat us to it, or a
     /// code was submitted before.
     pub fn submit(&self, code: String) -> bool {
         match self.0.lock().unwrap().take() {
-            // No echoed state: what the user pastes back may be the bare code,
-            // and [`AuthCodeFuture::wait`] treats an absent one as "this vendor
-            // did not send it" rather than as a mismatch. Nothing is lost — the
-            // paste is already bound to a flow the caller had to name, and the
-            // exchange replays the state this flow started with either way.
-            Some(tx) => tx.send((code, String::new())).is_ok(),
+            // What the user pastes back may be the bare code, so this path
+            // vouches for the state itself: the paste is already bound to a
+            // flow the caller had to name (L4 — an empty state is otherwise
+            // refused by [`AuthCodeFuture::wait`]).
+            Some(tx) => tx.send((code, self.1.clone())).is_ok(),
             None => false,
         }
     }
@@ -342,7 +341,7 @@ pub async fn begin(p: &OAuthProvider) -> anyhow::Result<(String, AuthCodeFuture)
 
     Ok((
         url,
-        AuthCodeFuture { rx, redirect_uri: redirect2, verifier, state: state2, submitter: CodeSubmitter(tx2) },
+        AuthCodeFuture { rx, redirect_uri: redirect2, verifier, submitter: CodeSubmitter(tx2, state2.clone()), state: state2 },
     ))
 }
 
@@ -368,11 +367,11 @@ impl AuthCodeFuture {
         if code.is_empty() {
             anyhow::bail!("no code in callback");
         }
-        // Checked only when the provider echoes one: every provider here is sent
-        // a `state` and returns it, but a login must not start failing because
-        // some vendor drops it. A value that comes back *different* is another
-        // matter — that callback belongs to a different login attempt.
-        if !echoed_state.is_empty() && echoed_state != self.state {
+        // L4: every provider here is sent a `state` and returns it, so a
+        // callback without one is not this login's — accepting it let a stray
+        // request to the loopback callback finish a flow it did not start.
+        // A pasted code goes through [`CodeSubmitter`], which vouches for it.
+        if echoed_state != self.state {
             anyhow::bail!("state mismatch");
         }
         Ok(AuthCode {
@@ -732,7 +731,7 @@ mod tests {
                 verifier: "verifier".into(),
                 state: state.into(),
                 // Unused here: these cases drive the callback half directly.
-                submitter: CodeSubmitter(Arc::new(std::sync::Mutex::new(None))),
+                submitter: CodeSubmitter(Arc::new(std::sync::Mutex::new(None)), state.into()),
             };
             (tx, fut)
         };
@@ -741,11 +740,18 @@ mod tests {
         tx.send(("the-code".into(), "someone-elses".into())).unwrap();
         assert!(fut.wait().await.is_err(), "a mismatched state must not produce a code");
 
+        // L4: a callback carrying no state is not ours either.
         let (tx, fut) = pending("ours");
         tx.send(("the-code".into(), String::new())).unwrap();
-        let ac = fut.wait().await.unwrap();
-        assert_eq!(ac.code, "the-code");
-        assert_eq!(ac.state, "ours", "and the exchange still replays ours");
+        assert!(fut.wait().await.is_err(), "an absent state must not produce a code");
+
+        // A pasted code vouches for the state itself.
+        let (_tx, fut) = pending("ours");
+        let submit = fut.submitter();
+        let (tx2, rx2) = oneshot::channel::<(String, String)>();
+        *submit.0.lock().unwrap() = Some(tx2);
+        assert!(submit.submit("the-code".into()));
+        assert_eq!(rx2.await.unwrap(), ("the-code".to_string(), "ours".to_string()));
 
         let (tx, fut) = pending("ours");
         tx.send(("the-code".into(), "ours".into())).unwrap();

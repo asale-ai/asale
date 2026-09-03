@@ -132,7 +132,7 @@ pub async fn client_status(state: &AppState) -> R<Value> {
         "signed_in": keychain::get("access_token").map_err(err)?.is_some(),
         "api_key_loaded": state.asale_key.read().await.is_some(),
         "proxy_port": state.cfg.proxy_port,
-        "device_id": state.device_id,
+        "device_id": state.device_id(),
         "server_api_base": state.cfg.server_api_base,
         "gateway_ws_url": state.cfg.gateway_ws_url,
         "accounts_total": tools.len(),
@@ -226,7 +226,7 @@ pub async fn devices_list(state: &AppState) -> R<Value> {
     // machines without the frontend having to know how device ids are minted.
     if let Some(devices) = v["devices"].as_array_mut() {
         for d in devices {
-            let is_self = d["device_id"].as_str() == Some(state.device_id.as_str());
+            let is_self = d["device_id"].as_str() == Some(state.device_id().as_str());
             d["this_device"] = json!(is_self);
         }
     }

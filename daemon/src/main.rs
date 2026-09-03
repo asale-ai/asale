@@ -33,10 +33,15 @@ fn main() -> anyhow::Result<()> {
         // The token is required on every request, loopback included, so the
         // browser needs it here — there is no untokenized URL that works.
         println!("asaled ready:");
+        // H4: the token is only printed to a terminal. When stdout is a file
+        // (the CLI redirects it into `asaled.log`) it would land in a log
+        // that outlives the session; the 0600 `daemon.token` is the source then.
+        use std::io::IsTerminal;
+        let tok: &str = if std::io::stdout().is_terminal() { &started.token } else { "<see daemon.token>" };
         // The fragment never reaches HTTP access logs or Referer headers.
-        println!("  local:   http://127.0.0.1:{}/#token={}", started.addr.port(), started.token);
+        println!("  local:   http://127.0.0.1:{}/#token={}", started.addr.port(), tok);
         if !started.addr.ip().is_loopback() {
-            println!("  remote:  http://<this-host>:{}/#token={}", started.addr.port(), started.token);
+            println!("  remote:  http://<this-host>:{}/#token={}", started.addr.port(), tok);
         }
         println!("  (the token is also at {}/daemon.token, mode 0600)", asale_daemon::state::data_dir());
         tokio::signal::ctrl_c().await?;

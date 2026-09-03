@@ -72,7 +72,9 @@ pub trait SupplySource: Send + Sync {
 /// operator the same "paused, resume when fixed" state rather than leaving them
 /// to wonder why one model stopped earning.
 pub trait LaneControl: Send + Sync {
-    fn on_lane_pause(&self, model: &str, reason: &str, requires_user: bool);
+    /// `lane` is the gateway's own name for it (`{device}|{provider}`), empty
+    /// when the gateway predates the field.
+    fn on_lane_pause(&self, model: &str, reason: &str, requires_user: bool, lane: &str);
 }
 
 /// Everything the publisher session needs beyond the config.
@@ -220,6 +222,26 @@ const SUPPLY_REFRESH: Duration = Duration::from_secs(60);
 /// time this client believes it is online and selling, while the gateway has
 /// long since expired its supply.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// How long a session asked to move waits for its in-flight calls before it
+/// leaves anyway. At least the gateway's relay idle timeout (300s): a long
+/// stream that is still producing must be allowed to finish here.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(300);
+/// How often a draining session re-checks whether it is idle.
+const DRAIN_POLL: Duration = Duration::from_millis(250);
+
+/// The error frame a call receives when it lands on a session that is
+/// draining for a node handover: retriable, and no fault of the lane.
+fn refuse_while_draining(task_id: &str) -> Envelope {
+    Envelope::with_id(
+        task_id,
+        protocol::T_ERROR,
+        serde_json::json!({
+            "id": task_id, "task_id": task_id, "code": protocol::codes::LANE_BUSY,
+            "message": "publisher is migrating to another node", "detail": "", "retriable": true,
+        }),
+    )
+}
 
 /// Spawn the reconnecting publisher loop. Returns a handle immediately; the
 /// session runs on the current tokio runtime.
@@ -579,9 +601,25 @@ async fn run_session(
     // protects against nothing.
     let quota = deps.quota.clone();
     let outcome;
+    // P0-4: set when the node asked us to move. Nothing new is accepted, the
+    // calls already running finish here, and only then is the socket dropped —
+    // the replacement session would otherwise kick this one and the gateway
+    // would fail every task still in flight on it.
+    let mut draining: Option<tokio::time::Instant> = None;
 
     loop {
+        if let Some(deadline) = draining {
+            let idle = in_flight.lock().unwrap().is_empty();
+            if idle || tokio::time::Instant::now() >= deadline {
+                if !idle {
+                    tracing::warn!("drain timed out with calls still in flight; migrating anyway");
+                }
+                outcome = SessionOutcome::Migrate;
+                break;
+            }
+        }
         tokio::select! {
+            _ = tokio::time::sleep(DRAIN_POLL), if draining.is_some() => {}
             changed = shutdown_rx.changed() => {
                 if changed.is_ok() && *shutdown_rx.borrow() {
                     outcome = SessionOutcome::Shutdown;
@@ -628,14 +666,26 @@ async fn run_session(
                                 }
                                 protocol::T_HTTP_REQUEST => {
                                     if let Ok(reqp) = serde_json::from_value::<HttpRequestPayload>(env.payload) {
-                                        spawn_execute(&http, deps, reqp, &out_tx, quota.clone(), &in_flight);
+                                        if draining.is_some() {
+                                            // Retriable and not a lane fault: the
+                                            // gateway places it with somebody else.
+                                            let _ = out_tx.send(refuse_while_draining(&reqp.task_id));
+                                        } else {
+                                            spawn_execute(&http, deps, reqp, &out_tx, quota.clone(), &in_flight);
+                                        }
                                     }
                                 }
                                 protocol::T_CONTROL => {
                                     if let Ok(ctrl) = serde_json::from_value::<ControlPayload>(env.payload.clone()) {
                                         match handle_control(&ctrl, state_tx, deps.lanes.as_deref(), &in_flight) {
                                             ControlResult::Kick => { outcome = SessionOutcome::Kicked; break; }
-                                            ControlResult::Reconnect => { outcome = SessionOutcome::Migrate; break; }
+                                            ControlResult::Reconnect => {
+                                                if draining.is_none() {
+                                                    let n = in_flight.lock().unwrap().len();
+                                                    tracing::info!(in_flight = n, "draining before migrating to another node");
+                                                    draining = Some(tokio::time::Instant::now() + DRAIN_TIMEOUT);
+                                                }
+                                            }
                                             ControlResult::Continue => {}
                                         }
                                     }
@@ -773,7 +823,7 @@ fn handle_control(
         "lane.pause" => {
             tracing::warn!(model = %ctrl.model, "gateway paused a lane: {}", ctrl.reason);
             if let Some(l) = lanes {
-                l.on_lane_pause(&ctrl.model, &ctrl.reason, ctrl.resume_requires_user);
+                l.on_lane_pause(&ctrl.model, &ctrl.reason, ctrl.resume_requires_user, &ctrl.lane);
             }
             ControlResult::Continue
         }
@@ -862,6 +912,20 @@ mod tests {
     use super::*;
     use futures_util::SinkExt;
     use tokio::net::TcpListener;
+
+    /// P0-4: a call that lands on a draining session goes back as a retriable
+    /// `LANE_BUSY`, which the gateway hands to another seller without blaming
+    /// this lane — and it names the task so the gateway can match it.
+    #[test]
+    fn a_call_refused_during_drain_is_retriable_and_not_a_lane_fault() {
+        let env = refuse_while_draining("t-1");
+        assert_eq!(env.msg_type, protocol::T_ERROR);
+        assert_eq!(env.payload["task_id"], "t-1");
+        assert_eq!(env.payload["code"], protocol::codes::LANE_BUSY);
+        assert_eq!(env.payload["retriable"], true);
+        assert!(protocol::is_retriable(protocol::codes::LANE_BUSY));
+        assert!(DRAIN_TIMEOUT >= Duration::from_secs(300), "at least the gateway's relay idle timeout");
+    }
 
     struct FixedConfig {
         url: String,
@@ -1088,6 +1152,7 @@ mod tests {
             throttle_ms: 0,
             model: String::new(),
             resume_requires_user: false,
+            lane: String::new(),
             score: 0,
             min_score: 0,
         };
@@ -1113,7 +1178,7 @@ mod tests {
     /// Records whether the gateway's control frames reached the lane board.
     struct SpyLanes(std::sync::Mutex<Vec<String>>);
     impl LaneControl for SpyLanes {
-        fn on_lane_pause(&self, model: &str, reason: &str, _requires_user: bool) {
+        fn on_lane_pause(&self, model: &str, reason: &str, _requires_user: bool, _lane: &str) {
             self.0.lock().unwrap().push(format!("{model}:{reason}"));
         }
     }
@@ -1141,6 +1206,7 @@ mod tests {
             throttle_ms: 0,
             model: "claude-opus-4-5".into(),
             resume_requires_user: false,
+            lane: String::new(),
             score: 0,
             min_score: 0,
         };

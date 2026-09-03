@@ -36,7 +36,7 @@ pub async fn start_lane_verification(
     provider: String,
     model: String,
 ) -> R<Value> {
-    let device_id = state.device_id.clone();
+    let device_id = state.device_id();
     authed(
         state,
         reqwest::Method::POST,
@@ -88,7 +88,7 @@ pub async fn lane_verification_overview(state: &AppState) -> R<Value> {
     // own gate is keyed on the full lane, so what this fixes is the page
     // telling the truth rather than a bypass.
     if let Some(lanes) = v.get_mut("lanes").and_then(|l| l.as_array_mut()) {
-        lanes.retain(|l| l.get("device_id").and_then(|d| d.as_str()) == Some(state.device_id.as_str()));
+        lanes.retain(|l| l.get("device_id").and_then(|d| d.as_str()) == Some(state.device_id().as_str()));
     }
     Ok(v)
 }
@@ -102,7 +102,7 @@ pub async fn lane_verification_report(
     provider: String,
     model: String,
 ) -> R<Value> {
-    let device_id = state.device_id.clone();
+    let device_id = state.device_id();
     authed(
         state,
         reqwest::Method::POST,

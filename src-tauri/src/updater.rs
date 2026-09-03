@@ -82,6 +82,38 @@ struct Asset {
     /// Bytes, per the manifest. `0` when it does not say.
     #[serde(default)]
     size: u64,
+    /// Hex SHA-256 of the file, per the manifest. Empty when it does not say —
+    /// then the size is all there is to go on, and that is logged (S6).
+    #[serde(default)]
+    sha256: String,
+}
+
+/// Hex SHA-256 of a file on disk.
+fn file_sha256(path: &std::path::Path) -> Result<String, String> {
+    use sha2::Digest;
+    let mut f = std::fs::File::open(path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    let mut h = sha2::Sha256::new();
+    std::io::copy(&mut f, &mut h).map_err(|e| format!("could not hash {}: {e}", path.display()))?;
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// S6: the file at `dest` is what the manifest says it is — or it is deleted.
+///
+/// The installer runs whatever sits in this cache as root, and the cache is
+/// writable by every process of this user; the byte count alone is what a
+/// same-length swap defeats. A manifest with no hash is let through with a
+/// warning while the feed catches up.
+fn verify_asset(asset: &Asset, dest: &std::path::Path) -> Result<(), String> {
+    if asset.sha256.is_empty() {
+        tracing::warn!("manifest carries no sha256 for {}; installing on size alone", asset.name);
+        return Ok(());
+    }
+    let got = file_sha256(dest)?;
+    if !got.eq_ignore_ascii_case(asset.sha256.trim()) {
+        let _ = std::fs::remove_file(dest);
+        return Err(format!("{} does not match the manifest's sha256 — removed", asset.name));
+    }
+    Ok(())
 }
 
 /// How far along the download is, as the window renders it.
@@ -231,12 +263,18 @@ async fn fetch_release(
         // Already here and the right size: a retry after a failed install, or
         // the user pressing update twice. Re-fetching 90 MB to learn that would
         // be the slowest possible way to do nothing.
-        if asset.size > 0 && std::fs::metadata(&dest).map(|m| m.len()).ok() == Some(asset.size) {
+        if asset.size > 0
+            && std::fs::metadata(&dest).map(|m| m.len()).ok() == Some(asset.size)
+            // S6: a cached file is reused only when its hash still matches;
+            // a mismatch deletes it and falls through to a fresh download.
+            && verify_asset(asset, &dest).is_ok()
+        {
             done += asset.size;
             report(Progress { file: asset.name.clone(), received: done, total });
             continue;
         }
         fetch(&report, asset, &dest, done, total).await?;
+        verify_asset(asset, &dest)?;
         done += match asset.size {
             0 => std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0),
             n => n,
@@ -691,6 +729,36 @@ fn pq(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// S6: a cached file that does not hash to what the manifest says is
+    /// deleted, not installed; a manifest with no hash is waved through.
+    #[test]
+    fn a_download_that_does_not_match_the_manifest_hash_is_removed() {
+        let dir = std::env::temp_dir().join(format!("asale-updater-sha-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("app.bin");
+        std::fs::write(&dest, b"hello").unwrap();
+        let mut asset = Asset {
+            id: "x".into(),
+            name: "app.bin".into(),
+            url: String::new(),
+            mirror: String::new(),
+            size: 5,
+            // sha256("hello")
+            sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".into(),
+        };
+        assert!(verify_asset(&asset, &dest).is_ok(), "the right bytes pass");
+        assert!(dest.exists());
+
+        asset.sha256 = "00".repeat(32);
+        assert!(verify_asset(&asset, &dest).is_err(), "a mismatch is refused");
+        assert!(!dest.exists(), "and the file is gone, so nothing can install it");
+
+        std::fs::write(&dest, b"hello").unwrap();
+        asset.sha256.clear();
+        assert!(verify_asset(&asset, &dest).is_ok(), "no hash in the manifest: warned through");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// `ASALE_DATA_DIR` is process-global and cargo runs these in threads of one
     /// process, so the tests that repoint it take this lock rather than deleting
     /// each other's scratch directory mid-run.
@@ -781,6 +849,7 @@ mod tests {
                 url: "http://127.0.0.1:1/cli.tar.gz".into(),
                 mirror: format!("{base}/cli.tar.gz"),
                 size: 8,
+                sha256: String::new(),
             },
             Asset {
                 id: app.into(),
@@ -788,6 +857,7 @@ mod tests {
                 url: format!("{base}/app.bin"),
                 mirror: String::new(),
                 size: 16,
+                sha256: String::new(),
             },
         ];
 

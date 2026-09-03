@@ -561,7 +561,7 @@ async fn send(
         .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))
         .header("authorization", format!("Bearer {key}"))
         .header("content-type", "application/json")
-        .header(asale_protocol::frame::H_TARGET_DEVICE, &state.device_id);
+        .header(asale_protocol::frame::H_TARGET_DEVICE, state.device_id());
     if let Some(lang) = state.store.get_setting("language").await.ok().flatten() {
         if !lang.trim().is_empty() {
             req = req.header("accept-language", lang);

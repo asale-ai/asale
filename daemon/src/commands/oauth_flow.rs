@@ -158,12 +158,23 @@ pub(crate) async fn finish_provider_oauth(
         // Key names only: every value in a token response is a secret.
         tracing::warn!(
             provider,
-            "no email in the token response — falling back to a shared account id. \
+            "no email in the token response — falling back to a token-derived account id. \
              response keys = {:?}, account keys = {:?}",
             key_names(&tokens),
             key_names(&tokens["account"])
         );
-        "account".to_string()
+        // C9: the same fingerprint the device flow uses. A constant here made
+        // two email-less logins one keychain entry, each overwriting the other.
+        let cred = cli_import::CliCred {
+            provider: provider.to_string(),
+            access_token: access.to_string(),
+            refresh_token: tokens["refresh_token"].as_str().map(String::from),
+            expires_at: None,
+            account_hint: None,
+            plan: None,
+            upstream_account_id: None,
+        };
+        format!("{provider}-{}", cli_import::token_fingerprint(&cred))
     });
     // Anthropic's exchange has never carried a plan, so a Claude login that
     // stopped here sold like the lowest paid tier — 220k tokens per five hours
@@ -630,7 +641,7 @@ pub async fn platform_oauth_login(
                     "code_verifier": pkce.verifier,
                     "region": region,
                     "client": "desktop",
-                    "device_fp": [st.device_id.clone()],
+                    "device_fp": [st.device_id()],
                 }));
             if let Some(token) = link_token {
                 req = req.header("authorization", format!("Bearer {token}"));

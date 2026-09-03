@@ -769,7 +769,9 @@ async fn a_broken_model_stops_selling_and_waits_for_the_operator() {
     assert_eq!(of(&items, opus)["available"], true);
     assert_eq!(of(&items, haiku)["available"], true);
 
-    // Three consecutive upstream failures on Opus trip its breaker.
+    // Three consecutive refusals of the machine on Opus trip its breaker.
+    // (`Blocked` is the kind that still ladders into an operator-held pause;
+    // a run of 5xx backs off and recovers on its own since C4.)
     {
         let mut pool = state.pool.lock().unwrap();
         for i in 0..3 {
@@ -778,8 +780,8 @@ async fn a_broken_model_stops_selling_and_waits_for_the_operator() {
                 "claude",
                 account,
                 opus,
-                asale_client_core::UpstreamErrorKind::ServerError,
-                "upstream 503",
+                asale_client_core::UpstreamErrorKind::Blocked,
+                "upstream 403",
                 now + i * 1_000,
             );
         }
@@ -788,7 +790,7 @@ async fn a_broken_model_stops_selling_and_waits_for_the_operator() {
     // Opus leaves the market with a reason attached; Haiku never noticed.
     let items = asale_daemon::publisher::build_supply_items(&state.store, &state.pool).await;
     assert_eq!(of(&items, opus)["available"], false);
-    assert_eq!(of(&items, opus)["paused_reason"], "breaker");
+    assert_eq!(of(&items, opus)["paused_reason"], "blocked");
     assert_eq!(of(&items, opus)["resume_at"], 0, "a breaker has no automatic return time");
     assert_eq!(of(&items, haiku)["available"], true, "one model's failures must not stop the others");
 
@@ -796,7 +798,7 @@ async fn a_broken_model_stops_selling_and_waits_for_the_operator() {
     let opus_lane = lanes["lanes"].as_array().unwrap().iter().find(|l| l["model"] == opus).unwrap();
     assert_eq!(opus_lane["status"], "paused");
     assert_eq!(opus_lane["requires_user"], true, "the UI must offer a resume button");
-    assert_eq!(opus_lane["last_error"], "upstream 503");
+    assert_eq!(opus_lane["last_error"], "upstream 403");
 
     // A rebuild (which runs every minute) must not un-pause it either.
     asale_daemon::publisher::rebuild_pool(&state.store, &state.pool).await;

@@ -167,9 +167,15 @@ pub fn start(explicit_bind: Option<&str>) -> Result<StartOutcome> {
     std::fs::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
     // Appended, never truncated: the reason a start failed is usually in the
     // *previous* run's last lines.
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    // H4: the daemon's stdout lands here; keep whatever it prints owner-only.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let log = opts
         .open(paths::log_file())
         .with_context(|| format!("could not open {}", paths::log_file().display()))?;
     let log_err = log.try_clone()?;

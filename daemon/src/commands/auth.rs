@@ -31,7 +31,7 @@ pub async fn register(state: &AppState, email: String, password: String, region:
             "email": email,
             "password": password,
             "region": region,
-            "device_fp": [state.device_id.clone()],
+            "device_fp": [state.device_id()],
         }))
         .send()
         .await
@@ -164,5 +164,12 @@ pub async fn logout(state: &AppState) -> R<bool> {
     super::wallet::forget_key(state).await?;
     // Everything else this daemon knows about the account that just left.
     super::forget_account_cache(state).await;
+    // M1: the device identity goes with the account. A running publisher
+    // holds the old one, so it is stopped first — the sell supervisor brings
+    // it back under the new identity once somebody signs in.
+    if let Some(handle) = state.publisher.write().await.take() {
+        handle.stop();
+    }
+    state.rotate_device_identity().await.map_err(err)?;
     Ok(true)
 }

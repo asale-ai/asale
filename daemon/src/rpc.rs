@@ -98,12 +98,20 @@ pub fn router(ctx: Ctx) -> Router {
 /// B/S access — the daemon serving the UI itself — is same-origin and never
 /// reaches this at all.
 fn allowed_origin(o: &str) -> bool {
+    // L5: exactly the Vite dev server and this daemon's own port — not any
+    // local port, which would let any page served on this machine drive the
+    // RPC with the browser's session cookie.
+    let own_port = crate::bound_addr().map(|a| a.port());
+    let local = |port: u16| o == format!("http://localhost:{port}") || o == format!("http://127.0.0.1:{port}");
     o == "tauri://localhost"
         || o == "https://tauri.localhost"
         || o == "http://tauri.localhost"
-        || o.starts_with("http://localhost:")
-        || o.starts_with("http://127.0.0.1:")
+        || local(VITE_DEV_PORT)
+        || own_port.is_some_and(local)
 }
+
+/// Where `pnpm dev` serves the frontend from.
+const VITE_DEV_PORT: u16 = 9173;
 
 async fn healthz() -> impl IntoResponse {
     Json(json!({ "ok": true, "name": "asaled", "version": env!("CARGO_PKG_VERSION") }))
@@ -874,13 +882,19 @@ async fn rpc(
         },
         "resume_lane" => {
             let p: LaneArgs = args(&a)?;
-            commands::resume_lane(
-                st,
-                p.provider.unwrap_or_default(),
-                p.account_id.unwrap_or_default(),
-                p.model.unwrap_or_default(),
-            )
-            .await?
+            // C11: all three or nothing. A missing one used to resume *every*
+            // lane in memory while the disk forgot only the named account's,
+            // so the next rebuild put the rest back.
+            let full = |s: Option<String>| s.filter(|s| !s.is_empty());
+            let (Some(provider), Some(account_id), Some(model)) =
+                (full(p.provider), full(p.account_id), full(p.model))
+            else {
+                return Err(crate::cmd_err!(
+                    "errors.lane.missingArgs",
+                    "resume_lane needs provider, account_id and model"
+                ));
+            };
+            commands::resume_lane(st, provider, account_id, model).await?
         },
         // The publisher policy patch is a free-form object, forwarded as-is.
         "publish_policy_set" => commands::publish_policy_set(st, a.clone()).await?,
@@ -1098,7 +1112,11 @@ mod tests {
         assert!(allowed_origin("https://tauri.localhost"));
         // A browser on this machine, at the dev server or the daemon's own port.
         assert!(allowed_origin("http://localhost:9173"));
-        assert!(allowed_origin("http://127.0.0.1:9700"));
+        assert!(allowed_origin("http://127.0.0.1:9173"));
+        // L5: no other local port — `bound_addr()` is unset in tests, so the
+        // daemon's own port is not admitted here and nothing else ever is.
+        assert!(!allowed_origin("http://127.0.0.1:9700"));
+        assert!(!allowed_origin("http://localhost:8080"));
         // Anything else is a page that found the port, and the token is not the
         // only thing that should be standing between it and the wallet.
         assert!(!allowed_origin("https://evil.example"));

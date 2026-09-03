@@ -475,6 +475,13 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Remove a setting row outright (an account's caches on removal, a
+    /// secret that moved to the secret store). Missing is not an error.
+    pub async fn delete_setting(&self, k: &str) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM settings WHERE k=?").bind(k).execute(&self.pool).await?;
+        Ok(())
+    }
+
     pub async fn get_setting(&self, k: &str) -> anyhow::Result<Option<String>> {
         let row: Option<(String,)> = sqlx::query_as("SELECT v FROM settings WHERE k=?")
             .bind(k)
@@ -772,6 +779,44 @@ impl LocalStore {
         .bind(origin)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// Drop `source` from every *other* account of `provider` that still lists
+    /// it (C1). A CLI file holds one login at a time, so once an import has
+    /// resolved it to `account_id`, any other row naming it is a snapshot from
+    /// before the user switched logins — and the refresh write-back must not
+    /// follow it. An `import` row whose chosen source was taken loses its
+    /// primary too; asale's own logins keep theirs (it names the credential
+    /// asale actually holds).
+    pub async fn detach_source_from_others(&self, provider: &str, account_id: &str, source: &str) -> anyhow::Result<()> {
+        let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT account_id, COALESCE(sources, ''), origin FROM tools WHERE provider=? AND account_id<>?",
+        )
+        .bind(provider)
+        .bind(account_id)
+        .fetch_all(&self.pool)
+        .await?;
+        for (other, raw, origin) in rows {
+            let listed: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
+            if !listed.iter().any(|s| s == source) {
+                continue;
+            }
+            let kept: Vec<&str> = listed.iter().map(String::as_str).filter(|s| *s != source).collect();
+            let primary = kept.first().copied().unwrap_or("");
+            let keep_primary = matches!(origin.as_deref(), Some("oauth") | Some("api_key"));
+            sqlx::query(
+                "UPDATE tools SET sources=?1, source=CASE WHEN ?2 THEN source ELSE ?3 END
+                 WHERE provider=?4 AND account_id=?5",
+            )
+            .bind(serde_json::to_string(&kept)?)
+            .bind(keep_primary)
+            .bind(primary)
+            .bind(provider)
+            .bind(&other)
+            .execute(&self.pool)
+            .await?;
+        }
         Ok(())
     }
 
@@ -1157,6 +1202,28 @@ mod tests {
         let tools = s.list_tools().await.unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].provider, "claude");
+    }
+
+    /// C1: once a store is found holding account B, no other row may keep
+    /// pointing the refresh write-back at it. The row that loses its chosen
+    /// source is left with none (so the write-back skips it), while an asale
+    /// login keeps its own `source` — that names asale's credential, not a file.
+    #[tokio::test]
+    async fn an_import_takes_a_source_away_from_every_other_account() {
+        let s = LocalStore::open_memory().await.unwrap();
+        let file = ".claude/.credentials.json";
+        s.upsert_tool("claude", "a@x", "claude:a@x", &[file], "import").await.unwrap();
+        s.upsert_tool("claude", "own@x", "claude:own@x", &["oauth", file], "oauth").await.unwrap();
+        s.upsert_tool("claude", "b@x", "claude:b@x", &[file], "import").await.unwrap();
+        s.detach_source_from_others("claude", "b@x", file).await.unwrap();
+
+        let tools = s.list_tools().await.unwrap();
+        let row = |id: &str| tools.iter().find(|t| t.account_id == id).unwrap();
+        assert!(row("a@x").sources.is_empty(), "A no longer claims B's file");
+        assert_eq!(row("a@x").source.as_deref(), Some(""), "and has no primary to write to");
+        assert_eq!(row("own@x").sources, ["oauth"]);
+        assert_eq!(row("own@x").source.as_deref(), Some("oauth"), "asale's own login keeps its source");
+        assert_eq!(row("b@x").sources, [file], "the importer keeps it");
     }
 
     /// A CLI re-import must not relabel an account asale logged into itself.

@@ -127,7 +127,7 @@ pub(crate) async fn known_account_for(state: &AppState, provider: &str, cred: &c
 ///   4. otherwise a digest of the refresh token: stable across refreshes, and
 ///      distinct per login (unlike the old `"<provider>-cli"` placeholder,
 ///      which merged two unrelated accounts into one row).
-pub(crate) async fn resolve_account_id(state: &AppState, provider: &str, cred: &cli_import::CliCred) -> String {
+pub(crate) async fn resolve_account_id(state: &AppState, provider: &str, cred: &cli_import::CliCred, source: &str) -> String {
     if let Some(hint) = cred.account_hint.clone().filter(|h| !h.is_empty()) {
         return hint;
     }
@@ -138,8 +138,14 @@ pub(crate) async fn resolve_account_id(state: &AppState, provider: &str, cred: &
         if let Some(email) = cli_scan::claude_profile_email(&cred.access_token).await {
             return email;
         }
-        if let Some(email) = tokio::task::spawn_blocking(cli_scan::claude_local_account).await.ok().flatten() {
-            return email;
+        // C10: `~/.claude.json` names Claude Code's *own* login, so it only
+        // vouches for Claude Code's own stores. A credential opencode holds
+        // may be another account, and filing it under this email merged two
+        // logins into one row.
+        if cli_scan::is_claude_code_store(source) {
+            if let Some(email) = tokio::task::spawn_blocking(cli_scan::claude_local_account).await.ok().flatten() {
+                return email;
+            }
         }
     }
     format!("{provider}-{}", cli_import::token_fingerprint(cred))
@@ -188,13 +194,15 @@ pub async fn import_from_cli(state: &AppState, provider: String) -> R<Value> {
     // Identity first, merge second: two stores holding one login collapse here.
     let mut identified = Vec::with_capacity(candidates.len());
     for sc in candidates {
-        let account_id = resolve_account_id(state, &provider, &sc.cred).await;
+        let account_id = resolve_account_id(state, &provider, &sc.cred, &sc.source).await;
         identified.push((account_id, sc));
     }
     let accounts = cli_import::merge_by_account(identified, now_secs());
     let held_exclusively = exclusively_held_accounts(state, &provider).await;
 
     let mut out = Vec::with_capacity(accounts.len());
+    // Accounts whose access token this import actually changed (C2).
+    let mut replaced: Vec<String> = Vec::new();
     for acct in accounts {
         let (account_id, cred) = (acct.account_id, acct.cred);
         // An account asale logged into itself is not a copy of the CLI's — it
@@ -204,6 +212,14 @@ pub async fn import_from_cli(state: &AppState, provider: String) -> R<Value> {
         // keeps saying asale holds it exclusively. The row still learns that a
         // CLI on this machine has the same account, via `sources` below.
         let exclusive = held_exclusively.contains(&account_id);
+        // C2: only a credential that actually *changed* answers an auth pause.
+        // The startup import re-reads the same dead token every restart, and
+        // clearing the pause for it put the lane back out to collect the same
+        // 401 (and the same reputation hit) once per restart.
+        let prev = keychain::get(&keychain::token_ref(&provider, &account_id)).ok().flatten();
+        if !exclusive && prev.as_deref() != Some(cred.access_token.as_str()) {
+            replaced.push(account_id.clone());
+        }
         // Persist exactly like oauth_login: secret-store tokens + store references.
         if !exclusive {
             keychain::set(&keychain::token_ref(&provider, &account_id), &cred.access_token).map_err(err)?;
@@ -246,6 +262,12 @@ pub async fn import_from_cli(state: &AppState, provider: String) -> R<Value> {
             .upsert_tool(&provider, &account_id, &keychain::token_ref(&provider, &account_id), &sources, "import")
             .await
             .map_err(err)?;
+        // C1: a store holds one login at a time. Whoever else still lists one
+        // of these paths was found there *before* the user switched logins, and
+        // the refresh write-back must stop following that row to this file.
+        for s in &sources {
+            let _ = state.store.detach_source_from_others(&provider, &account_id, s).await;
+        }
 
         out.push(json!({
             "provider": provider,
@@ -263,6 +285,10 @@ pub async fn import_from_cli(state: &AppState, provider: String) -> R<Value> {
     // reason a fresh OAuth login does.
     for row in &out {
         if let Some(id) = row.get("account_id").and_then(|v| v.as_str()) {
+            // C2: the same token as before is not a fresh credential.
+            if !replaced.iter().any(|r| r == id) {
+                continue;
+            }
             credential_replaced(state, &provider, id).await;
         }
     }
@@ -1195,14 +1221,25 @@ async fn verify_api_key(p: Provider, key: &str) -> R<()> {
             .send()
             .await;
         match resp {
-            // 401 from this deployment; another may still know the key.
-            Ok(r) if r.status().as_u16() == 401 => rejected = true,
-            // 403 is deliberately not a rejection: these hosts answer region
-            // blocks the same way, and sending the user hunting for a new key
-            // when what they need is a proxy wastes the one thing they have.
-            // Anything else means the host was reached and did not refuse the
-            // credential — a 404 or 429 says nothing about its validity.
-            Ok(_) => return Ok(()),
+            Ok(r) => {
+                // Refused by this deployment; another may still know the key.
+                // Not only 401: xAI answers a bad key with `400 invalid-argument`,
+                // so the body is read the same way the gateway reads it —
+                // a 400 the probe waved through here put a dead key on the
+                // market for 36 straight failures (2026-09-02/03).
+                // 403 is deliberately not a rejection: these hosts answer region
+                // blocks the same way, and sending the user hunting for a new
+                // key when what they need is a proxy wastes the one thing they
+                // have. Anything else means the host was reached and did not
+                // refuse the credential — a 404 or 429 says nothing about it.
+                let status = r.status().as_u16();
+                let body = r.text().await.unwrap_or_default();
+                if status != 403 && asale_protocol::is_bad_credential(status, &body) {
+                    rejected = true;
+                } else {
+                    return Ok(());
+                }
+            }
             Err(e) => tracing::warn!(provider = %p, base, "could not verify API key: {e}"),
         }
     }
@@ -1225,6 +1262,13 @@ pub async fn remove_account(state: &AppState, provider: String, account_id: Stri
     keychain::delete(&keychain::refresh_ref(&provider, &account_id)).map_err(err)?;
     let _ = state.store.set_setting(&publisher::exp_key(&provider, &account_id), "").await;
     let _ = state.store.set_setting(&format!("plan:{provider}:{account_id}"), "").await;
+    // C6: the persisted pauses and every per-account cache go too, or the same
+    // account connected again inherits a breaker it never tripped and a quota
+    // snapshot it never took.
+    let _ = state.store.clear_lane_pause(&provider, &account_id, "").await;
+    for k in publisher::account_setting_keys(&provider, &account_id) {
+        let _ = state.store.delete_setting(&k).await;
+    }
     // The manifest file goes with it: `accounts_changed` rewrites the whole
     // directory from the table, so a removed account leaves nothing behind.
     accounts_changed(state).await;

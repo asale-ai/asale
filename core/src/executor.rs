@@ -267,6 +267,11 @@ pub enum TaskOutcome {
     RateLimited { reset_at: Option<i64> },
     /// Upstream 5xx or transport failure.
     ServerError,
+    /// A 5xx/transport failure after which the call was handed to another
+    /// local account. Releases the slot and steps the lane aside briefly, but
+    /// the failure streak is charged only to the account that fails the
+    /// request for good (C4).
+    HandedOff,
     /// Upstream 401/403 — token invalid.
     AuthFailed,
     /// Upstream 403 aimed at the machine rather than the credential — a region
@@ -395,7 +400,11 @@ pub fn quota_exhausted(status: u16, body: &str) -> bool {
 /// broken for another can be described accurately (spec §4.5).
 pub trait TokenProvider: Send + Sync {
     /// Return the bearer token for a provider (e.g. "claude"), or None.
-    fn token_for(&self, provider: &str) -> Option<String>;
+    /// Default: none — a pool-backed provider leases per lane via `acquire`
+    /// and has no account-less token to hand out.
+    fn token_for(&self, _provider: &str) -> Option<String> {
+        None
+    }
 
     /// The id the provider's upstream knows one of this account's sessions
     /// by. Default: empty, which fingerprints anonymously — acceptable for
@@ -450,11 +459,11 @@ pub trait TokenProvider: Send + Sync {
 /// How long a relayed call waits for one of this account's concurrency slots
 /// before giving up on it.
 ///
-/// Bounded by what the gateway is willing to wait for a first frame
-/// (`ASALE_RELAY_IDLE_TIMEOUT_SECS`, five minutes by default), and set far below
-/// it: a queue this side is invisible to the buyer except as latency, and thirty
-/// seconds of latency is a worse answer than a failover to another seller.
-const LEASE_WAIT: Duration = Duration::from_secs(30);
+/// Bounded by what the gateway is willing to wait for the seller's *ack*
+/// (`relay_ack_timeout`, thirty seconds) and set below it (P1-8): a queue this
+/// side is invisible to the buyer except as latency, and a wait that outlives
+/// the ack timeout is answered by the gateway as a stalled seller, not by us.
+const LEASE_WAIT: Duration = Duration::from_secs(20);
 
 /// How often the wait re-checks. Short enough that a freed slot is picked up
 /// promptly, long enough that a saturated account is not spinning a lock.
@@ -487,8 +496,14 @@ async fn lease_for_task(
         }
         // Nothing to wait for: no account on this device can serve this lane at
         // all, which is a fact about the lane and is reported as one.
-        if !tokens.saturated(provider, model) || Instant::now() >= deadline {
+        if !tokens.saturated(provider, model) {
             return Err(LeaseFailure::NoAccount);
+        }
+        // Every slot stayed busy for the whole wait: a healthy lane that is
+        // full, which is the gateway's cue to place the call elsewhere — not a
+        // dead credential (P1-8).
+        if Instant::now() >= deadline {
+            return Err(LeaseFailure::Busy);
         }
         tokio::select! {
             _ = tokio::time::sleep(LEASE_POLL) => {}
@@ -502,6 +517,9 @@ async fn lease_for_task(
 enum LeaseFailure {
     /// No account on this device can serve this lane — now, or after waiting.
     NoAccount,
+    /// Every account that could serve it stayed at its concurrency ceiling for
+    /// the whole wait.
+    Busy,
     /// The consumer went away while the task was queued for a slot.
     Canceled,
 }
@@ -661,6 +679,22 @@ pub async fn execute(
                         send_error(out, &task_id, "TOKEN_EXPIRED", "no local token for provider", true);
                         if let Some(r) = records {
                             r.record(&task_id, &provider, "", &model, &Usage::default(), "no_token").await;
+                        }
+                    }
+                }
+                return;
+            }
+            // P1-8: a full lane is not a dead one. `LANE_BUSY` is retriable and
+            // the gateway maps it to a limited call rather than a lane failure;
+            // `TOKEN_EXPIRED` here used to cool and then quarantine a lane for
+            // being popular.
+            Err(LeaseFailure::Busy) => {
+                match held.take() {
+                    Some(f) => f.report(out, records, &task_id, &provider, &model).await,
+                    None => {
+                        send_error(out, &task_id, protocol::codes::LANE_BUSY, "every local slot for this lane is busy", true);
+                        if let Some(r) = records {
+                            r.record(&task_id, &provider, "", &model, &Usage::default(), "lane_busy").await;
                         }
                     }
                 }
@@ -835,7 +869,17 @@ pub async fn execute(
         let resp = match send {
             Ok(r) => r,
             Err(e) => {
-                tokens.report(&provider, &lease.account_id, &model, TaskOutcome::ServerError);
+                // The upstream was never reached, so nothing has been streamed and
+                // another account on this device is free to try. Decided before
+                // the report: a handed-off failure steps the lane aside without
+                // charging its streak (C4).
+                let handoff = failovers_left > 0 && tokens.has_alternate(&provider, &model, &lease.account_id);
+                tokens.report(
+                    &provider,
+                    &lease.account_id,
+                    &model,
+                    if handoff { TaskOutcome::HandedOff } else { TaskOutcome::ServerError },
+                );
                 let failure = HeldFailure {
                     code: "UPSTREAM_5XX",
                     message: format!("upstream send: {e}"),
@@ -844,9 +888,7 @@ pub async fn execute(
                     record_status: "upstream_error".into(),
                     account_id: lease.account_id.clone(),
                 };
-                // The upstream was never reached, so nothing has been streamed and
-                // another account on this device is free to try.
-                if failovers_left > 0 && tokens.has_alternate(&provider, &model, &lease.account_id) {
+                if handoff {
                     failovers_left -= 1;
                     held = Some(failure);
                     continue;
@@ -940,7 +982,7 @@ pub async fn execute(
                 }
                 TaskOutcome::AuthFailed => (protocol::codes::TOKEN_EXPIRED, true),
                 TaskOutcome::Unsupported | TaskOutcome::Blocked => (protocol::codes::LANE_UNUSABLE, true),
-                TaskOutcome::ServerError => (protocol::codes::UPSTREAM_5XX, true),
+                TaskOutcome::ServerError | TaskOutcome::HandedOff => (protocol::codes::UPSTREAM_5XX, true),
                 // The catch-all arm of the classification above: a 4xx nothing
                 // recognised. It is the one shape that fails identically at
                 // every seller, so it is the buyer's to fix and the only one
@@ -961,7 +1003,15 @@ pub async fn execute(
                     | TaskOutcome::Unsupported
                     | TaskOutcome::ServerError
             );
-            tokens.report(&provider, &lease.account_id, &model, outcome);
+            let handoff = account_scoped && failovers_left > 0 && tokens.has_alternate(&provider, &model, &lease.account_id);
+            // C4: a 5xx that is about to be retried on another account steps
+            // this lane aside without charging its streak; every other outcome
+            // is a fact about the account and is reported in full.
+            let reported = match outcome {
+                TaskOutcome::ServerError if handoff => TaskOutcome::HandedOff,
+                o => o,
+            };
+            tokens.report(&provider, &lease.account_id, &model, reported);
             tracing::warn!(
                 task = %task_id, provider = %provider, model = %model, status, cloaked, sent = %shape,
                 "upstream rejected: {}", detail.chars().take(400).collect::<String>()
@@ -976,7 +1026,7 @@ pub async fn execute(
             };
             // `tokens.report` above has already cooled the lane that failed, so the
             // next lease skips it on its own — no exclusion list to thread through.
-            if account_scoped && failovers_left > 0 && tokens.has_alternate(&provider, &model, &lease.account_id) {
+            if handoff {
                 failovers_left -= 1;
                 held = Some(failure);
                 continue;
@@ -1046,7 +1096,15 @@ pub async fn execute(
             // second attempt would put a second one on the same task. That case
             // stays the gateway's to transfer.
             Err(e) => {
-                tokens.report(&provider, &lease.account_id, &model, TaskOutcome::ServerError);
+                // Same C4 rule as the send failure above: only the account that
+                // fails the request for good is charged a streak.
+                let handoff = failovers_left > 0 && tokens.has_alternate(&provider, &model, &lease.account_id);
+                tokens.report(
+                    &provider,
+                    &lease.account_id,
+                    &model,
+                    if handoff { TaskOutcome::HandedOff } else { TaskOutcome::ServerError },
+                );
                 let failure = HeldFailure {
                     code: "UPSTREAM_5XX",
                     message: format!("body: {e}"),
@@ -1055,7 +1113,7 @@ pub async fn execute(
                     record_status: "upstream_error".into(),
                     account_id: lease.account_id.clone(),
                 };
-                if failovers_left > 0 && tokens.has_alternate(&provider, &model, &lease.account_id) {
+                if handoff {
                     failovers_left -= 1;
                     held = Some(failure);
                     continue;
@@ -2745,7 +2803,10 @@ data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\"
             self.next().map(|account_id| LeasedToken { token: "k".into(), account_id, ..Default::default() })
         }
         fn has_alternate(&self, _p: &str, _m: &str, except: &str) -> bool {
-            self.next().is_some_and(|a| a != except)
+            // Same contract as `AccountPool::alternate_available`: `except`
+            // is never a candidate, whether or not it has been reported yet.
+            let failed = self.failed.lock().unwrap();
+            ["acc-broke", "acc-funded"].iter().any(|a| *a != except && !failed.iter().any(|f| f == *a))
         }
         fn report(&self, _p: &str, account_id: &str, _m: &str, outcome: TaskOutcome) {
             if !matches!(outcome, TaskOutcome::Success { .. }) {

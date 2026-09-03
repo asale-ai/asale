@@ -398,9 +398,11 @@ pub async fn custom_has_responses(store: &LocalStore, account_id: &str) -> bool 
         .is_some_and(|v| v == "1")
 }
 
-/// Settings key holding the model list one custom endpoint last reported.
-fn custom_models_key(account_id: &str) -> String {
-    format!("custommodels:{account_id}")
+/// Settings key holding the model list one endpoint account last reported.
+/// C8: keyed by provider too — `account_id` is a free-text label, and the same
+/// label on a custom endpoint and a Qwen key used to share one cache row.
+pub fn custom_models_key(provider: &str, account_id: &str) -> String {
+    format!("custommodels:{provider}:{account_id}")
 }
 
 /// What one custom endpoint serves, keyed the way the market names it.
@@ -539,10 +541,20 @@ pub async fn store_custom_models(
     account_id: &str,
     endpoint_ids: &[String],
 ) -> anyhow::Result<CustomListing> {
+    store_endpoint_models(store, CUSTOM_PROVIDER, account_id, endpoint_ids).await
+}
+
+/// The same, for any provider whose accounts each carry their own endpoint.
+async fn store_endpoint_models(
+    store: &LocalStore,
+    provider: &str,
+    account_id: &str,
+    endpoint_ids: &[String],
+) -> anyhow::Result<CustomListing> {
     let tradable = tradable_models(store).await;
     let listing =
         CustomListing { fetched_at: now_secs(), aliases: index_custom_models(endpoint_ids, &tradable) };
-    store.set_setting(&custom_models_key(account_id), &serde_json::to_string(&listing)?).await?;
+    store.set_setting(&custom_models_key(provider, account_id), &serde_json::to_string(&listing)?).await?;
     Ok(listing)
 }
 
@@ -553,9 +565,9 @@ pub async fn store_custom_models(
 const CUSTOM_MODELS_TTL: i64 = 3600;
 
 /// Whatever model list is cached for one account, however stale.
-async fn cached_listing(store: &LocalStore, account_id: &str) -> Option<CustomListing> {
+async fn cached_listing(store: &LocalStore, provider: &str, account_id: &str) -> Option<CustomListing> {
     store
-        .get_setting(&custom_models_key(account_id))
+        .get_setting(&custom_models_key(provider, account_id))
         .await
         .ok()
         .flatten()
@@ -573,7 +585,7 @@ async fn endpoint_models(
     base: &str,
     wire: Wire,
 ) -> CustomListing {
-    let cached = cached_listing(store, &tool.account_id).await;
+    let cached = cached_listing(store, &tool.provider, &tool.account_id).await;
     if let Some(c) = &cached {
         if now_secs() - c.fetched_at < CUSTOM_MODELS_TTL {
             return c.clone();
@@ -589,7 +601,7 @@ async fn endpoint_models(
         false => asale_client_core::discovery::custom_endpoint_models(base, &key_value, wire).await,
     };
     match listed {
-        Ok(models) => match store_custom_models(store, &tool.account_id, &models).await {
+        Ok(models) => match store_endpoint_models(store, &tool.provider, &tool.account_id, &models).await {
             Ok(fresh) => {
                 if cached.as_ref().map(|c| &c.aliases) != Some(&fresh.aliases) {
                     tracing::info!(
@@ -621,7 +633,7 @@ async fn custom_endpoint_models(store: &LocalStore, tool: &asale_client_core::st
         Some(b) if !b.is_empty() => b,
         _ => {
             tracing::warn!(account = %tool.account_id, "custom account has no base URL recorded");
-            return cached_listing(store, &tool.account_id).await.unwrap_or_default();
+            return cached_listing(store, &tool.provider, &tool.account_id).await.unwrap_or_default();
         }
     };
     let wire = custom_wire(store, &tool.account_id).await;
@@ -921,6 +933,25 @@ struct RestConfigSource {
     gateway_ws_url: String,
     device_id: String,
     device_pubkey: String,
+    /// For the re-bind proof (M1): registering this device under another
+    /// asale user than the one it was last registered to is signed with the
+    /// key that user's registration holds.
+    identity: Arc<asale_client_core::DeviceIdentity>,
+    store: Arc<LocalStore>,
+}
+
+/// The `rebind_sig` object for a `POST /devices` body (M1): this device key
+/// signs `{device_id}|{ts}|{nonce}`. Always attached — the server only checks
+/// it when the id already belongs to another asale user, and the client cannot
+/// know that locally (an upgrade lands with no `device_owner` yet, so a
+/// conditional proof would leave exactly the split-identity devices unable to
+/// register). Signing is cheap; the key is the same one on the row when the
+/// machine was reused, which is the case the server is protecting.
+fn rebind_proof(identity: &asale_client_core::DeviceIdentity, device_id: &str) -> serde_json::Value {
+    let ts = now_secs();
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let sig = identity.sign_b64(format!("{device_id}|{ts}|{nonce}").as_bytes());
+    json!({"sig": sig, "ts": ts, "nonce": nonce})
 }
 
 #[async_trait]
@@ -928,15 +959,24 @@ impl ConfigSource for RestConfigSource {
     async fn ws_config(&self) -> anyhow::Result<WsConfig> {
         let mut access = keychain::get("access_token")?.ok_or_else(|| anyhow::anyhow!("not signed in"))?;
         let http = asale_client_core::http::plain();
+        let owner = self.store.get_setting(crate::state::DEVICE_OWNER_SETTING).await?.unwrap_or_default();
         // Same 401-then-refresh-once shape as `commands::server_client::authed`.
         // Without it an access token that merely expired parks the reconnect
         // loop on a dead token: it never refreshes, so it retries the same
         // rejected credential until the app restarts.
         for attempt in 0..2 {
+            let user = asale_client_core::cli_import::jwt_claims(&access)
+                .and_then(|c| c["sub"].as_str().map(String::from))
+                .unwrap_or_default();
+            let body = json!({
+                "device_id": self.device_id,
+                "device_pubkey": self.device_pubkey,
+                "rebind_sig": rebind_proof(&self.identity, &self.device_id),
+            });
             let resp = http
                 .post(format!("{}/api/v1/devices", self.server_api_base))
                 .header("authorization", format!("Bearer {access}"))
-                .json(&json!({"device_id": self.device_id, "device_pubkey": self.device_pubkey}))
+                .json(&body)
                 .send()
                 .await?;
             if resp.status() == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
@@ -951,6 +991,9 @@ impl ConfigSource for RestConfigSource {
                 .and_then(|t| t.as_str())
                 .ok_or_else(|| anyhow::anyhow!("device registration failed: {v}"))?
                 .to_string();
+            if !user.is_empty() && user != owner {
+                let _ = self.store.set_setting(crate::state::DEVICE_OWNER_SETTING, &user).await;
+            }
             return Ok(WsConfig {
                 gateway_ws_url: self.gateway_ws_url.clone(),
                 device_id: self.device_id.clone(),
@@ -1300,9 +1343,8 @@ impl PoolTokens {
 }
 
 impl TokenProvider for PoolTokens {
-    fn token_for(&self, provider: &str) -> Option<String> {
-        self.acquire(provider, "").map(|l| l.token)
-    }
+    // `token_for` keeps the trait default (`None`): no lane is ever leased for
+    // an empty model, so the old override could only ever answer `None` too.
 
     fn session_for(&self, account_id: &str) -> Option<String> {
         crate::session::claude_session_for(account_id)
@@ -1383,6 +1425,12 @@ impl TokenProvider for PoolTokens {
                     let d = "upstream error (5xx/transport)";
                     (pool.on_error(provider, account_id, model, UpstreamErrorKind::ServerError, d, now), d.to_string())
                 }
+                // C4: handed to another local account — slot back, lane aside
+                // for a moment, no streak charged and nothing to persist.
+                TaskOutcome::HandedOff => {
+                    pool.on_handoff(provider, account_id, model, now);
+                    (None, String::new())
+                }
                 TaskOutcome::AuthFailed => {
                     let d = "authentication failed (401/403)";
                     (pool.on_error(provider, account_id, model, UpstreamErrorKind::AuthFailed, d, now), d.to_string())
@@ -1450,13 +1498,19 @@ pub struct GatewayLaneControl {
 }
 
 impl asale_client_core::LaneControl for GatewayLaneControl {
-    fn on_lane_pause(&self, model: &str, reason: &str, requires_user: bool) {
+    fn on_lane_pause(&self, model: &str, reason: &str, requires_user: bool, lane: &str) {
         if model.is_empty() {
             return;
         }
         // Which account served it is not in the frame — the gateway only knows
         // the device — so every account that sells this model is paused. They
         // share one device and one operator; a resume clears them together.
+        //
+        // C3: the *provider* is in the frame, as the tail of the lane name. A
+        // codex account and a custom endpoint may both sell one model, and a
+        // breaker on the codex lane must not take the endpoint down with it.
+        // An empty lane (older gateway) keeps the old provider-blind behaviour.
+        let provider = lane.rsplit('|').next().filter(|p| !p.is_empty() && !lane.is_empty());
         //
         // Prefer the gateway's own reason: it distinguishes cases the client
         // cannot infer (a model the platform stopped trading is not a rate
@@ -1466,7 +1520,7 @@ impl asale_client_core::LaneControl for GatewayLaneControl {
         let mut touched: Vec<(String, String)> = Vec::new();
         if let Ok(mut pool) = self.pool.lock() {
             for v in pool.lane_views(now_secs()) {
-                if v.model == model && v.sell_enabled {
+                if v.model == model && v.sell_enabled && provider.is_none_or(|p| v.provider == p) {
                     touched.push((v.provider, v.account_id));
                 }
             }
@@ -1700,7 +1754,7 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
         for (provider, account_id, model, resume_at) in scoped_blocks {
             p.pause_lane(&provider, &account_id, &model, PauseReason::Quota, resume_at);
         }
-        p.apply_prices(&ratios);
+        p.apply_prices(&ratios, now_secs());
     }
 }
 
@@ -1885,8 +1939,10 @@ pub async fn start(state: &AppState) -> anyhow::Result<PublisherHandle> {
     let cfg_src: Arc<dyn ConfigSource> = Arc::new(RestConfigSource {
         server_api_base: state.cfg.server_api_base.clone(),
         gateway_ws_url: state.cfg.gateway_ws_url.clone(),
-        device_id: state.device_id.clone(),
-        device_pubkey: state.identity.public_key_b64(),
+        device_id: state.device_id(),
+        device_pubkey: state.identity().public_key_b64(),
+        identity: state.identity(),
+        store: state.store.clone(),
     });
 
     // Declare against what the platform trades *now*, not what it traded when
@@ -1911,7 +1967,7 @@ pub async fn start(state: &AppState) -> anyhow::Result<PublisherHandle> {
     // pinned gateway key cannot tell an authorized dispatch from a forged one,
     // and the cost of guessing wrong is the user's own subscription.
     let deps = PublisherDeps::with_pinned_quota_key(
-        state.identity.clone(),
+        state.identity(),
         Arc::new(PoolTokens {
             pool: state.pool.clone(),
             lanes: Some(lane_tx.clone()),
@@ -1963,7 +2019,9 @@ async fn refresh_due_tokens(store: &LocalStore, pool: &Arc<StdMutex<AccountPool>
         match adapter.refresh(&refresh_token).await {
             Ok(t) => {
                 persist_refresh(store, &tool.provider, &tool.account_id, &t).await?;
-                write_back_shared_credential(&tool, &t, now).await;
+                // `refresh_token` is the one this account held *before* the
+                // refresh — the proof the file still belongs to this login.
+                write_back_shared_credential(&tool, &t, &refresh_token, now).await;
                 // The vendor just handed us a working token for this account,
                 // which is a direct answer to whatever `auth` pause the old one
                 // earned. Cleared on disk before the pool, because the rebuild
@@ -2008,6 +2066,7 @@ async fn refresh_due_tokens(store: &LocalStore, pool: &Arc<StdMutex<AccountPool>
 async fn write_back_shared_credential(
     tool: &asale_client_core::store::ToolRow,
     t: &RefreshedToken,
+    old_refresh: &str,
     now: i64,
 ) {
     if tool.origin.as_deref() != Some("import") {
@@ -2035,6 +2094,7 @@ async fn write_back_shared_credential(
 
     let (provider, account) = (tool.provider.clone(), tool.account_id.clone());
     let (access, refresh, expires_at) = (t.access_token.clone(), t.refresh_token.clone(), t.expires_at);
+    let old_refresh = old_refresh.to_string();
     let _ = tokio::task::spawn_blocking(move || {
         for path in paths {
             let cred = asale_client_core::cli_import::RefreshedCred {
@@ -2043,9 +2103,19 @@ async fn write_back_shared_credential(
                 expires_at,
                 now_secs: now,
             };
+            // C1: the file is written only while it still holds *this* login.
+            // `sources` is a snapshot from import time; the user may have run
+            // `claude login` as somebody else since, and writing A's tokens
+            // into B's file signs the user's own CLI back into A.
             let written = std::fs::read_to_string(&path)
                 .map_err(anyhow::Error::from)
-                .and_then(|raw| asale_client_core::cli_import::patch_cli_credentials(&provider, &raw, cred))
+                .and_then(|raw| {
+                    let cur = asale_client_core::cli_import::parse_for(&provider, &raw)?;
+                    let same_login = cur.refresh_token.as_deref() == Some(old_refresh.as_str())
+                        || cur.account_hint.as_deref() == Some(account.as_str());
+                    anyhow::ensure!(same_login, "the file now holds another login; not writing");
+                    asale_client_core::cli_import::patch_cli_credentials(&provider, &raw, cred)
+                })
                 .and_then(|body| crate::tool_config::write_atomic(std::path::Path::new(&path), &body));
             match written {
                 Ok(()) => tracing::info!(provider = %provider, account = %account, %path, "wrote the refreshed token back to the CLI"),
@@ -2092,6 +2162,22 @@ pub fn upstream_acct_key(provider: &str, account_id: &str) -> String {
     format!("upacct:{provider}:{account_id}")
 }
 
+/// Every per-account settings row this daemon writes, for `remove_account` to
+/// delete (C6). A stale snapshot or entitlement cache would otherwise greet the
+/// same account when it is connected again.
+pub fn account_setting_keys(provider: &str, account_id: &str) -> Vec<String> {
+    vec![
+        exp_key(provider, account_id),
+        format!("plan:{provider}:{account_id}"),
+        upstream_acct_key(provider, account_id),
+        crate::commands::usage::quota_snapshot_key(provider, account_id),
+        crate::session::session_key(account_id),
+        codex_entitlement_key(account_id),
+        codex_entitlement_retry_key(account_id),
+        custom_models_key(provider, account_id),
+    ]
+}
+
 fn now_secs() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
@@ -2107,6 +2193,38 @@ mod tests {
         by_provider.insert("claude".to_string(), vec!["claude-opus-5".to_string()]);
         by_provider.insert("codex".to_string(), vec!["gpt-5.5".to_string(), "gpt-5.4".to_string()]);
         Some(SellableCatalog { fetched_at: 1, by_provider, ..Default::default() })
+    }
+
+    /// C3: a gateway `lane.pause` names its lane as `{device}|{provider}`, and
+    /// only that provider's accounts are paused — a custom endpoint selling the
+    /// same model beside a codex account stays up. An empty lane (older
+    /// gateway) pauses both, as before.
+    #[test]
+    fn a_gateway_pause_names_a_provider_and_spares_the_others() {
+        let mut codex = AccountRuntime::new("codex", "me@x", "codex:me@x").with_models(["gpt-5.6-luna"]);
+        codex.sell_enabled = true;
+        let mut custom = AccountRuntime::new("custom", "mine", "custom:mine").with_models(["gpt-5.6-luna"]);
+        custom.sell_enabled = true;
+        let mut pool = AccountPool::new(asale_client_core::Strategy::FillFirst);
+        pool.set_accounts(vec![codex, custom]);
+        let pool = Arc::new(StdMutex::new(pool));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctl = GatewayLaneControl { pool: pool.clone(), lanes: Some(tx) };
+
+        asale_client_core::LaneControl::on_lane_pause(&ctl, "gpt-5.6-luna", "repeated_failures", true, "dev-1|codex");
+        let mut paused = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            paused.push(ev.provider);
+        }
+        assert_eq!(paused, ["codex"], "only the named provider's lane is paused");
+
+        asale_client_core::LaneControl::on_lane_pause(&ctl, "gpt-5.6-luna", "repeated_failures", true, "");
+        let mut paused = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            paused.push(ev.provider);
+        }
+        paused.sort();
+        assert_eq!(paused, ["codex", "custom"], "an old gateway's frame still pauses every provider");
     }
 
     /// An auth failure is the *account's*, and `on_error` takes every lane it
