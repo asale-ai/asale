@@ -131,7 +131,7 @@
   <text class="t" x="74" y="322" font-size="13" fill="#edebfa" text-anchor="start" font-weight="700">ci-present</text>
   <text class="t" x="74" y="340" font-size="12" fill="#8b87a3" text-anchor="start">Run the test suite in CI. A pipeline that only lints or builds proves the code compiles, not that it works</text>
   <rect x="36" y="370" width="808" height="1" fill="#35334a"/>
-  <text class="t" x="36" y="394" font-size="12" fill="#8b87a3" text-anchor="start">asale-ai/asale · b05753e3</text>
+  <text class="t" x="36" y="394" font-size="12" fill="#8b87a3" text-anchor="start">asale-ai/asale · 76a25113</text>
   <text class="t" x="844" y="394" font-size="12" fill="#8b87a3" text-anchor="end">repolish v0.5.0</text>
   <text class="t" x="36" y="412" font-size="11" fill="#8b87a3" text-anchor="start">Scoring is deterministic. No model is involved.</text>
 </svg>
