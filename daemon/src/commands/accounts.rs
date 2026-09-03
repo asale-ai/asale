@@ -1004,6 +1004,9 @@ pub async fn connect_custom_endpoint(
         .upsert_tool(provider, &account_id, &token_ref, &["custom"], "api_key")
         .await
         .map_err(err)?;
+    // Same reason as `connect_api_key`: a key the endpoint just answered with
+    // is a fresh credential, so it lifts the auth pause a 401 left behind.
+    credential_replaced(state, provider, &account_id).await;
 
     let floor = min_ratio.map(|r| {
         asale_client_core::store::normalise_band(r, asale_client_core::store::RATIO_BAND_FULL.1).0
@@ -1178,6 +1181,10 @@ pub async fn connect_api_key(
         .upsert_tool(&provider, &account_id, &keychain::token_ref(&provider, &account_id), &["api-key"], "api_key")
         .await
         .map_err(err)?;
+    // A key that just passed `verify_api_key` is a fresh credential: clear the
+    // account's auth pause exactly as an OAuth login does, or re-entering the
+    // key after a 401 leaves every lane parked on "sign in again" forever.
+    credential_replaced(state, &provider, &account_id).await;
     accounts_changed(state).await;
 
     Ok(json!({"provider": provider, "account_id": account_id}))

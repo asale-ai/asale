@@ -76,7 +76,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "asale"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "asale-client-core",
  "asale-daemon",
@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "asale-cli"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -107,7 +107,7 @@ dependencies = [
 
 [[package]]
 name = "asale-client-core"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "anyhow",
  "asale-protocol",
@@ -131,7 +131,7 @@ dependencies = [
 
 [[package]]
 name = "asale-daemon"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "agent-firewall",
  "anyhow",
@@ -161,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "asale-protocol"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "serde",
  "serde_json",
