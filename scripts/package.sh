@@ -161,7 +161,13 @@ if [[ "$PROFILE" == "--debug" ]]; then out="$out/debug/bundle"; else out="$out/r
 # 装订到 dmg 上还顺带让首次打开能离线通过（否则要现场联网查 Apple 的公证库）。
 #
 # 这里不重新签名，dmg 已经被 tauri 签过；只是补提交公证 + stapler。
-if [[ "$os" == "Darwin" && -d "$out" ]]; then
+#
+# --no-sign 必须连公证一起关：没签名的 dmg 提交上去，notarytool 回 Invalid，紧接着
+# stapler 找不到票据 exit 65 —— 一趟本该成功的试打包就成了失败的构建。签名和公证是
+# 一件事的两半。
+if [[ "$os" == "Darwin" && $SIGN == 0 ]]; then
+  echo "   --no-sign：跳过公证"
+elif [[ "$os" == "Darwin" && -d "$out" ]]; then
   # 用普通变量记有没有凭据，不靠 ${#arr[@]}：macOS 自带的还是 bash 3.2，
   # set -u 下对空数组取值会直接 unbound variable 退出。
   have_notary=0
