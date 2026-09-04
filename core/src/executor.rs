@@ -197,15 +197,15 @@ const CLAUDE_IDENTITY_HEADERS: &[&str] = &[
     "x-client-request-id",
 ];
 
-/// The fixed header identity Claude Code 2.1.220 (`@anthropic-ai/sdk` 0.94.0)
+/// The fixed header identity Claude Code 2.1.260 (`@anthropic-ai/sdk` 0.94.0)
 /// puts on every Messages call. Mirrors CLIProxyAPI's `identityHeader` block.
 ///
 /// The body fingerprint alone is not what Anthropic reads: a request claiming
-/// `cc_version=2.1.220` from a `claude-cli/1.0` user-agent with none of the SDK
+/// `cc_version=2.1.260` from a `claude-cli/1.0` user-agent with none of the SDK
 /// headers is exactly the mismatch that reads as a third-party client.
 pub fn claude_identity_headers(session_id: &str) -> Vec<(&'static str, String)> {
     vec![
-        ("user-agent", asale_protocol::spec(Provider::Claude).user_agent.to_string()),
+        ("user-agent", format!("claude-cli/{} (external, cli)", claude_code_version())),
         ("anthropic-dangerous-direct-browser-access", "true".into()),
         ("x-app", "cli".into()),
         ("x-stainless-retry-count", "0".into()),
@@ -221,7 +221,7 @@ pub fn claude_identity_headers(session_id: &str) -> Vec<(&'static str, String)> 
     ]
 }
 
-/// The `@anthropic-ai/sdk` and Node versions Claude Code 2.1.220 ships with.
+/// The `@anthropic-ai/sdk` and Node versions Claude Code 2.1.260 ships with.
 const CLAUDE_SDK_VERSION: &str = "0.94.0";
 const CLAUDE_NODE_VERSION: &str = "v26.3.0";
 
@@ -1344,7 +1344,7 @@ fn kimi_device_id(account_id: &str) -> String {
 /// (`claude_executor_cloaking.go`):
 ///
 ///  * a first system block carrying `x-anthropic-billing-header` with the
-///    same version attribution the CLI puts there (`cc_version=2.1.220.xxx`),
+///    same version attribution the CLI puts there (`cc_version=2.1.260.xxx`),
 ///  * a second block with the `You are Claude Code…` preamble and the
 ///    ephemeral cache breakpoint the CLI sets,
 ///  * `metadata.user_id` as the CLI's own JSON blob
@@ -1432,7 +1432,7 @@ pub fn with_claude_code_system(body: &[u8], session_id: &str) -> Option<Vec<u8>>
     let billing = format!(
         "{prefix} cc_version={version}.{hash}; cc_entrypoint=cli;",
         prefix = BILLING_PREFIX,
-        version = CLAUDE_CODE_VERSION,
+        version = claude_code_version(),
         hash = fingerprint_hash
     );
     let mut system = vec![
@@ -1484,16 +1484,95 @@ fn spent_breakpoints(v: &serde_json::Value) -> usize {
 
 /// The line Claude Code prepends to its system prompt.
 const BILLING_PREFIX: &str = "x-anthropic-billing-header:";
-/// The version the fingerprint claims. Bumped together with the UA the
-/// gateway stamps for this provider.
-const CLAUDE_CODE_VERSION: &str = "2.1.220";
+/// The version the fingerprint claims when npm cannot be reached. Kept in step
+/// with `asale_protocol::CLAUDE_CLI_USER_AGENT`, which a test below holds to it.
+const CLAUDE_CODE_VERSION: &str = "2.1.260";
+/// Where `claude update` looks, and so where we look.
+const CLAUDE_CODE_NPM: &str = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
+/// How long a version answer is trusted before another is fetched.
+const CLAUDE_CODE_TTL: Duration = Duration::from_secs(6 * 3600);
+static CLAUDE_CODE_LATEST: std::sync::RwLock<Option<(String, Instant)>> = std::sync::RwLock::new(None);
+static CLAUDE_CODE_FETCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The Claude Code version this client claims, in the user-agent and in the
+/// billing header alike.
+///
+/// Anthropic gates new models on it — a subscription request from
+/// `claude-cli/2.1.220` is answered `400 claude_code_version_too_old` for a
+/// model that shipped with 2.1.251, which reads on our side as the model being
+/// broken. A number baked into the binary is therefore stale from the day the
+/// next model ships, so npm's `latest` is asked instead, at most every
+/// [`CLAUDE_CODE_TTL`], and the build's own number stands in until an answer
+/// arrives (which is exactly where this was before).
+///
+/// Never blocks a call: a request that finds the cache cold or stale kicks off
+/// the fetch and uses what it has.
+pub(crate) fn claude_code_version() -> String {
+    let cached = CLAUDE_CODE_LATEST.read().unwrap().clone();
+    match cached {
+        Some((v, at)) if at.elapsed() < CLAUDE_CODE_TTL => v,
+        Some((v, _)) => {
+            refresh_claude_code_version();
+            v
+        }
+        None => {
+            refresh_claude_code_version();
+            CLAUDE_CODE_VERSION.to_string()
+        }
+    }
+}
+
+/// Ask npm, once at a time, off the request path. A miss leaves the cache as it
+/// was, so an offline seller keeps claiming the built-in version rather than
+/// re-fetching on every call.
+fn refresh_claude_code_version() {
+    use std::sync::atomic::Ordering;
+    // Tests must not reach npm: the answer would change what the wire-format
+    // assertions below see, the day Anthropic ships the next release.
+    if cfg!(test) {
+        return;
+    }
+    let Ok(handle) = tokio::runtime::Handle::try_current() else { return };
+    if CLAUDE_CODE_FETCHING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    handle.spawn(async move {
+        if let Some(v) = fetch_claude_code_version().await {
+            *CLAUDE_CODE_LATEST.write().unwrap() = Some((v, Instant::now()));
+        }
+        CLAUDE_CODE_FETCHING.store(false, Ordering::SeqCst);
+    });
+}
+
+async fn fetch_claude_code_version() -> Option<String> {
+    let body: serde_json::Value = crate::http::upstream()
+        .get(CLAUDE_CODE_NPM)
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    let v = body.get("version")?.as_str()?.trim();
+    // A proxy's captive-portal page deserializes as anything; only a plain
+    // dotted release goes anywhere near the user-agent. Pre-releases are
+    // rejected too — claiming a build Anthropic has not shipped widely is the
+    // opposite of blending in.
+    is_release_version(v).then(|| v.to_string())
+}
+
+fn is_release_version(v: &str) -> bool {
+    let parts: Vec<&str> = v.split('.').collect();
+    parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.len() <= 5 && p.chars().all(|c| c.is_ascii_digit()))
+}
 /// The fingerprint hash Claude Code puts behind the billing version, derived
 /// from the latest user message's text so it tracks the request. Mirrors
 /// CLIProxyAPI's `computeFingerprint`.
 fn fingerprint_hash(message_text: String) -> String {
     let chars: Vec<char> = message_text.chars().collect();
     let picked: String = [4usize, 7, 20].iter().map(|&i| chars.get(i).copied().unwrap_or('0')).collect();
-    let input = format!("{FINGERPRINT_SALT}{picked}{CLAUDE_CODE_VERSION}");
+    let input = format!("{FINGERPRINT_SALT}{picked}{}", claude_code_version());
     let hash = format!("{:x}", sha2::Sha256::digest(input.as_bytes()));
     hash[..3].to_string()
 }
@@ -1560,7 +1639,7 @@ fn claude_device_id() -> String {
 /// CLIProxyAPI's `generateFakeUserIDWithSessionID`.
 ///
 /// The old `user_<device>_session_<session>` spelling this replaced was retired
-/// by the CLI years before the 2.1.220 the billing header claims, so sending it
+/// by the CLI years before the 2.1.260 the billing header claims, so sending it
 /// alongside that version was itself a third-party tell.
 fn claude_code_user_id(session_id: &str) -> String {
     json!({
@@ -3169,7 +3248,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
 
     /// A caller's own `metadata.user_id` is kept only when it is one Claude
     /// Code would have written. Anything else — including the old
-    /// `user_x_session_y` spelling the CLI retired long before the 2.1.220 the
+    /// `user_x_session_y` spelling the CLI retired long before the 2.1.260 the
     /// billing header claims — is a third-party tell, so it is replaced.
     #[test]
     fn only_a_claude_code_shaped_user_id_survives() {
@@ -3224,7 +3303,8 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
         let expect = |text: &str| {
             let chars: Vec<char> = text.chars().collect();
             let picked: String = [4usize, 7, 20].iter().map(|&i| chars.get(i).copied().unwrap_or('0')).collect();
-            let h = format!("{:x}", sha2::Sha256::digest(format!("59cf53e54c78{picked}2.1.220").as_bytes()));
+            let v = claude_code_version();
+            let h = format!("{:x}", sha2::Sha256::digest(format!("59cf53e54c78{picked}{v}").as_bytes()));
             h[..3].to_string()
         };
         for text in ["", "hi", "the quick brown fox jumps over the lazy dog"] {
@@ -3301,8 +3381,35 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
     /// fingerprint exists to avoid.
     #[test]
     fn the_user_agent_and_the_billing_version_agree() {
-        let ua = asale_protocol::spec(Provider::Claude).user_agent;
-        assert!(ua.contains(CLAUDE_CODE_VERSION), "{ua} does not claim {CLAUDE_CODE_VERSION}");
+        // Offline — no runtime here to fetch with — so the built-in version is
+        // the one claimed, and the header the gateway would have stamped has to
+        // spell it exactly the same way the one we emit does.
+        let ua = claude_identity_headers("ses-1").into_iter().find(|(k, _)| *k == "user-agent").unwrap().1;
+        assert_eq!(ua, asale_protocol::spec(Provider::Claude).user_agent, "the UA format drifted from the protocol's");
+        assert!(ua.contains(&claude_code_version()), "{ua} does not claim {}", claude_code_version());
+    }
+
+    /// npm really does answer with a plain release string — the one thing the
+    /// parser above cannot check for itself. Ignored by default: it is a call
+    /// over the network, run it when npm's shape is in question.
+    #[tokio::test]
+    #[ignore = "hits registry.npmjs.org"]
+    async fn npm_answers_with_a_release_version() {
+        let v = fetch_claude_code_version().await.expect("npm answered");
+        assert!(is_release_version(&v), "{v}");
+    }
+
+    /// npm's answer goes straight into the user-agent, so anything that is not
+    /// a plain released version — a captive portal's HTML, a `-beta` build —
+    /// has to leave the built-in number standing.
+    #[test]
+    fn only_a_plain_release_version_is_accepted() {
+        for good in ["2.1.260", "10.0.1"] {
+            assert!(is_release_version(good), "{good}");
+        }
+        for bad in ["", "2.1", "2.1.260-beta.1", "2.1.x", "<!DOCTYPE html>", "2.1.260.1", "2..1"] {
+            assert!(!is_release_version(bad), "{bad}");
+        }
     }
 
     #[tokio::test]

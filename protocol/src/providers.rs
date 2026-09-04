@@ -185,12 +185,17 @@ impl ProviderSpec {
 /// The user-agent Claude Code puts on the wire.
 ///
 /// Versioned on purpose and not decorative: the request body carries an
-/// `x-anthropic-billing-header: cc_version=2.1.220…` line, and a bearer that
+/// `x-anthropic-billing-header: cc_version=2.1.260…` line, and a bearer that
 /// claims one version in the body while announcing another in the user-agent is
-/// the mismatch Anthropic reads as a third-party client. Bump it together with
-/// `asale_client_core::executor::CLAUDE_CODE_VERSION`, which a test in that
-/// crate holds to this string.
-pub const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.220 (external, cli)";
+/// the mismatch Anthropic reads as a third-party client.
+///
+/// The version here is only the fallback and the format of record. A seller's
+/// client asks npm what the current Claude Code release is and stamps that in
+/// both places instead — Anthropic gates new models on the version, so a number
+/// frozen at build time stops working the day a model ships. See
+/// `asale_client_core::executor::claude_code_version`; a test in that crate
+/// holds the offline spelling to this exact string.
+pub const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.260 (external, cli)";
 
 const ANTHROPIC_MESSAGES: &str = "https://api.anthropic.com/v1/messages";
 

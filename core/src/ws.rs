@@ -662,6 +662,11 @@ async fn run_session(
                                         break;
                                     }
                                     was_online = true;
+                                    // Warm the Claude Code version before the
+                                    // first call needs it: a cold cache would
+                                    // otherwise spend that call on the version
+                                    // baked into this build.
+                                    let _ = crate::executor::claude_code_version();
                                     let _ = state_tx.send(ConnState::Online);
                                 }
                                 protocol::T_HTTP_REQUEST => {
