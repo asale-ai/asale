@@ -69,9 +69,25 @@
 
 name: release
 
+# Also builds on main, without packaging — that run exists only to fill the Rust cache.
+#
+# GitHub scopes a cache to the ref that wrote it, and a run can only read its own ref's
+# caches plus the default branch's. Every release is a tag push, so each release wrote
+# `v0-rust-…-<lockhash>` into refs/tags/vX.Y.Z, where the *next* tag could never see it:
+# v0.7.7 / v0.7.8 / v0.7.9 each stored that cache under the exact same key and every one
+# of them started from `No cache found` — a cold build of the whole dependency tree on all
+# three runners, ~8 of the 15 minutes. Building on main puts the cache on the default
+# branch, where tag runs can read it.
 on:
   push:
     tags: ["v*"]
+    branches: ["main"]
+    # Deliberately no `paths:` filter. It would cut the main runs down to Rust-only
+    # changes, but a `paths` filter under `push` applies to the tag pushes in the same
+    # block as well — and a release whose commit happens to touch no matching file would
+    # then build nothing at all. Not worth the runner minutes it saves: publish.sh pushes
+    # main and the tag together, so this is about one warm run per release anyway, and the
+    # repo is public (Actions minutes are free).
   workflow_dispatch:
     inputs:
       sign:
@@ -120,6 +136,10 @@ jobs:
             artifact: asale-linux-x64
             bundle: target/release/bundle
 
+    env:
+      # False only for the cache-warming push to main: compile everything, package nothing.
+      PACKAGE: ${{ github.event_name != 'push' || github.ref_type == 'tag' }}
+
     steps:
       # The actions below are pinned to the major versions running on the node24 runtime:
       # the v4 series runs node20, which runners no longer provide — it is force-downgraded
@@ -148,6 +168,9 @@ jobs:
         with:
           # A single key shared by three platforms makes them clobber each other — split per job.
           key: ${{ matrix.artifact }}
+          # Writing from a tag run is pure waste: nothing can ever read it back, and it
+          # evicts the caches on main that can. Read on every run, write only on main.
+          save-if: ${{ github.ref_type != 'tag' }}
 
       # Tauri v2 links against webkit2gtk-4.1 on Linux; without it cargo build fails at the
       # pkg-config stage. package.sh catches this earlier and prints this same package list.
@@ -273,7 +296,7 @@ jobs:
       # (pwsh's ` is especially prone to parse errors from this).
       - name: Package (macOS / Linux)
         if: runner.os != 'Windows'
-        run: ./scripts/package.sh ${{ (github.event_name == 'workflow_dispatch' && !inputs.sign) && '--no-sign' || '' }}
+        run: ./scripts/package.sh ${{ (env.PACKAGE != 'true' || (github.event_name == 'workflow_dispatch' && !inputs.sign)) && '--no-sign' || '' }}
 
       # Authenticode signing tooling. Only needed when the Azure credentials are actually
       # configured — the previous step wrote them to $GITHUB_ENV only if non-empty, so this
@@ -287,21 +310,21 @@ jobs:
       # cargo install compiles from source (~2-3 min, not covered by rust-cache). Version is
       # pinned so a release build cannot change signing behavior on its own.
       - name: Windows signing tooling
-        if: runner.os == 'Windows' && env.AZURE_CLIENT_ID != ''
+        if: env.PACKAGE == 'true' && runner.os == 'Windows' && env.AZURE_CLIENT_ID != ''
         shell: pwsh
         run: |
           cargo install artifact-signing-cli --version ^0.11 --locked
 
       # v5 already runs on node24; setup-dotnet is only here for the signing dlib.
       - uses: actions/setup-dotnet@v5
-        if: runner.os == 'Windows' && env.AZURE_CLIENT_ID != ''
+        if: env.PACKAGE == 'true' && runner.os == 'Windows' && env.AZURE_CLIENT_ID != ''
         with:
           dotnet-version: "8.0.x"
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: pwsh scripts/package.ps1 ${{ (github.event_name == 'workflow_dispatch' && !inputs.sign) && '-NoSign' || '' }}
+        run: pwsh scripts/package.ps1 ${{ (env.PACKAGE != 'true' || (github.event_name == 'workflow_dispatch' && !inputs.sign)) && '-NoSign' || '' }}
 
       # Signing configured but the installers came out unsigned is the one failure mode that
       # looks green all the way to the download page, so assert it here rather than trusting
@@ -309,7 +332,7 @@ jobs:
       # Skipped on a sign=false trial run: package.ps1 treats -NoSign as "sign nothing", so
       # there would be no signature to verify.
       - name: Verify Authenticode signature
-        if: runner.os == 'Windows' && env.AZURE_CLIENT_ID != '' && (github.event_name != 'workflow_dispatch' || inputs.sign)
+        if: env.PACKAGE == 'true' && runner.os == 'Windows' && env.AZURE_CLIENT_ID != '' && (github.event_name != 'workflow_dispatch' || inputs.sign)
         shell: pwsh
         run: |
           $files = @(Get-ChildItem "${{ matrix.bundle }}" -Recurse -Include *.msi, *-setup.exe)
@@ -325,6 +348,7 @@ jobs:
       # Artifacts are scattered across bundle/ subdirectories (dmg/, nsis/, deb/…); flatten
       # them into one directory so the download is ready to drop onto the download site.
       - name: Collect artifacts
+        if: env.PACKAGE == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -342,6 +366,7 @@ jobs:
           [[ -n "$(ls -A artifacts/)" ]] || { echo "::error::no installer artifacts were produced"; exit 1; }
 
       - uses: actions/upload-artifact@v6
+        if: env.PACKAGE == 'true'
         with:
           name: ${{ matrix.artifact }}
           path: artifacts/*
