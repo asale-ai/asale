@@ -343,11 +343,15 @@ fn serve_asset(path: &str) -> Response {
                 .header("x-frame-options", "DENY")
                 .header(
                     header::CONTENT_SECURITY_POLICY,
-                    // frame-src: 「对话」页把 Studio 嵌进 iframe（src/pages/Studio.tsx）。
-                    // 没有这一条时 default-src 'self' 兜底把它拦掉，页面一片空白。
+                    // frame-src:「应用」页把 Studio、Swarm 和 AEO 嵌进 iframe
+                    //（src/pages/Apps.tsx）。没有这一条时 default-src 'self'
+                    // 兜底把它拦掉，页面一片空白。环回地址是 dev 构建框的本地
+                    // bundle（`dev:app` 把 VITE_ASALE_STUDIO 等钉到 9500/9520）。
                     "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; \
                      script-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:* \
-                     ws://127.0.0.1:* ws://localhost:*; frame-src https://studio.asale.ai; \
+                     ws://127.0.0.1:* ws://localhost:*; \
+                     frame-src https://studio.asale.ai https://swarm.asale.ai https://aeo.asale.ai \
+                     http://127.0.0.1:* http://localhost:*; \
                      frame-ancestors 'none'; base-uri 'none'",
                 )
                 .body(Body::from(f.data.into_owned()))
@@ -512,6 +516,15 @@ rpc_args! {
         #[serde(default, alias = "max_ratio_pct")] max_ratio_pct: Option<i32>,
     }
     KeyIdArgs      { id: i64 }
+    // Approving an authorization request for a framed app. `app` names which of
+    // ours is asking (the client_id is pinned from it, never sent); the rest is
+    // the frame's own PKCE request, which is public by construction.
+    AppAuthArgs    {
+        app: String,
+        #[serde(alias = "redirect_uri")] redirect_uri: String,
+        state: String,
+        #[serde(alias = "code_challenge")] code_challenge: String,
+    }
     ApiKeyArgs     {
         provider: String,
         #[serde(alias = "api_key")] api_key: String,
@@ -752,6 +765,12 @@ async fn rpc(
         "reveal_api_key" => {
             let p: KeyIdArgs = args(&a)?;
             commands::reveal_api_key(st, p.id).await?
+        },
+        // The framed apps' sign-in: this device's session approves, the frame
+        // redeems. See `commands/app_auth.rs`.
+        "app_authorize" => {
+            let p: AppAuthArgs = args(&a)?;
+            commands::app_authorize(st, p.app, p.redirect_uri, p.state, p.code_challenge).await?
         },
         // Point this machine's buying tools at one key without changing which
         // key the account calls its default.

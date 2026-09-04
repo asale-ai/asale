@@ -348,11 +348,24 @@ p, li, .sub { text-wrap: pretty; }
   gap: 1px;
   transition: width var(--dur) var(--ease);
 }
-/* Collapsed: the icon column and nothing else. The width is the two-column
-   grid with the label column taken away — rail padding + item padding + the
-   icon slot — so every glyph stays on the exact x it sits on when expanded and
-   the rail does not appear to shuffle as it narrows. */
+/* Collapsed: the icon column and nothing else. The width is the two-column grid
+   with the label column taken away — rail padding + item padding + the icon
+   slot.
+   Folded, every row centres its glyph in that column: expanded, the glyphs are
+   left-aligned inside a 26px slot so the labels beside them share one x, and
+   keeping that alignment with the labels gone left a rail whose right half was
+   empty and whose 26px logo mark sat 4px right of the 17px icons under it. */
 .sidebar.collapsed { width: 66px; }
+.sidebar.collapsed .logo,
+.sidebar.collapsed .navitem,
+.sidebar.collapsed .sidebar-user,
+.sidebar.collapsed .nav-ico { justify-content: center; }
+/* Both marks drop the optical pull they carry when there is a label column to
+   line up with: folded there is none, and the pull is what would knock them off
+   the axis the glyphs now sit on. */
+.sidebar.collapsed .logo-mark,
+.sidebar.collapsed .su-avatar,
+.sidebar.collapsed .sidebar-user.is-loading > .skel:first-child { margin-left: 0; margin-right: 0; }
 .sidebar.collapsed .nav-label,
 .sidebar.collapsed .su-text,
 .sidebar.collapsed .logo span { display: none; }
@@ -390,6 +403,15 @@ p, li, .sub { text-wrap: pretty; }
   font-size: var(--fs-lead); font-weight: 600; letter-spacing: -0.02em;
   padding: 0 var(--s8) var(--s24);
 }
+/* The rail's own fold control, at the far end of the row it belongs to.
+   Folded, the row has one column, so the button drops under the mark and keeps
+   the x every glyph in the rail sits on — it is one of them now. */
+.logo-fold { margin-left: auto; }
+.sidebar.collapsed .logo {
+  flex-direction: column; align-items: center; gap: var(--s8);
+  padding-bottom: var(--s16);
+}
+.sidebar.collapsed .logo-fold { margin-left: 0; }
 .logo .logo-badge {
   font-size: var(--fs-micro); font-weight: 600; letter-spacing: 0.04em;
   text-transform: uppercase; line-height: 1;
@@ -397,9 +419,14 @@ p, li, .sub { text-wrap: pretty; }
   color: var(--warning); background: var(--warning-soft);
   border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
 }
+/* Same pull as `.su-avatar` below, for the same reason: the mark fills the 26px
+   icon column while the nav glyphs under it are 17px left-aligned in it, so a
+   shared left edge puts the mark 4px right of their centre line. The space goes
+   back to the gap, so the labels keep their column. */
 .logo .logo-mark {
   width: var(--nav-ico-w); height: var(--nav-ico-w); border-radius: var(--r-sm); flex-shrink: 0;
   object-fit: contain; display: block;
+  margin-left: -4px; margin-right: var(--s4);
 }
 /* The beta mark carries a sentence, so its tooltip wraps and hangs under the
    badge — the sidebar starts at the top of the window, and there is nothing
@@ -2776,16 +2803,38 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
      half-empty window. */
   margin: 0;
 }
-.studio-page { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.app-page { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 /* The frame is full-bleed; anything the page shows *instead* of it (the error,
-   the "no Studio in this build" note) is ordinary page content and keeps the
-   margin the rest of the app is drawn with. */
-.studio-page > :not(.studio-frame) { margin: var(--s24); }
-.studio-frame {
+   the "not in this build" note) is ordinary page content and keeps the margin
+   the rest of the app is drawn with. */
+.app-page > :not(.app-frame) { margin: var(--s24); }
+.app-frame {
   flex: 1; width: 100%; min-height: 0; border: none;
   background: var(--bg);
 }
-/* Studio owns the window: the app's own top bar is hidden while it is open, so
-   the frame runs edge to edge, top to bottom. Hidden rather than unmounted —
-   the status readout inside it polls, and remounting would restart the poll. */
+/* The card list. Three applications, one sentence each — a grid rather than a
+   column, because a sentence is what makes them distinguishable and stacking
+   them full-width made three of them read as a settings list. */
+.app-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: var(--s12); }
+.app-cards .app-card {
+  margin: 0; display: flex; flex-direction: column; align-items: flex-start;
+  gap: var(--s8); text-align: left; cursor: pointer;
+  transition: border-color var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+.app-card:hover { border-color: var(--line-2); transform: translateY(-2px); }
+.app-card-ico {
+  width: 36px; height: 36px; border-radius: var(--r-sm); display: grid; place-items: center;
+  background: var(--surface-2); color: var(--accent);
+}
+.app-card-name { font-weight: 600; }
+.app-card-sub { color: var(--fg-2); font-size: var(--fs-meta); line-height: 1.6; flex: 1; }
+.app-card-go {
+  display: inline-flex; align-items: center; gap: var(--s4);
+  color: var(--accent); font-size: var(--fs-meta);
+}
+
+/* An open application owns the window: the app's own top bar is hidden while
+   it is, so the frame runs edge to edge, top to bottom. Hidden rather than
+   unmounted — the status readout inside it polls, and remounting would restart
+   the poll. */
 .topbar.hidden { display: none; }

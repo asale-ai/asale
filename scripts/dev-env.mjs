@@ -20,6 +20,14 @@ export const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /** The four values that name a stack: three endpoints plus the key that proves
  *  the gateway on the other end is allowed to spend a seller's quota. They
  *  travel together — see `applyStack`. */
+/** The three framed apps' addresses. Ports are their `pnpm dev` defaults:
+ *  studio 9500, swarm 9520, aeo 9600. */
+const FRAME_PINS = {
+  VITE_ASALE_STUDIO: "http://localhost:9500",
+  VITE_ASALE_SWARM: "http://localhost:9520",
+  VITE_ASALE_AEO: "http://localhost:9600",
+};
+
 const STACK_KEYS = [
   "ASALE_SERVER_API",
   "ASALE_GATEWAY_API",
@@ -133,20 +141,21 @@ export function applyStack(env, { prod }) {
       process.exit(1);
     }
     console.warn("⚠ --prod: this build trades on the LIVE market");
-    // `--prod` means packaging's values, so the compiled default (the live
-    // Studio bundle) has to win — a shell that happens to carry the dev pin
-    // would otherwise frame a localhost bundle in a production run.
-    delete env.VITE_ASALE_STUDIO;
+    // `--prod` means packaging's values, so the compiled defaults (the live
+    // bundles) have to win — a shell that happens to carry a dev pin would
+    // otherwise frame a localhost bundle in a production run.
+    for (const key of Object.keys(FRAME_PINS)) delete env[key];
     return env;
   }
   for (const key of STACK_KEYS) delete env[key];
-  // Where the Studio tab's iframe loads from. A stack choice like the four
-  // above, but a *frontend* one — the daemon knows nothing about it, and
-  // `links.ts` defaults to studio.asale.ai for a packaged build. Framing the
-  // production bundle from a dev client is not merely inconsistent: that copy
-  // is built against api/gw.asale.ai, so a locally-minted key would be sent to
-  // the live gateway, which has never heard of it.
-  pinAll(env, { VITE_ASALE_STUDIO: "http://localhost:9500" });
+  // Where the framed apps load from. A stack choice like the four above, but a
+  // *frontend* one — the daemon knows nothing about it, and `links.ts` defaults
+  // to the live addresses for a packaged build. Framing a production bundle
+  // from a dev client is not merely inconsistent: that copy is built against
+  // api/gw.asale.ai, so the authorization code this shell mints on the local
+  // server would be redeemed at the live token endpoint, which has never heard
+  // of it.
+  pinAll(env, FRAME_PINS);
   const pubkey = localQuotaPubkey();
   if (pubkey) {
     pinAll(env, { ASALE_QUOTA_PUBKEY: pubkey });

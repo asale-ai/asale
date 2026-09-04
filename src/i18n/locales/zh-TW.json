@@ -18,7 +18,7 @@
     "apikeys": "API 金鑰",
     "betaTip": "Asale 目前處於 Beta 階段，更新會比較頻繁。若遇到問題，或是費用計算有誤，可以寄信到 support@asale.ai 與我們聯絡。",
     "security": "安全控制",
-    "studio": "對話",
+    "apps": "應用",
     "collapse": "收合側欄",
     "expand": "展開側欄"
   },
@@ -1371,8 +1371,16 @@
     "downloaded": "{{done}} MB",
     "installing": "下載完成，Asale 將關閉、安裝更新，然後自動重新開啟。"
   },
-  "studio": {
-    "sub": "用市場上的全部模型對話、翻譯和繪圖。",
-    "unavailable": "這個版本沒有 Studio。"
+  "apps": {
+    "title": "應用",
+    "sub": "用你的 Asale 餘額運作的三個應用，都會自動用目前登入的帳號進入。",
+    "open": "開啟",
+    "unavailable": "這個版本沒有內建應用。",
+    "studio": "對話",
+    "studioSub": "用市場上的全部模型對話、翻譯和繪圖。",
+    "swarm": "群體推演",
+    "swarmSub": "把方案或草稿交給一群 AI 角色反覆推演辯論，最後給你一份結論報告。",
+    "aeo": "AI 可見度",
+    "aeoSub": "追蹤 ChatGPT、Claude 等答案引擎如何描述你的品牌、引用了哪些頁面。"
   }
 }

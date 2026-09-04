@@ -135,6 +135,11 @@ export const IconGithub = ({ size, ...rest }: P) => (
 
 /* Studio. A spark rather than a speech bubble: the tab is not "messages", it is
    the place where a model is put to work — chat, translation, drawing, notes. */
+/** A side panel with its divider — the "fold this panel" glyph, not an arrow.
+ *  The same mark studio, swarm, aeo and the website's console use. */
+export const IconPanelLeft = (p: P) => (<Svg {...p}><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /></Svg>);
+export const IconChat = (p: P) => (<Svg {...p}><path d="M21 11.5a8 8 0 0 1-8.5 8 9 9 0 0 1-3.4-.6L4 20.5l1.3-3.6A8 8 0 0 1 12.5 3.5a8 8 0 0 1 8.5 8Z" /></Svg>);
+export const IconUsers = (p: P) => (<Svg {...p}><circle cx="9" cy="8" r="3.6" /><path d="M2.5 20.5a6.5 6.5 0 0 1 13 0M16 4.8a3.6 3.6 0 0 1 0 6.9M18 14.6a6.5 6.5 0 0 1 3.5 5.9" /></Svg>);
 export const IconSparkle = (p: P) => (
   <Svg {...p}><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z" /><path d="M18 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z" /></Svg>
 );

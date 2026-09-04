@@ -24,7 +24,7 @@ applyStack(env, { prod });
 
 if (process.argv.includes("--check")) {
   console.log(`dev:app is ready (${prod ? "prod" : "local"} stack)`);
-  for (const key of ["ASALE_DATA_DIR", ...Object.keys(DEV_INSTANCE), "VITE_ASALE_STUDIO"]) {
+  for (const key of ["ASALE_DATA_DIR", ...Object.keys(DEV_INSTANCE), "VITE_ASALE_STUDIO", "VITE_ASALE_SWARM", "VITE_ASALE_AEO"]) {
     console.log(`  ${key}=${env[key] ?? "(compiled default)"}`);
   }
   console.log(describeStack(env));

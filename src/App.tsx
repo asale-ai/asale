@@ -5,7 +5,7 @@ import {
   IconDashboard, IconPublish, IconConsume, IconWallet,
   IconRecords, IconUsage, IconGauge, IconAccount, IconSettings,
   IconGlobe, IconGithub, IconShare, IconKey, IconShield, IconSparkle,
-  IconArrowLeft, IconArrowRight,
+  IconPanelLeft,
 } from "./icons";
 import { openExternal } from "./shell";
 import { SITE_URL, REPO_URL } from "./links";
@@ -14,6 +14,7 @@ import { UpgradeRequiredDialog, useUpgradeNotice } from "./components/UpgradeGat
 import { hasPendingUpdate, startUpdateWatcher, useUpdateState } from "./lib/updates";
 import { Skeleton, PageSkeleton } from "./ui";
 import type { JSX } from "react";
+import type { AppId } from "./pages/Apps";
 
 const Dashboard = lazy(() => import("./pages/Dashboard").then((m) => ({ default: m.Dashboard })));
 const Publish = lazy(() => import("./pages/Publish").then((m) => ({ default: m.Publish })));
@@ -26,7 +27,7 @@ const Limits = lazy(() => import("./pages/Limits").then((m) => ({ default: m.Lim
 const Account = lazy(() => import("./pages/Account").then((m) => ({ default: m.Account })));
 const Settings = lazy(() => import("./pages/Settings").then((m) => ({ default: m.Settings })));
 const Security = lazy(() => import("./pages/Security").then((m) => ({ default: m.Security })));
-const Studio = lazy(() => import("./pages/Studio").then((m) => ({ default: m.Studio })));
+const Apps = lazy(() => import("./pages/Apps").then((m) => ({ default: m.Apps })));
 // Lazy for the same reason the pages are: the sheet carries fifteen brand
 // marks and a QR encoder, and most sessions never open it.
 const EarningsShareDialog = lazy(() =>
@@ -35,11 +36,11 @@ const EarningsShareDialog = lazy(() =>
 
 const NAV_COLLAPSED = "asale:nav-collapsed";
 
-type Tab = "dashboard" | "studio" | "publish" | "consume" | "apikeys" | "usage" | "limits" | "wallet" | "records" | "security" | "account" | "settings";
+type Tab = "dashboard" | "apps" | "publish" | "consume" | "apikeys" | "usage" | "limits" | "wallet" | "records" | "security" | "account" | "settings";
 
 const ICONS: Record<Tab, JSX.Element> = {
   dashboard: <IconDashboard />,
-  studio: <IconSparkle />,
+  apps: <IconSparkle />,
   publish: <IconPublish />,
   consume: <IconConsume />,
   apikeys: <IconKey />,
@@ -56,12 +57,12 @@ const ICONS: Record<Tab, JSX.Element> = {
 // `account` is not listed here — it is rendered as the user card at the very
 // bottom of the sidebar (see App below).
 const NAV: Array<{ label?: string; items: Tab[] } | "spacer"> = [
-  // Studio rides with the overview rather than under a group label. It is the
+  // Apps rides with the overview rather than under a group label. It is the
   // only tab that is a *place to do work* rather than a readout or a switch,
   // and filing it beside the two trading switches would have suggested it is
-  // one of them. Labelled "Chat" for the same reason the website labels it
-  // that way: every other item in this rail names an activity, not a product.
-  { items: ["dashboard", "studio"] },
+  // one of them. It used to be a single entry labelled "Chat"; there are three
+  // applications now, so the entry names the shelf and the page shows them.
+  { items: ["dashboard", "apps"] },
   { label: "groupTrade", items: ["publish", "consume"] },
   { label: "groupUsage", items: ["usage", "limits"] },
   { label: "groupFinance", items: ["wallet", "records"] },
@@ -80,6 +81,10 @@ const NAV: Array<{ label?: string; items: Tab[] } | "spacer"> = [
 export function App() {
   const { t } = useTranslation();
   const [tab, setTab] = useState<Tab>("dashboard");
+  // Which application is open inside the Apps tab, if any. Up here rather than
+  // inside the page because it is what decides whether the window still has a
+  // top bar and a reading column — an open app takes both.
+  const [openApp, setOpenApp] = useState<AppId | null>(null);
   // `undefined` = not answered yet (show placeholders), `null` = signed out.
   const [profile, setProfile] = useState<Profile | null | undefined>(undefined);
   // The desktop shell starts its daemon in a background thread while this
@@ -157,7 +162,12 @@ export function App() {
       <button
         key={id}
         className={`navitem ${tab === id ? "active" : ""}`}
-        onClick={() => setTab(id)}
+        onClick={() => {
+          setTab(id);
+          // Pressing the rail item you are already inside is "home": with an
+          // application open it goes back to the card list, not nowhere.
+          if (id === "apps") setOpenApp(null);
+        }}
         title={flagged && !collapsed ? t("update.navHint", { version: update.latest }) : undefined}
         data-tip={collapsed ? t(`nav.${id}`) : undefined}
       >
@@ -221,6 +231,23 @@ export function App() {
               tauri.dev.conf.json is never shown — this is what tells a dev
               instance apart from the installed release beside it. */}
           {import.meta.env.DEV && <span className="logo-badge">dev</span>}
+          {/* Top-right of the panel it folds, same glyph everywhere (studio,
+              swarm, aeo, the website's console). It used to be the last row of
+              the rail with a left arrow on it, which read as "back" and sat as
+              far from the edge it moves as a control can get. Folded, the rail
+              is one column wide, so it drops under the mark rather than beside
+              it. */}
+          <button
+            type="button"
+            className="iconlink logo-fold"
+            onClick={toggleNav}
+            title={collapsed ? undefined : t("nav.collapse")}
+            data-tip={collapsed ? t("nav.expand") : undefined}
+            aria-label={t(collapsed ? "nav.expand" : "nav.collapse")}
+            aria-expanded={!collapsed}
+          >
+            <IconPanelLeft />
+          </button>
         </div>
         {NAV.map((g, i) =>
           g === "spacer" ? (
@@ -233,19 +260,6 @@ export function App() {
           ),
         )}
         {userCard}
-        {/* Last item of the rail rather than a handle on its edge: it is the
-            one control here that acts on the rail itself, and a hover-only
-            handle is a control nobody finds. */}
-        <button
-          className="navitem nav-toggle"
-          onClick={toggleNav}
-          title={collapsed ? undefined : t("nav.collapse")}
-          data-tip={collapsed ? t("nav.expand") : undefined}
-          aria-label={t(collapsed ? "nav.expand" : "nav.collapse")}
-        >
-          <span className="nav-ico">{collapsed ? <IconArrowRight /> : <IconArrowLeft />}</span>
-          <span className="nav-label">{t("nav.collapse")}</span>
-        </button>
       </aside>
       <main className="main">
         {/* Outside the keyed page container on purpose: the status readout is
@@ -255,7 +269,7 @@ export function App() {
             strip is draggable while the buttons inside it stay clickable. It is
             what replaces the title bar removed in tauri.conf.json: without it
             a maximised window on macOS could only be moved by its top 28px. */}
-        <div className={`topbar${tab === "studio" ? " hidden" : ""}`} data-tauri-drag-region>
+        <div className={`topbar${tab === "apps" && openApp ? " hidden" : ""}`} data-tauri-drag-region>
           <div className="topbar-inner">
             <div className="topbar-links">
               <button
@@ -297,16 +311,20 @@ export function App() {
             <EarningsShareDialog onClose={() => setSharing(false)} />
           </Suspense>
         )}
-        {/* Studio takes the window: it is an application inside the app, with
-            its own rail and its own scroll, so it opts out of the 980px reading
-            column every other page is drawn in. See `.main-inner.full`. */}
-        <div className={`main-inner fade-in${tab === "studio" ? " full" : ""}`} key={booted ? tab : "boot"}>
+        {/* An open application takes the window: it has its own rail and its
+            own scroll, so it opts out of the 980px reading column every other
+            page is drawn in. The card list is an ordinary page and keeps it.
+            See `.main-inner.full`. */}
+        <div
+          className={`main-inner fade-in${tab === "apps" && openApp ? " full" : ""}`}
+          key={booted ? tab : "boot"}
+        >
           {!booted ? <PageSkeleton /> : (
             <Suspense fallback={<PageSkeleton />}>
               {/* The overview map calls out the reader's own country, and the
                   only place that is known is the profile polled above. */}
               {tab === "dashboard" && <Dashboard onNavigate={setTab} region={profile?.region ?? ""} />}
-              {tab === "studio" && <Studio />}
+              {tab === "apps" && <Apps open={openApp} onOpen={setOpenApp} />}
               {tab === "publish" && <Publish />}
               {tab === "consume" && <Consume />}
               {tab === "apikeys" && <ApiKeys />}

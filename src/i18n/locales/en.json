@@ -18,7 +18,7 @@
     "apikeys": "API keys",
     "betaTip": "Asale is still in beta, so updates ship often. If you hit a problem — or a charge looks wrong — email us at support@asale.ai.",
     "security": "Security",
-    "studio": "Chat",
+    "apps": "Apps",
     "collapse": "Collapse sidebar",
     "expand": "Expand sidebar"
   },
@@ -1371,8 +1371,16 @@
     "downloaded": "{{done}} MB",
     "installing": "Download finished. Asale will close, install the update, and reopen."
   },
-  "studio": {
-    "sub": "Chat, translate and draw with every model on the market.",
-    "unavailable": "Studio is not available in this build."
+  "apps": {
+    "title": "Apps",
+    "sub": "Three applications that run on your Asale balance, each signed in with the account this app is using.",
+    "open": "Open",
+    "unavailable": "This build has no apps.",
+    "studio": "Chat",
+    "studioSub": "Chat, translate and draw with every model on the market.",
+    "swarm": "Swarm",
+    "swarmSub": "Hand a plan or a draft to a crowd of AI personas, let them argue it out, and read the report they reach.",
+    "aeo": "AI Visibility",
+    "aeoSub": "Track how ChatGPT, Claude and other answer engines describe your brand and which pages they cite."
   }
 }

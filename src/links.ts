@@ -36,6 +36,22 @@ export const GATEWAY_URL = (import.meta.env.VITE_ASALE_GATEWAY as string | undef
 export const STUDIO_URL = (import.meta.env.VITE_ASALE_STUDIO as string | undefined)?.replace(/\/+$/, "")
   || "https://studio.asale.ai";
 
+/** Swarm's bundle, framed the same way and told the same thing. */
+export const SWARM_URL = (import.meta.env.VITE_ASALE_SWARM as string | undefined)?.replace(/\/+$/, "")
+  || "https://swarm.asale.ai";
+
+/**
+ * AEO — opened in the browser, not framed.
+ *
+ * It is a server with its own session rather than a bundle holding a key, and
+ * it signs in by navigating itself to asale.ai's consent page, which allows
+ * being framed by the website and by nothing else. In here that navigation
+ * would land on a blank frame, so the card hands it to `openExternal` like
+ * every other link in this file.
+ */
+export const AEO_URL = (import.meta.env.VITE_ASALE_AEO as string | undefined)?.replace(/\/+$/, "")
+  || "https://aeo.asale.ai";
+
 /**
  * A page on the site, in the reader's language.
  *

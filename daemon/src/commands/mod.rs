@@ -17,6 +17,9 @@
 //!                       through its `authed` helper
 //!   [`auth`]          — register / sign in / sign out / profile
 //!   [`oauth_flow`]    — the two browser OAuth flows
+//!   [`app_auth`]      — approving an authorization request for a framed app
+//!                       (Studio, Swarm), so the frame signs itself in instead
+//!                       of being handed an API key
 //!   [`wallet`]        — balance, deposits, withdrawals, the cached consumer key
 //!   [`apikeys`]       — the consumer API key list: create/rename/expire/
 //!                       enable/disable/default, and adopting one for the
@@ -38,6 +41,7 @@ use serde_json::{json, Value};
 
 pub mod accounts;
 pub mod apikeys;
+pub mod app_auth;
 pub mod auth;
 pub mod buy;
 pub mod oauth_flow;
@@ -54,6 +58,7 @@ pub mod wallet;
 
 pub use accounts::*;
 pub use apikeys::*;
+pub use app_auth::*;
 pub use auth::*;
 pub use buy::*;
 pub use oauth_flow::*;
