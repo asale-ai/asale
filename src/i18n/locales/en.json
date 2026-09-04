@@ -1365,6 +1365,7 @@
     "fixing": "Working…"
   },
   "update": {
+    "button": "Update {{version}}",
     "navHint": "A new version ({{version}}) is available — open Settings to install it",
     "downloading": "Downloading the update",
     "downloadedOf": "{{done}} / {{total}} MB",

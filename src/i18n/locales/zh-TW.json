@@ -1365,6 +1365,7 @@
     "fixing": "處理中…"
   },
   "update": {
+    "button": "更新至 {{version}}",
     "navHint": "發現新版本 {{version}}，開啟設定即可更新",
     "downloading": "正在下載更新",
     "downloadedOf": "{{done}} / {{total}} MB",

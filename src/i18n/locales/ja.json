@@ -1365,6 +1365,7 @@
     "fixing": "処理中…"
   },
   "update": {
+    "button": "{{version}} に更新",
     "navHint": "新しいバージョン {{version}} があります。設定から更新できます",
     "downloading": "アップデートをダウンロード中",
     "downloadedOf": "{{done}} / {{total}} MB",

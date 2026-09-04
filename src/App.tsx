@@ -11,6 +11,7 @@ import { openExternal } from "./shell";
 import { SITE_URL, REPO_URL } from "./links";
 import { StatusWidget } from "./components/StatusWidget";
 import { UpgradeRequiredDialog, useUpgradeNotice } from "./components/UpgradeGate";
+import { UpdateButton } from "./components/UpdateButton";
 import { hasPendingUpdate, startUpdateWatcher, useUpdateState } from "./lib/updates";
 import { Skeleton, PageSkeleton } from "./ui";
 import type { JSX } from "react";
@@ -302,6 +303,10 @@ export function App() {
               >
                 <IconShare />
               </button>
+              {/* Only present when there is a release to install — see
+                  UpdateButton. It sits after the quiet off-app links because it
+                  is the one thing in this strip that is ever news. */}
+              <UpdateButton />
             </div>
             <StatusWidget />
           </div>
