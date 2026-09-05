@@ -2782,37 +2782,8 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .tabs button.active .tab-count { color: var(--fg-2); }
 .fw-more { margin-top: var(--s8); }
 
-/* ── Studio ─────────────────────────────────────────────────────────────────
-   The one tab that is an application rather than a page. It is served from
-   studio.asale.ai and framed here, so it brings its own sidebar, its own scroll
-   and its own 100dvh layout — which means it must not be drawn inside the
-   980px reading column the rest of the app uses, and must not be the thing that
-   makes `.main` scroll.
-
-   `:has` rather than a class on `.main`, because the tab is state in App.tsx
-   and the container is rendered above it; the alternative was threading a
-   modifier through two components to express "the child asked for the room".
-   ────────────────────────────────────────────────────────────────────────── */
-.main:has(> .main-inner.full) { display: flex; flex-direction: column; overflow: hidden; }
-.main-inner.full {
-  flex: 1; min-height: 0; display: flex; flex-direction: column;
-  max-width: none; padding: 0;
-  /* `.main-inner` centres the reading column with `margin: 0 auto`, and an auto
-     cross-axis margin on a flex item beats `align-items: stretch` — so without
-     this the frame shrank to its own content width and sat in the middle of a
-     half-empty window. */
-  margin: 0;
-}
-.app-page { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-/* The frame is full-bleed; anything the page shows *instead* of it (the error,
-   the "not in this build" note) is ordinary page content and keeps the margin
-   the rest of the app is drawn with. */
-.app-page > :not(.app-frame) { margin: var(--s24); }
-.app-frame {
-  flex: 1; width: 100%; min-height: 0; border: none;
-  background: var(--bg);
-}
-/* The card list. Three applications, one sentence each — a grid rather than a
+/* ── Apps ───────────────────────────────────────────────────────────────────
+   The card list. Three applications, one sentence each — a grid rather than a
    column, because a sentence is what makes them distinguishable and stacking
    them full-width made three of them read as a settings list. */
 .app-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: var(--s12); }

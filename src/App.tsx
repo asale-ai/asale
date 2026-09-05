@@ -15,7 +15,6 @@ import { UpdateButton } from "./components/UpdateButton";
 import { hasPendingUpdate, startUpdateWatcher, useUpdateState } from "./lib/updates";
 import { Skeleton, PageSkeleton } from "./ui";
 import type { JSX } from "react";
-import type { AppId } from "./pages/Apps";
 
 const Dashboard = lazy(() => import("./pages/Dashboard").then((m) => ({ default: m.Dashboard })));
 const Publish = lazy(() => import("./pages/Publish").then((m) => ({ default: m.Publish })));
@@ -82,10 +81,6 @@ const NAV: Array<{ label?: string; items: Tab[] } | "spacer"> = [
 export function App() {
   const { t } = useTranslation();
   const [tab, setTab] = useState<Tab>("dashboard");
-  // Which application is open inside the Apps tab, if any. Up here rather than
-  // inside the page because it is what decides whether the window still has a
-  // top bar and a reading column — an open app takes both.
-  const [openApp, setOpenApp] = useState<AppId | null>(null);
   // `undefined` = not answered yet (show placeholders), `null` = signed out.
   const [profile, setProfile] = useState<Profile | null | undefined>(undefined);
   // The desktop shell starts its daemon in a background thread while this
@@ -165,9 +160,6 @@ export function App() {
         className={`navitem ${tab === id ? "active" : ""}`}
         onClick={() => {
           setTab(id);
-          // Pressing the rail item you are already inside is "home": with an
-          // application open it goes back to the card list, not nowhere.
-          if (id === "apps") setOpenApp(null);
         }}
         title={flagged && !collapsed ? t("update.navHint", { version: update.latest }) : undefined}
         data-tip={collapsed ? t(`nav.${id}`) : undefined}
@@ -270,7 +262,7 @@ export function App() {
             strip is draggable while the buttons inside it stay clickable. It is
             what replaces the title bar removed in tauri.conf.json: without it
             a maximised window on macOS could only be moved by its top 28px. */}
-        <div className={`topbar${tab === "apps" && openApp ? " hidden" : ""}`} data-tauri-drag-region>
+        <div className="topbar" data-tauri-drag-region>
           <div className="topbar-inner">
             <div className="topbar-links">
               <button
@@ -316,20 +308,13 @@ export function App() {
             <EarningsShareDialog onClose={() => setSharing(false)} />
           </Suspense>
         )}
-        {/* An open application takes the window: it has its own rail and its
-            own scroll, so it opts out of the 980px reading column every other
-            page is drawn in. The card list is an ordinary page and keeps it.
-            See `.main-inner.full`. */}
-        <div
-          className={`main-inner fade-in${tab === "apps" && openApp ? " full" : ""}`}
-          key={booted ? tab : "boot"}
-        >
+        <div className="main-inner fade-in" key={booted ? tab : "boot"}>
           {!booted ? <PageSkeleton /> : (
             <Suspense fallback={<PageSkeleton />}>
               {/* The overview map calls out the reader's own country, and the
                   only place that is known is the profile polled above. */}
               {tab === "dashboard" && <Dashboard onNavigate={setTab} region={profile?.region ?? ""} />}
-              {tab === "apps" && <Apps open={openApp} onOpen={setOpenApp} />}
+              {tab === "apps" && <Apps />}
               {tab === "publish" && <Publish />}
               {tab === "consume" && <Consume />}
               {tab === "apikeys" && <ApiKeys />}
