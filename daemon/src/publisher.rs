@@ -35,6 +35,10 @@ use std::time::Duration;
 /// Settings key holding the last catalog pulled from `/market/models`.
 const CATALOG_KEY: &str = "sellable_catalog";
 
+/// When the tradable set last moved. Read as a floor on how old a derived
+/// per-account listing may be — see [`endpoint_models`].
+const CATALOG_CHANGED_KEY: &str = "sellable_catalog_changed_at";
+
 /// How stale the cached catalog may get before it is pulled again. An operator
 /// enabling a model on the server should reach sellers within a coffee break,
 /// not at the next restart.
@@ -564,6 +568,34 @@ async fn store_endpoint_models(
 /// every pool rebuild.
 const CUSTOM_MODELS_TTL: i64 = 3600;
 
+/// Whether a cached listing may still be answered from.
+///
+/// Two clocks, not one: the TTL says how long an endpoint's own model list is
+/// assumed to hold, and the floor says the catalog it was indexed against is
+/// gone. Either one alone lets a seller wait an hour to offer a model the
+/// platform started trading a minute ago.
+fn listing_is_fresh(c: &CustomListing, floor: i64, now: i64) -> bool {
+    now - c.fetched_at < CUSTOM_MODELS_TTL && c.fetched_at >= floor
+}
+
+/// When the tradable set last moved, or 0 before it ever has.
+///
+/// A listing is the *intersection* of an endpoint's models with the catalog, so
+/// it is only as good as the catalog it was indexed against: a model the
+/// platform had not started trading yet was dropped outright
+/// (`index_custom_models` skips what it cannot match), and no amount of waiting
+/// puts it back. Without this the TTL alone decides, and a seller waits up to an
+/// hour after a new model lands before their aggregator key can offer it.
+async fn catalog_changed_at(store: &LocalStore) -> i64 {
+    store
+        .get_setting(CATALOG_CHANGED_KEY)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
 /// Whatever model list is cached for one account, however stale.
 async fn cached_listing(store: &LocalStore, provider: &str, account_id: &str) -> Option<CustomListing> {
     store
@@ -586,8 +618,9 @@ async fn endpoint_models(
     wire: Wire,
 ) -> CustomListing {
     let cached = cached_listing(store, &tool.provider, &tool.account_id).await;
+    let floor = catalog_changed_at(store).await;
     if let Some(c) = &cached {
-        if now_secs() - c.fetched_at < CUSTOM_MODELS_TTL {
+        if listing_is_fresh(c, floor, now_secs()) {
             return c.clone();
         }
     }
@@ -763,6 +796,10 @@ pub async fn refresh_sellable_catalog(store: &LocalStore, api_base: &str) -> any
     };
     store.set_setting(CATALOG_KEY, &serde_json::to_string(&fresh)?).await?;
     if changed {
+        // Every per-account listing was indexed against the old set, and one
+        // that dropped a model the platform had not started trading yet is
+        // wrong the moment this returns — not an hour later.
+        store.set_setting(CATALOG_CHANGED_KEY, &fresh.fetched_at.to_string()).await?;
         tracing::info!("sellable catalog updated: {:?}", fresh.by_provider);
     }
     Ok(changed)
@@ -2186,6 +2223,20 @@ fn now_secs() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A listing is the catalog intersected with an endpoint's models, so a
+    /// catalog that moved invalidates it however young it is. Without the
+    /// floor the TTL alone decides and a model that landed a minute ago is
+    /// unsellable for the rest of the hour.
+    #[test]
+    fn a_listing_indexed_against_an_older_catalog_is_not_fresh() {
+        let now = 10_000;
+        let l = |at| CustomListing { fetched_at: at, ..Default::default() };
+        assert!(listing_is_fresh(&l(now - 60), 0, now), "no catalog change: the TTL decides");
+        assert!(listing_is_fresh(&l(now - 60), now - 120, now), "indexed after the change: still good");
+        assert!(!listing_is_fresh(&l(now - 60), now - 30, now), "indexed before the change: must re-probe");
+        assert!(!listing_is_fresh(&l(now - CUSTOM_MODELS_TTL - 1), 0, now), "expired by the TTL");
+    }
 
     /// A catalog with two vendors' models under their credential families.
     fn catalog() -> Option<SellableCatalog> {
