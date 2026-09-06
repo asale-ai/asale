@@ -474,7 +474,17 @@
     "colMaxRatio": "买入价上限",
     "maxRatioNone": "不限制",
     "maxRatioTip": "这把 Key 最多按官方价的百分之多少买入，点击可修改。100% 就是官方价，市场价永远不会超过它，等于不限制。",
-    "maxRatioHint": "这把 Key 最多按官方价的百分之多少买入。100% 就是官方价，市场价永远不会超过它，等于不限制。"
+    "maxRatioHint": "这把 Key 最多按官方价的百分之多少买入。100% 就是官方价，市场价永远不会超过它，等于不限制。",
+    "colLimit": "额度",
+    "limitNone": "不限额",
+    "limitTip": "这把密钥最多花多少，花完就停止工作，点击可修改。钱仍从账户余额里扣——这只是防脚本跑飞的保险丝。",
+    "limitHint": "这把密钥最多花多少，花完就停止工作。留空表示不限额。",
+    "limitReset": "额度重置",
+    "limitResetHint": "已用金额何时归零——每日按 UTC 零点，每周按周一，每月按 1 号。",
+    "period_none": "不重置",
+    "period_day": "每日",
+    "period_week": "每周",
+    "period_month": "每月"
   },
   "wallet": {
     "title": "钱包",

@@ -474,7 +474,17 @@
     "colMaxRatio": "Price cap",
     "maxRatioNone": "No cap",
     "maxRatioTip": "The most this key will pay, as a percentage of the vendor's list price. Click to change. 100% is list price, which the market never exceeds — that is no cap at all.",
-    "maxRatioHint": "The most this key will pay, as a percentage of the vendor's list price. 100% is list price, which the market never exceeds — no cap."
+    "maxRatioHint": "The most this key will pay, as a percentage of the vendor's list price. 100% is list price, which the market never exceeds — no cap.",
+    "colLimit": "Limit",
+    "limitNone": "No limit",
+    "limitTip": "The most this key may spend before it stops working. Click to change. Your balance still pays — this is a fuse against a runaway script.",
+    "limitHint": "The most this key may spend before it stops working. Leave blank for no limit.",
+    "limitReset": "Reset limit",
+    "limitResetHint": "When the counter goes back to zero — daily at midnight UTC, weekly on Monday, monthly on the 1st.",
+    "period_none": "Never",
+    "period_day": "Daily",
+    "period_week": "Weekly",
+    "period_month": "Monthly"
   },
   "wallet": {
     "title": "Wallet",

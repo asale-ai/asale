@@ -111,6 +111,7 @@ pub async fn list_api_keys(state: &AppState) -> R<Value> {
 /// this page are for somebody's own code, and hijacking the tools' credential
 /// every time one is created is exactly the surprise this whole feature exists
 /// to remove.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_api_key_ex(
     state: &AppState,
     label: String,
@@ -119,6 +120,11 @@ pub async fn create_api_key_ex(
     // The highest market price this key buys at, in whole percent of list.
     // `None` leaves it at the server's default, which is no ceiling.
     max_ratio_pct: Option<i32>,
+    // Micro-USDT this key may spend per window, and how often that window
+    // turns (`day` / `week` / `month`). `None` on the amount = no ceiling, and
+    // the server drops the window with it.
+    budget_usdt: Option<i64>,
+    budget_period: Option<String>,
     apply: bool,
 ) -> R<Value> {
     let mut v = authed(
@@ -130,6 +136,8 @@ pub async fn create_api_key_ex(
             "expires_in_days": expires_in_days,
             "set_default": set_default,
             "max_ratio_pct": max_ratio_pct,
+            "budget_usdt": budget_usdt,
+            "budget_period": budget_period,
         })),
     )
     .await?;
@@ -158,6 +166,11 @@ pub async fn update_api_key(
     set_default: Option<bool>,
     // The highest market price this key buys at, in whole percent of list.
     max_ratio_pct: Option<i32>,
+    // Doubly wrapped like the expiry: absent leaves the ceiling alone,
+    // `Some(None)` removes it, `Some(Some(n))` sets it. The window is sent
+    // alongside because the server writes the pair in one statement.
+    budget_usdt: Option<Option<i64>>,
+    budget_period: Option<String>,
     apply: bool,
 ) -> R<Value> {
     let mut body = serde_json::Map::new();
@@ -175,6 +188,12 @@ pub async fn update_api_key(
     }
     if let Some(p) = max_ratio_pct {
         body.insert("max_ratio_pct".into(), json!(p));
+    }
+    if let Some(b) = budget_usdt {
+        body.insert("budget_usdt".into(), json!(b));
+    }
+    if let Some(p) = budget_period {
+        body.insert("budget_period".into(), json!(p));
     }
     let mut v = authed(
         state,

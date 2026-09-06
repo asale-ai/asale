@@ -47,6 +47,25 @@ const TTL_CHOICES: (number | null)[] = [30, 90, 180, 365, null];
 /** Inside this many days, the expiry cell starts saying so in warning ink. */
 const EXPIRY_SOON_DAYS = 14;
 
+/** Micro-USDT to the USDT. Ceilings are typed in dollars, stored in micros. */
+const MICRO = 1_000_000;
+
+/** How often a ceiling may reset. `""` is the lifetime ceiling every key had
+ *  before windows existed, and is still the default. */
+const PERIODS = ["", "day", "week", "month"] as const;
+
+/** Dollars, with cents only where there are any: `$5`, `$1.2`. */
+function money(micros: number): string {
+  return `$${(micros / MICRO).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+}
+
+/** Dollars as typed → micro-USDT, or null for "no ceiling" — which is what an
+ *  empty box, a zero and anything unparseable all mean. */
+function toMicros(v: string): number | null {
+  const n = Number(v.trim());
+  return v.trim() && Number.isFinite(n) && n > 0 ? Math.round(n * MICRO) : null;
+}
+
 /** Does this preview actually identify its key, or is it all bullets?
  *
  *  Keys minted before the server stored previews come back as `sk-asale-••••••••`
@@ -82,6 +101,9 @@ export function ApiKeys() {
   const [newTtl, setNewTtl] = useState<number | null>(null);
   /** The price ceiling the new key is minted with, as the input holds it. */
   const [newRatio, setNewRatio] = useState("100");
+  /** The spend ceiling, in dollars as typed, and how often it resets. */
+  const [newBudget, setNewBudget] = useState("");
+  const [newPeriod, setNewPeriod] = useState<string>("");
   const nameRef = useRef<HTMLInputElement>(null);
   const [fresh, setFresh] = useState<{ id: number; key: string } | null>(null);
   const [shown, setShown] = useState<Record<number, string>>({});
@@ -152,6 +174,8 @@ export function ApiKeys() {
     setNewLabel("");
     setNewTtl(null);
     setNewRatio("100");
+    setNewBudget("");
+    setNewPeriod("");
   }, []);
 
   async function create() {
@@ -162,12 +186,16 @@ export function ApiKeys() {
         label: newLabel.trim(),
         expiresInDays: newTtl,
         maxRatioPct: clampRatio(newRatio),
+        budgetUsdt: toMicros(newBudget),
+        budgetPeriod: newPeriod,
       });
       setFresh({ id: r.id, key: r.key });
       setCreating(false);
       setNewLabel("");
       setNewTtl(null);
       setNewRatio("100");
+      setNewBudget("");
+      setNewPeriod("");
       await load();
     } catch (e) {
       setErr(String(e));
@@ -236,6 +264,8 @@ export function ApiKeys() {
     onToggle: () => run(() => invoke("update_api_key", { id: k.id, enabled: !k.enabled })),
     onRenew: () => run(() => invoke("update_api_key", { id: k.id, expiresInDays: 90 })),
     onMaxRatio: (pct) => run(() => invoke("update_api_key", { id: k.id, maxRatioPct: pct })),
+    onBudget: (budgetUsdt, budgetPeriod) =>
+      run(() => invoke("update_api_key", { id: k.id, budgetUsdt, budgetPeriod })),
     onDefault: () => intend(k, "default"),
     onApply: () => intend(k, "apply"),
     onDelete: () => run(() => invoke("delete_api_key", { id: k.id })),
@@ -323,10 +353,14 @@ export function ApiKeys() {
               label={newLabel}
               ttl={newTtl}
               ratio={newRatio}
+              budget={newBudget}
+              period={newPeriod}
               busy={busy}
               onLabel={setNewLabel}
               onTtl={setNewTtl}
               onRatio={setNewRatio}
+              onBudget={setNewBudget}
+              onPeriod={setNewPeriod}
               onSubmit={create}
               onCancel={closeCreate}
             />
@@ -363,6 +397,7 @@ export function ApiKeys() {
                 <th>{t("apikeys.colStatus")}</th>
                 <th>{t("apikeys.colExpiry")}</th>
                 <th>{t("apikeys.colMaxRatio")}</th>
+                <th>{t("apikeys.colLimit")}</th>
                 <th aria-label={t("apikeys.rowActions")} />
               </tr>
             </thead>
@@ -395,16 +430,21 @@ export function ApiKeys() {
 /* ── Creation ────────────────────────────────────────────────────────── */
 
 function CreateForm({
-  nameRef, label, ttl, ratio, busy, onLabel, onTtl, onRatio, onSubmit, onCancel,
+  nameRef, label, ttl, ratio, budget, period, busy,
+  onLabel, onTtl, onRatio, onBudget, onPeriod, onSubmit, onCancel,
 }: {
   nameRef: React.RefObject<HTMLInputElement>;
   label: string;
   ttl: number | null;
   ratio: string;
+  budget: string;
+  period: string;
   busy: boolean;
   onLabel: (v: string) => void;
   onTtl: (v: number | null) => void;
   onRatio: (v: string) => void;
+  onBudget: (v: string) => void;
+  onPeriod: (v: string) => void;
   onSubmit: () => void;
   onCancel: () => void;
 }) {
@@ -470,6 +510,47 @@ function CreateForm({
           </div>
           <div className="hint">{t("apikeys.maxRatioHint")}</div>
         </div>
+        <div className="field" style={{ marginBottom: 0 }}>
+          <label htmlFor="ak-budget">{t("apikeys.colLimit")}</label>
+          <div className="input-row">
+            <span className="unit">$</span>
+            <input
+              id="ak-budget"
+              className="input mono"
+              style={{ width: 110 }}
+              type="number"
+              min={0}
+              step="0.01"
+              placeholder={t("apikeys.limitNone")}
+              value={budget}
+              onChange={(e) => onBudget(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && onSubmit()}
+            />
+          </div>
+          <div className="hint">{t("apikeys.limitHint")}</div>
+        </div>
+        {/* The window only exists once there is a ceiling to reset, so it
+            appears with one rather than sitting there greyed out. */}
+        {toMicros(budget) !== null && (
+          <div className="field" style={{ marginBottom: 0 }}>
+            <label>{t("apikeys.limitReset")}</label>
+            <div className="band-presets" role="radiogroup" aria-label={t("apikeys.limitReset")}>
+              {PERIODS.map((p) => (
+                <button
+                  key={p || "none"}
+                  type="button"
+                  role="radio"
+                  aria-checked={period === p}
+                  className={`chip${period === p ? " on" : ""}`}
+                  onClick={() => onPeriod(p)}
+                >
+                  {t(`apikeys.period_${p || "none"}`)}
+                </button>
+              ))}
+            </div>
+            <div className="hint">{t("apikeys.limitResetHint")}</div>
+          </div>
+        )}
       </div>
 
       <div className="btn-row" style={{ marginTop: "var(--s16)" }}>
@@ -499,6 +580,7 @@ type RowProps = {
   onToggle: () => void;
   onRenew: () => void;
   onMaxRatio: (pct: number) => void;
+  onBudget: (budget: number | null, period: string) => void;
   onDefault: () => void;
   onApply: () => void;
   onDelete: () => void;
@@ -523,6 +605,9 @@ function Row(p: RowProps) {
       </td>
       <td className="nowrap">
         <MaxRatio row={row} busy={p.busy} onSave={p.onMaxRatio} />
+      </td>
+      <td className="nowrap">
+        <Budget row={row} busy={p.busy} onSave={p.onBudget} />
       </td>
       <td>
         <span className="btn-row nowrap" style={{ justifyContent: "flex-end", flexWrap: "nowrap" }}>
@@ -745,6 +830,96 @@ function MaxRatio({
       onClick={() => { setDraft(String(pct)); setEditing(true); }}
     >
       {pct >= 100 ? t("apikeys.maxRatioNone") : `${pct}%`}
+      <IconPencil />
+    </button>
+  );
+}
+
+/** What this key may spend, and how often that resets.
+ *
+ *  A ceiling is a fuse against a runaway loop, not a statement about what the
+ *  account can afford — the balance is what actually pays. So the cell leads
+ *  with the number that answers "how close am I": spend in the current window
+ *  over the ceiling, with the window itself beside it.
+ *
+ *  The amount and the window commit together when focus leaves the pair. On
+ *  each one's own blur, moving from the box to the menu would save twice, and
+ *  the second save would be racing the reload the first one started. */
+function Budget({
+  row, busy, onSave,
+}: { row: ApiKeyRow; busy: boolean; onSave: (budget: number | null, period: string) => void }) {
+  const { t } = useTranslation();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [period, setPeriod] = useState<string>("");
+
+  if (editing) {
+    const commit = () => {
+      setEditing(false);
+      const micros = toMicros(draft);
+      // A ceiling that was removed takes its window with it — the server says
+      // the same, and agreeing here keeps the row from flickering back.
+      const next = micros === null ? "" : period;
+      if (micros !== row.budget_usdt || next !== row.budget_period) onSave(micros, next);
+    };
+    return (
+      <span
+        className="input-row"
+        onBlur={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) commit();
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") commit();
+          if (e.key === "Escape") setEditing(false);
+        }}
+      >
+        <span className="unit">$</span>
+        <input
+          className="input mono"
+          style={{ width: 88 }}
+          type="number"
+          min={0}
+          step="0.01"
+          autoFocus
+          placeholder={t("apikeys.limitNone")}
+          aria-label={t("apikeys.colLimit")}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+        />
+        <select
+          className="input"
+          style={{ width: 104 }}
+          aria-label={t("apikeys.limitReset")}
+          value={period}
+          onChange={(e) => setPeriod(e.target.value)}
+        >
+          {PERIODS.map((p) => (
+            <option key={p || "none"} value={p}>
+              {t(`apikeys.period_${p || "none"}`)}
+            </option>
+          ))}
+        </select>
+      </span>
+    );
+  }
+
+  return (
+    <button
+      className="pill plain act mono"
+      disabled={busy}
+      title={t("apikeys.limitTip")}
+      onClick={() => {
+        setDraft(row.budget_usdt === null ? "" : String(row.budget_usdt / MICRO));
+        setPeriod(row.budget_period);
+        setEditing(true);
+      }}
+    >
+      {row.budget_usdt === null
+        ? t("apikeys.limitNone")
+        : `${money(row.spent_usdt)} / ${money(row.budget_usdt)}`}
+      {row.budget_usdt !== null && row.budget_period && (
+        <span className="muted">{t(`apikeys.period_${row.budget_period}`)}</span>
+      )}
       <IconPencil />
     </button>
   );

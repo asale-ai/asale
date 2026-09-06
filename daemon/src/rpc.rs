@@ -501,6 +501,8 @@ rpc_args! {
         #[serde(default, alias = "set_default")] set_default: Option<bool>,
         #[serde(default, alias = "apply_to_tools")] apply_to_tools: Option<bool>,
         #[serde(default, alias = "max_ratio_pct")] max_ratio_pct: Option<i32>,
+        #[serde(default, alias = "budget_usdt")] budget_usdt: Option<i64>,
+        #[serde(default, alias = "budget_period")] budget_period: Option<String>,
     }
     // `expiresInDays` is three-valued, which `Option<Option<_>>` plus
     // `deserialize_with` is the only way to express: absent leaves the expiry
@@ -514,6 +516,11 @@ rpc_args! {
         #[serde(default, alias = "set_default")] set_default: Option<bool>,
         #[serde(default, alias = "apply_to_tools")] apply_to_tools: Option<bool>,
         #[serde(default, alias = "max_ratio_pct")] max_ratio_pct: Option<i32>,
+        // Three-valued for the same reason the expiry is: absent leaves the
+        // ceiling alone, `null` removes it, a number sets it.
+        #[serde(default, alias = "budget_usdt", deserialize_with = "double_option")]
+        budget_usdt: Option<Option<i64>>,
+        #[serde(default, alias = "budget_period")] budget_period: Option<String>,
     }
     KeyIdArgs      { id: i64 }
     // Approving an authorization request for a framed app. `app` names which of
@@ -740,6 +747,8 @@ async fn rpc(
                 p.expires_in_days,
                 p.set_default.unwrap_or(false),
                 p.max_ratio_pct,
+                p.budget_usdt,
+                p.budget_period,
                 p.apply_to_tools.unwrap_or(false),
             )
             .await?
@@ -754,6 +763,8 @@ async fn rpc(
                 p.expires_in_days,
                 p.set_default,
                 p.max_ratio_pct,
+                p.budget_usdt,
+                p.budget_period,
                 p.apply_to_tools.unwrap_or(false),
             )
             .await?
@@ -1197,6 +1208,27 @@ mod tests {
         let snake: KeyUpdateArgs = args(&json!({"id": 7, "set_default": true})).unwrap();
         assert_eq!((camel.id, camel.set_default), (7, Some(true)));
         assert_eq!((snake.id, snake.set_default), (7, Some(true)));
+    }
+
+    /// The spend ceiling is three-valued for the same reason the expiry is —
+    /// and the page sends it with the window, in camelCase, so both spellings
+    /// have to land on the same two fields.
+    #[test]
+    fn a_key_budget_carries_its_window_and_survives_being_cleared() {
+        let leave: KeyUpdateArgs = args(&json!({"id": 1, "label": "x"})).unwrap();
+        assert_eq!((leave.budget_usdt, leave.budget_period), (None, None));
+
+        let clear: KeyUpdateArgs = args(&json!({"id": 1, "budgetUsdt": null})).unwrap();
+        assert_eq!(clear.budget_usdt, Some(None), "null = no ceiling");
+
+        let set: KeyUpdateArgs =
+            args(&json!({"id": 1, "budgetUsdt": 5_000_000, "budgetPeriod": "day"})).unwrap();
+        assert_eq!(set.budget_usdt, Some(Some(5_000_000)));
+        assert_eq!(set.budget_period.as_deref(), Some("day"));
+
+        let snake: KeyCreateArgs =
+            args(&json!({"budget_usdt": 20_000_000, "budget_period": "week"})).unwrap();
+        assert_eq!((snake.budget_usdt, snake.budget_period.as_deref()), (Some(20_000_000), Some("week")));
     }
 
     #[test]

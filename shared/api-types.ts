@@ -429,6 +429,20 @@ export interface ApiKeyRow {
    *  market itself is capped at. Requests above it are refused
    *  (`price_above_cap`) instead of being served at a price nobody agreed to. */
   max_ratio_pct: number;
+  /** Micro-USDT this key may spend per window, or null for no ceiling — which
+   *  is the ordinary case: the key then spends against the account balance and
+   *  nothing narrower. */
+  budget_usdt: number | null;
+  /** Micro-USDT spent in the *current* window. Reported as 0 once the window
+   *  has ended, so a daily ceiling reads empty the next morning rather than
+   *  still full. */
+  spent_usdt: number;
+  /** How often the ceiling resets: `""` = never (one ceiling for the life of
+   *  the key), otherwise `day`, `week` or `month` — UTC midnight, Monday, the
+   *  1st. */
+  budget_period: "" | "day" | "week" | "month";
+  /** RFC 3339 instant the current window ends, or null when there is none. */
+  budget_reset_at: string | null;
 }
 
 /** `GET /api/v1/apikeys`. */
@@ -456,6 +470,9 @@ export interface ApiKeyCreated {
   expires_at: string | null;
   /** The ceiling this key was minted with, in whole percent of list price. */
   max_ratio_pct: number;
+  /** The spend ceiling it was minted with, and how often it resets. */
+  budget_usdt: number | null;
+  budget_period: string;
 }
 
 /** `PATCH /api/v1/apikeys/:id`. */
