@@ -81,6 +81,36 @@ fn custom_url(base: &str, wire: Wire, built: &str) -> String {
 /// answers 401 for the missing `x-api-key`, and Google's wants `x-goog-api-key`.
 /// This is only ever applied to a custom account — a *subscription* is a bearer
 /// whatever its upstream's dialect, Anthropic's own OAuth included.
+/// Whether a non-`custom` task may be sent to `url` at all.
+///
+/// The gateway builds the upstream URL, and this device puts the account's
+/// bearer on it. A gateway that is compromised (or a middlebox that rewrote
+/// the frame) could therefore point one `http_request` at any host and be
+/// handed the seller's OAuth token, or use this machine as an SSRF hop. The
+/// provider table already says where each family's traffic goes, so anything
+/// not on that short list — or not `https` — is refused before a lease is even
+/// taken. `custom` accounts carry their own base and are checked when it is
+/// connected, not here.
+fn upstream_url_allowed(provider: &str, url: &str) -> bool {
+    let Some(spec) = asale_protocol::spec_of(provider) else { return false };
+    let Ok(parsed) = reqwest::Url::parse(url) else { return false };
+    // Unit tests stand a mock vendor up on a loopback port; nothing else may.
+    #[cfg(test)]
+    if matches!(parsed.host_str(), Some("127.0.0.1" | "localhost" | "[::1]")) && !url.contains(":9787") {
+        return true;
+    }
+    if parsed.scheme() != "https" {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else { return false };
+    let host_of = |u: &str| reqwest::Url::parse(u).ok().and_then(|u| u.host_str().map(str::to_string));
+    [spec.api_base, spec.chat_url]
+        .into_iter()
+        .chain(spec.verify_hosts.iter().copied())
+        .filter_map(host_of)
+        .any(|h| h.eq_ignore_ascii_case(host))
+}
+
 fn authorize_custom(
     builder: reqwest::RequestBuilder,
     wire: Wire,
@@ -653,6 +683,15 @@ pub async fn execute(
     // standing by.
     const MAX_LOCAL_FAILOVERS: u32 = 2;
     let mut failovers_left = MAX_LOCAL_FAILOVERS;
+    // C1: the bearer only ever goes to the vendor's own host, over TLS.
+    if provider != "custom" && !upstream_url_allowed(&provider, &req.upstream.url) {
+        tracing::warn!(task = %task_id, provider = %provider, url = %req.upstream.url, "refusing relayed request: upstream host is not this provider's");
+        send_error(out, &task_id, protocol::codes::INTERNAL, "upstream url is not this provider's host", true);
+        if let Some(r) = records {
+            r.record(&task_id, &provider, "", &model, &Usage::default(), "upstream_host_refused").await;
+        }
+        return;
+    }
     // The first attempt's failure, kept while a second account is tried: if
     // nobody else can serve the lane, this is what the buyer is owed.
     let mut held: Option<HeldFailure> = None;
@@ -1032,7 +1071,7 @@ pub async fn execute(
             let failure = HeldFailure {
                 code,
                 message: format!("upstream {status}"),
-                detail,
+                detail: error_class(status, &detail),
                 retriable,
                 record_status: format!("upstream_{status}"),
                 account_id: lease.account_id.clone(),
@@ -2139,6 +2178,28 @@ fn merge_usage(usage: &mut Usage, v: &serde_json::Value) {
     usage.cache_write_tokens = m.cache_write;
 }
 
+/// The category of an upstream error body — what the operator console needs
+/// to tell "out of credit" from "bad request" — and nothing else of it.
+///
+/// The body itself stays on this machine (C7): vendors' 4xx texts name the
+/// organisation, the key prefix, sometimes the account email, and none of that
+/// belongs in the gateway's task rows. The local log still has the text.
+fn error_class(status: u16, body: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    let e = &v["error"];
+    let class = [&e["type"], &e["code"], &e["details"]["error_code"], &v["type"], &v["code"]]
+        .into_iter()
+        .find_map(|x| match x {
+            serde_json::Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        });
+    match class {
+        Some(c) => format!("{status} {}", c.chars().take(64).collect::<String>()),
+        None => status.to_string(),
+    }
+}
+
 /// A failed attempt held back while another local account is tried.
 ///
 /// Reporting is deferred rather than duplicated because the buyer must hear
@@ -2203,6 +2264,35 @@ fn send_error_detail(
 
 #[cfg(test)]
 mod tests {
+    /// C1: a task for a built-in provider goes to that vendor's host over TLS
+    /// and nowhere else, whatever the gateway put in the frame.
+    #[test]
+    fn the_bearer_only_travels_to_the_providers_own_host() {
+        use super::upstream_url_allowed as ok;
+        assert!(ok("claude", "https://api.anthropic.com/v1/messages"));
+        assert!(ok("claude", "https://API.anthropic.com/v1/messages/count_tokens"));
+        assert!(ok("codex", "https://chatgpt.com/backend-api/codex/responses"));
+        assert!(ok("kimi_api", "https://api.moonshot.ai/v1/chat/completions"), "a verify host is the vendor's too");
+        assert!(!ok("claude", "http://api.anthropic.com/v1/messages"), "plaintext leaks the token");
+        assert!(!ok("claude", "https://api.anthropic.com.evil.example/v1/messages"));
+        assert!(!ok("claude", "https://evil.example/v1/messages"));
+        assert!(!ok("claude", "https://127.0.0.1:9787/v1/messages"), "no SSRF hop through the local proxy");
+        assert!(!ok("codex", "https://api.anthropic.com/v1/messages"), "another provider's host is not this one's");
+        assert!(!ok("nobody", "https://api.anthropic.com/v1/messages"));
+        assert!(!ok("claude", "not a url"));
+    }
+
+    /// C7: only the class of an upstream error leaves the machine.
+    #[test]
+    fn an_upstream_body_is_reduced_to_its_error_class() {
+        use super::error_class;
+        assert_eq!(error_class(429, r#"{"error":{"type":"rate_limit_error","message":"org org-abc123 hit its limit"}}"#), "429 rate_limit_error");
+        assert_eq!(error_class(402, r#"{"error":{"message":"x","details":{"error_code":"credits_required"}}}"#), "402 credits_required");
+        assert_eq!(error_class(401, r#"{"error":{"code":401,"message":"bad key sk-live-secret"}}"#), "401 401");
+        assert_eq!(error_class(502, "<html>gateway</html>"), "502");
+        assert!(!error_class(400, r#"{"error":{"type":"invalid_request_error","message":"secret@example.com"}}"#).contains('@'));
+    }
+
     /// The buyer's half and the operator's half of an upstream rejection travel
     /// in different fields, and the operator's half is bounded.
     #[test]

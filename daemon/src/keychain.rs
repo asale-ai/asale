@@ -13,6 +13,21 @@
 //! The whole map is (de)serialized on each call — secrets are few and small, and
 //! a process-wide lock serializes reads/writes so concurrent proxy/publisher/UI
 //! tasks can't race on the file. Secret values are never logged.
+//!
+//! What the encryption buys, stated plainly (C6): the key sits beside the
+//! ciphertext, both mode 0600, so against *this user's own processes* — and
+//! against anyone who can read this user's home, root included — the store is
+//! equivalent to plaintext. It is an at-rest measure: a backup, a synced
+//! folder, a copied data directory or a leaked `secrets.enc` on its own yields
+//! nothing, and 0600 keeps every other local account out. Wrapping the key in
+//! the OS keychain (macOS Security framework with
+//! `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, DPAPI on Windows) would
+//! move the boundary to "this user, unlocked, on this device" — but a
+//! headless/SSH session cannot unlock the login keychain, the migration has to
+//! survive a keychain that later refuses, and the ACL prompt is exactly what
+//! this module was introduced to stop, so that is not done here. Sessions and
+//! subscription tokens are the things worth protecting; treat the data
+//! directory accordingly.
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};

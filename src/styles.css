@@ -2661,6 +2661,20 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
    Wider than the usual modal, because the evidence a row opens onto is a
    three-column table of probe sentences: at 560px every one of them ellipsed
    into uselessness. */
+/* ── Finish-sign-in dialog ──────────────────────────────────────────────────
+   Narrower than the verify sheet: it holds one hint and one control, and a wide
+   box around that much content reads as an error rather than a next step. The
+   body reuses `.paste-row` and `.devicecode` from the panel this replaced. */
+.modal.signin-modal { width: min(520px, 100%); }
+.modal.signin-modal .modal-head .pick-ico { display: flex; flex-shrink: 0; }
+.signin-body {
+  padding: 0 var(--s20) var(--s20);
+  display: flex; flex-direction: column; gap: var(--s12);
+}
+.signin-body .callout { margin: 0; }
+.signin-body .callout a { color: var(--accent); word-break: break-all; }
+.signin-authurl { margin: 0; }
+
 .modal.verify-modal { width: min(760px, 100%); }
 .verify-body { padding: 0 var(--s20) var(--s20); overflow-y: auto; }
 .check-head {

@@ -255,30 +255,21 @@ async fn decide_direct(st: &ProxyState, path: &str) -> Option<&'static str> {
     }
 }
 
-/// The caller gate on the local proxy (S5).
+/// The caller gate on the local proxy (S5, C4).
 ///
 /// Two rules, both cheap. A request carrying `Origin`, or a `Sec-Fetch-Site`
 /// other than `none`/`same-origin`, was issued by a browser page — every
 /// browser sets those on cross-site fetches and no CLI ever does — and is
-/// refused outright. A request whose `Host` is not this machine's loopback
-/// (DNS rebinding, or the daemon bound wide) must present the consumer key
-/// the buy switch wrote into the tools' configs, under whichever header that
-/// tool uses. Plain loopback callers without a key are left alone: some
-/// harnesses send none, and the buy switch is what admitted them.
-fn refuse_foreign_caller(headers: &HeaderMap, uri: &axum::http::Uri, local_key: Option<&str>) -> Option<Response> {
+/// refused outright. Every other request must present the consumer key the
+/// buy switch wrote into the tools' configs, under whichever header that tool
+/// uses. Loopback is not exempt: "can connect to 127.0.0.1:9787" is every
+/// other UNIX user and every container on the box, and the key is what the
+/// buy switch handed the tools it admitted — a caller without it was never
+/// switched on. Compared in constant time, like the RPC token.
+fn refuse_foreign_caller(headers: &HeaderMap, _uri: &axum::http::Uri, local_key: Option<&str>) -> Option<Response> {
     let fetch_site = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()).unwrap_or("");
     if headers.contains_key(axum::http::header::ORIGIN) || matches!(fetch_site, "cross-site" | "same-site") {
         return Some((StatusCode::FORBIDDEN, "browser-originated requests are not accepted by the local proxy").into_response());
-    }
-    let host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
-        .or_else(|| uri.authority().map(|a| a.to_string()))
-        .unwrap_or_default();
-    let name = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(&host).trim_matches(|c| c == '[' || c == ']');
-    if matches!(name, "127.0.0.1" | "localhost" | "::1") {
-        return None;
     }
     let presented = |h: &str| {
         headers.get(h).and_then(|v| v.to_str().ok()).map(|v| v.strip_prefix("Bearer ").unwrap_or(v).trim())
@@ -288,9 +279,9 @@ fn refuse_foreign_caller(headers: &HeaderMap, uri: &axum::http::Uri, local_key: 
             && ["authorization", "x-asale-token", "x-api-key", "x-goog-api-key"]
                 .into_iter()
                 .filter_map(presented)
-                .any(|v| v == k)
+                .any(|v| crate::rpc::constant_time_eq(v.as_bytes(), k.as_bytes()))
     });
-    (!ok).then(|| (StatusCode::UNAUTHORIZED, "a non-loopback caller must present the local asale key").into_response())
+    (!ok).then(|| (StatusCode::UNAUTHORIZED, "the local proxy requires the asale key the buy switch wrote into the tool's config").into_response())
 }
 
 async fn forward(
@@ -300,10 +291,10 @@ async fn forward(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    // S5: ahead of *every* exemption below (count_tokens included). A browser
+    // S5/C4: ahead of *every* exemption below (count_tokens included). A browser
     // page can POST here without a preflight and spend the wallet; a CLI never
-    // sends `Origin`, and a request that names a foreign host has to prove it
-    // holds the key the buy switch wrote into the tools' configs.
+    // sends `Origin`, and every request has to prove it holds the key the buy
+    // switch wrote into the tools' configs.
     if let Some(refused) = refuse_foreign_caller(&headers, &uri, st.asale_key.read().await.as_deref()) {
         return refused;
     }
@@ -1064,6 +1055,8 @@ mod tests {
     async fn post_message(port: u16, model: &str) -> reqwest::Response {
         asale_client_core::http::plain()
             .post(format!("http://127.0.0.1:{port}/v1/messages"))
+            .header("authorization", "Bearer sk-asale-test")
+            .header("authorization", "Bearer sk-asale-test")
             .json(&serde_json::json!({"model": model, "messages": []}))
             .send()
             .await
@@ -1150,6 +1143,7 @@ mod tests {
         });
         let resp = asale_client_core::http::plain()
             .post(format!("http://127.0.0.1:{port}/claude/v1/messages"))
+            .header("authorization", "Bearer sk-asale-test")
             .json(&poisoned)
             .send()
             .await
@@ -1254,6 +1248,7 @@ mod tests {
 
         let resp = asale_client_core::http::plain()
             .post(format!("http://127.0.0.1:{port}/opencode/v1/chat/completions"))
+            .header("authorization", "Bearer sk-asale-test")
             .json(&serde_json::json!({"model": "claude-fable-5", "messages": []}))
             .send()
             .await
@@ -1277,6 +1272,7 @@ mod tests {
 
         let resp = asale_client_core::http::plain()
             .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .header("authorization", "Bearer sk-asale-test")
             .json(&serde_json::json!({"model": "gpt-5-codex", "messages": []}))
             .send()
             .await
@@ -1294,6 +1290,7 @@ mod tests {
         // /v1/chat/completions belongs to codex, whose list is empty = any model.
         let resp = asale_client_core::http::plain()
             .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .header("authorization", "Bearer sk-asale-test")
             .json(&serde_json::json!({"model": "gpt-5-codex", "messages": []}))
             .send()
             .await
@@ -1310,7 +1307,7 @@ mod tests {
         let port = serve(st).await;
         let post = |model: &str| {
             let body = serde_json::json!({"model": model, "input": "hi", "stream": true});
-            asale_client_core::http::plain().post(format!("http://127.0.0.1:{port}/v1/responses")).json(&body).send()
+            asale_client_core::http::plain().post(format!("http://127.0.0.1:{port}/v1/responses")).header("authorization", "Bearer sk-asale-test").json(&body).send()
         };
 
         let resp = post("gpt-5.2").await.unwrap();
@@ -1377,6 +1374,7 @@ mod tests {
 
         let resp = asale_client_core::http::plain()
             .post(format!("http://127.0.0.1:{port}/v1/responses"))
+            .header("authorization", "Bearer sk-asale-test")
             .json(&serde_json::json!({"model": "gpt-5.6-luna", "input": "title this"}))
             .send()
             .await
@@ -1414,6 +1412,7 @@ mod tests {
 
         let resp = asale_client_core::http::plain()
             .post(format!("http://127.0.0.1:{port}/v1/responses"))
+            .header("authorization", "Bearer sk-asale-test")
             .json(&serde_json::json!({"model": "gpt-5.2", "input": "hi"}))
             .send()
             .await
@@ -1449,6 +1448,7 @@ mod tests {
 
         let resp = asale_client_core::http::plain()
             .post(format!("http://127.0.0.1:{port}/v1/responses"))
+            .header("authorization", "Bearer sk-asale-test")
             .json(&serde_json::json!({"model": "gpt-5.5", "input": "hi"}))
             .send()
             .await
@@ -1474,6 +1474,7 @@ mod tests {
         let port = serve(st).await;
         let resp = asale_client_core::http::plain()
             .post(format!("http://127.0.0.1:{port}/v1/responses"))
+            .header("authorization", "Bearer sk-asale-test")
             .json(&serde_json::json!({"model": "claude-fable-5", "input": "hi"}))
             .send()
             .await
@@ -1485,6 +1486,7 @@ mod tests {
     async fn post_to(port: u16, path: &str, model: &str) -> reqwest::Response {
         asale_client_core::http::plain()
             .post(format!("http://127.0.0.1:{port}{path}"))
+            .header("authorization", "Bearer sk-x")
             .json(&serde_json::json!({"model": model, "messages": []}))
             .send()
             .await
@@ -1575,9 +1577,13 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 502, "with the key it reaches routing (market target unreachable in tests)");
 
-        // 3. The CLI shape: loopback, no Origin, no key — still admitted.
+        // 3. C4: loopback is no exemption — another UNIX user on the box can
+        // connect to 127.0.0.1 too. No key, 401; with it, the CLI shape reaches
+        // routing.
+        let resp = http.post(&url).json(&body).send().await.unwrap();
+        assert_eq!(resp.status(), 401, "a loopback caller without the key is refused");
         let resp = post_message(port, "claude-sonnet-4-5").await;
-        assert_eq!(resp.status(), 502, "a plain loopback caller is not gated on the key");
+        assert_eq!(resp.status(), 502, "and admitted with it");
         assert_eq!(store.agg_totals(&["used"], None).await.unwrap(), (0, 0, 0), "nothing refused was metered");
     }
 
@@ -1628,6 +1634,7 @@ mod tests {
 
         let resp = asale_client_core::http::plain()
             .post(format!("http://127.0.0.1:{port}/v1/messages"))
+            .header("authorization", "Bearer sk-asale-test")
             .json(&serde_json::json!({"model": "claude-sonnet-4-5", "messages": []}))
             .send()
             .await
@@ -1663,6 +1670,7 @@ mod tests {
 
         let resp = asale_client_core::http::plain()
             .post(format!("http://127.0.0.1:{port}/v1/messages/count_tokens"))
+            .header("authorization", "Bearer sk-asale-test")
             .json(&serde_json::json!({"model": "claude-sonnet-4-5", "messages": []}))
             .send()
             .await
@@ -1681,6 +1689,7 @@ mod tests {
         let port = serve(st).await;
         let resp = asale_client_core::http::plain()
             .post(format!("http://127.0.0.1:{port}/v1/messages"))
+            .header("authorization", "Bearer sk-asale-test")
             .json(&serde_json::json!({"model": "claude-sonnet-4-5"}))
             .send()
             .await

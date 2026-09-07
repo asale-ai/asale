@@ -422,6 +422,20 @@ fn cmd_expose(args: &[&str]) -> Result<u8> {
     if host.is_some() && !public {
         bail!("--host only makes sense with `expose on`; `expose off` is always 127.0.0.1");
     }
+    // C5: the service speaks plain HTTP, and the token travels in it. Binding
+    // one *public* interface on purpose is the one shape that is neither "this
+    // machine" nor "my LAN/VPN", so it has to be said twice.
+    if let Some(h) = host.filter(|h| public && !host_is_private(h)) {
+        if !has_flag(rest, &["--i-know", "--i-know-what-i-am-doing"]) {
+            bail!(
+                "`{h}` is not a loopback, private-network or link-local address.\n\
+                 The service speaks plain HTTP: anyone who can sniff that network can\n\
+                 read the token and then your credentials and balance. Put a reverse\n\
+                 proxy with TLS in front of it, or reach it through an SSH tunnel.\n\
+                 To bind it there anyway, repeat the command with --i-know."
+            );
+        }
+    }
 
     let current = service::resolve_bind(None);
     let bind = exposed_bind(&current, public, port, host);
@@ -438,6 +452,22 @@ fn cmd_expose(args: &[&str]) -> Result<u8> {
             );
         }
     }
+
+    // C7: every URL handed out while the port was open carried the token.
+    // Closing the port is when they should stop working, so the file goes
+    // *before* the restart below and the service comes back with a fresh one
+    // (`load_or_create_token`). Only when the port really was open: retiring
+    // the token under a service that stays running would lock its own UI out.
+    let retired = !public && service::is_remote(&current) && {
+        match std::fs::remove_file(paths::token_file()) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => {
+                println!("Could not retire the access token ({e}); delete {} by hand.", paths::token_file().display());
+                false
+            }
+        }
+    };
 
     // The boot definition holds its own copy of the address, so leaving it alone
     // would make this change last exactly until the next reboot.
@@ -468,6 +498,12 @@ fn cmd_expose(args: &[&str]) -> Result<u8> {
 
     if public {
         print_access(&bind);
+        println!(
+            "\nThis is plain HTTP: the token — and with it your credentials and balance — is\n\
+             readable by anyone on the path. Keep the port off the internet (firewall, or a\n\
+             VPN address with --host), and if it must be public put a reverse proxy with\n\
+             TLS in front of it or reach it through an SSH tunnel."
+        );
         let port = bind.rsplit_once(':').map(|(_, p)| p).unwrap_or("9700");
         println!(
             "\nTwo things outside asale can still block it:\n  \
@@ -477,8 +513,25 @@ fn cmd_expose(args: &[&str]) -> Result<u8> {
         );
     } else {
         println!("Only this machine can reach the service now.");
+        if retired {
+            println!("The access token was retired; the restarted service issued a new one.");
+        }
     }
     Ok(0)
+}
+
+/// Whether `host` is an address only this machine, its LAN or a VPN can reach:
+/// loopback, RFC 1918, link-local, IPv6 ULA. A hostname is not an address and
+/// is not trusted to be one.
+fn host_is_private(host: &str) -> bool {
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        Ok(std::net::IpAddr::V6(ip)) => {
+            ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00 || (ip.segments()[0] & 0xffc0) == 0xfe80
+        }
+        Err(_) => false,
+    }
 }
 
 fn cmd_expose_status() -> Result<u8> {
@@ -743,6 +796,9 @@ fn help_topic(topic: &str) -> Option<&'static str> {
 
     asale expose on               every interface, port unchanged
     asale expose on --port 8080   and move it
+    asale expose on --host <ip>   one interface only; a public address needs --i-know
+                                  (plain HTTP — prefer a VPN address, an SSH tunnel,
+                                  or a TLS reverse proxy)
     asale expose on --host 10.0.0.5   one interface only — a VPN address
     asale expose off              back to 127.0.0.1
     asale expose status           where it listens and who can get there
@@ -814,6 +870,18 @@ fn help_topic(topic: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// C5: a `--host` that is not this machine's, its LAN's or a VPN's needs
+    /// the explicit `--i-know`.
+    #[test]
+    fn only_private_hosts_are_exposed_without_a_second_look() {
+        for h in ["127.0.0.1", "10.0.0.5", "192.168.1.9", "172.16.0.1", "169.254.1.1", "::1", "fd00::1", "[fd00::1]", "fe80::1"] {
+            assert!(host_is_private(h), "{h}");
+        }
+        for h in ["0.0.0.0", "::", "8.8.8.8", "203.0.113.4", "2001:db8::1", "example.com", "172.32.0.1"] {
+            assert!(!host_is_private(h), "{h}");
+        }
+    }
 
     #[test]
     fn expose_on_opens_every_interface_and_keeps_the_port() {

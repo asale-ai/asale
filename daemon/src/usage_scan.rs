@@ -160,7 +160,9 @@ fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for entry in rd.flatten() {
         let p = entry.path();
-        if p.is_dir() {
+        // `symlink_metadata`, not `is_dir`: a link cycle under
+        // `~/.claude/projects` would otherwise recurse until the stack goes.
+        if std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_dir()) {
             collect_jsonl(&p, out);
         } else if p.extension().is_some_and(|x| x == "jsonl") {
             out.push(p);

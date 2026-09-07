@@ -103,10 +103,12 @@ fn allowed_origin(o: &str) -> bool {
     // RPC with the browser's session cookie.
     let own_port = crate::bound_addr().map(|a| a.port());
     let local = |port: u16| o == format!("http://localhost:{port}") || o == format!("http://127.0.0.1:{port}");
+    // The Vite origin only exists in a dev build; a release daemon admitting it
+    // would let any page that grabs port 9173 drive the RPC (C7).
     o == "tauri://localhost"
         || o == "https://tauri.localhost"
         || o == "http://tauri.localhost"
-        || local(VITE_DEV_PORT)
+        || (cfg!(debug_assertions) && local(VITE_DEV_PORT))
         || own_port.is_some_and(local)
 }
 
@@ -413,7 +415,8 @@ fn secret_matches(expected: &str, presented: &str) -> bool {
     !expected.is_empty() && constant_time_eq(presented.as_bytes(), expected.as_bytes())
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+/// Shared with the consumer proxy's key gate (C7), so there is one of these.
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -1141,8 +1144,9 @@ mod tests {
         assert!(allowed_origin("http://tauri.localhost"), "Windows (WebView2)");
         assert!(allowed_origin("https://tauri.localhost"));
         // A browser on this machine, at the dev server or the daemon's own port.
-        assert!(allowed_origin("http://localhost:9173"));
-        assert!(allowed_origin("http://127.0.0.1:9173"));
+        // The dev server is a debug-build affordance only.
+        assert_eq!(allowed_origin("http://localhost:9173"), cfg!(debug_assertions));
+        assert_eq!(allowed_origin("http://127.0.0.1:9173"), cfg!(debug_assertions));
         // L5: no other local port — `bound_addr()` is unset in tests, so the
         // daemon's own port is not admitted here and nothing else ever is.
         assert!(!allowed_origin("http://127.0.0.1:9700"));

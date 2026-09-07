@@ -889,23 +889,89 @@ async fn fetch_codex_headers(
 /// and leaves the secondary unset. So the label has to be derived from
 /// `window-minutes`, and a slot reporting zero minutes is one the account does
 /// not have rather than a window sitting at 0%.
+///
+/// # Named limits
+///
+/// Beside the account-wide pair, the backend reports a *named* block per model
+/// family that meters on its own — the same shape under an internal codename,
+/// with the family it belongs to spelled out in `-limit-name`:
+///
+/// ```text
+/// x-codex-bengalfox-primary-window-minutes: 300
+/// x-codex-bengalfox-secondary-window-minutes: 10080
+/// x-codex-bengalfox-limit-name: GPT-5.3-Codex-Spark
+/// ```
+///
+/// These are exactly what [`asale_client_core::quota::ScopeBlock`] exists for —
+/// Anthropic's own per-model weekly windows arrive as `ws_Fable` and take Opus
+/// off the market while the rest of the subscription keeps selling — so they are
+/// emitted under the same `ws_<name>` key and the gate handles both the same
+/// way. Reading only the account-wide pair is what left a spent model-scoped
+/// window invisible: the lane stayed on the market and every buyer reaching it
+/// paid for a 429 (2026-09-07, when `gpt-5.3-codex-spark` first became
+/// sellable).
+///
+/// One row per named limit, not two: the block's windows are both constraints
+/// on the same family, so the tighter one is the one worth reporting, and a
+/// single key keeps the Limits page's list unambiguous.
 pub fn normalize_codex_headers(h: &BTreeMap<String, String>, now: i64) -> Vec<Value> {
+    let mut out = block_windows(h, "x-codex-", now, |secs| window_label(secs));
+    for (prefix, name) in named_limits(h) {
+        // Tightest by utilisation; on a tie the longer window, because that is
+        // the one that comes back last and so the one still binding.
+        let tightest = block_windows(h, &prefix, now, |secs| format!("{} {name}", window_label(secs)))
+            .into_iter()
+            .max_by(|a, b| {
+                let pct = |w: &Value| w["used_percent"].as_f64().unwrap_or(0.0);
+                let secs = |w: &Value| w["window_seconds"].as_i64().unwrap_or(0);
+                pct(a).total_cmp(&pct(b)).then(secs(a).cmp(&secs(b)))
+            });
+        if let Some(mut w) = tightest {
+            w["key"] = json!(format!("ws_{name}"));
+            out.push(w);
+        }
+    }
+    out
+}
+
+/// The `x-codex-<codename>-` prefixes that carry a named limit, each with the
+/// model family it meters. The codename is OpenAI's own and moves with the
+/// model; `-limit-name` is the half that means anything to us.
+fn named_limits(h: &BTreeMap<String, String>) -> Vec<(String, String)> {
+    h.iter()
+        .filter_map(|(k, v)| {
+            let prefix = k.strip_suffix("limit-name")?;
+            // `x-codex-limit-name` (were it ever sent) names no block of its
+            // own — only a codename-bearing prefix does.
+            (prefix.len() > "x-codex-".len() && prefix.starts_with("x-codex-") && !v.trim().is_empty())
+                .then(|| (prefix.to_string(), v.trim().to_string()))
+        })
+        .collect()
+}
+
+/// The primary/secondary pair under one prefix, account-wide or named.
+fn block_windows(
+    h: &BTreeMap<String, String>,
+    prefix: &str,
+    now: i64,
+    label: impl Fn(i64) -> String,
+) -> Vec<Value> {
     let num = |k: String| -> Option<f64> { h.get(&k)?.parse::<f64>().ok() };
     let mut out = Vec::new();
     for slot in ["primary", "secondary"] {
-        let minutes = num(format!("x-codex-{slot}-window-minutes")).unwrap_or(0.0);
+        let minutes = num(format!("{prefix}{slot}-window-minutes")).unwrap_or(0.0);
         if minutes <= 0.0 {
             continue;
         }
-        let Some(pct) = num(format!("x-codex-{slot}-used-percent")) else { continue };
+        let Some(pct) = num(format!("{prefix}{slot}-used-percent")) else { continue };
         let seconds = (minutes * 60.0) as i64;
         // The absolute reset first: `reset-after-seconds` is only meaningful
         // beside the instant it was read, which a banked snapshot no longer is.
-        let reset_at = num(format!("x-codex-{slot}-reset-at"))
+        let reset_at = num(format!("{prefix}{slot}-reset-at"))
             .map(|v| v as i64)
             .filter(|v| *v > 0)
-            .or_else(|| num(format!("x-codex-{slot}-reset-after-seconds")).map(|v| now + v as i64));
-        let label = window_label(seconds);
+            .or_else(|| num(format!("{prefix}{slot}-reset-after-seconds")).map(|v| now + v as i64));
+        let label = label(seconds);
         out.push(json!({
             "key": label, "label": label,
             "used_percent": pct.clamp(0.0, 100.0),
@@ -1564,6 +1630,65 @@ mod tests {
     #[test]
     fn codex_headerless_response_yields_no_windows() {
         assert!(normalize_codex_headers(&headers(&[("content-type", "application/json")]), 0).is_empty());
+    }
+
+    /// Captured from a live Pro account on 2026-09-07, the day the account-wide
+    /// 5h window went away: the only account-wide window left is the weekly one,
+    /// and the 5h limit now belongs to one model family under a codename. Read
+    /// as the ordinal pair alone, that family's window is invisible — which is
+    /// how a spent `gpt-5.3-codex-spark` lane stayed on the market.
+    #[test]
+    fn a_named_limit_becomes_a_model_scoped_window() {
+        let w = normalize_codex_headers(
+            &headers(&[
+                ("x-codex-plan-type", "pro"),
+                ("x-codex-primary-used-percent", "1"),
+                ("x-codex-primary-window-minutes", "10080"),
+                ("x-codex-primary-reset-at", "1789380800"),
+                ("x-codex-secondary-used-percent", "0"),
+                ("x-codex-secondary-window-minutes", "0"),
+                ("x-codex-bengalfox-primary-used-percent", "100"),
+                ("x-codex-bengalfox-primary-window-minutes", "300"),
+                ("x-codex-bengalfox-primary-reset-at", "1788795746"),
+                ("x-codex-bengalfox-secondary-used-percent", "12"),
+                ("x-codex-bengalfox-secondary-window-minutes", "10080"),
+                ("x-codex-bengalfox-secondary-reset-at", "1789382546"),
+                ("x-codex-bengalfox-limit-name", "GPT-5.3-Codex-Spark"),
+            ]),
+            NOW,
+        );
+        let keys: Vec<&str> = w.iter().map(|x| x["key"].as_str().unwrap()).collect();
+        assert_eq!(keys, ["7d", "ws_GPT-5.3-Codex-Spark"], "one row per named limit, beside the account-wide one");
+        assert_eq!(w[1]["label"], "5h GPT-5.3-Codex-Spark", "the tighter of the block's two windows");
+        assert_eq!(w[1]["used_percent"], 100.0);
+
+        // And the gate reads it as a block on that family alone.
+        let gate = gate_of(&w, NOW).expect("the account-wide window still decides headroom");
+        assert!(!gate.exhausted(), "the subscription is at 1%, not spent");
+        let block = gate.scope_block("gpt-5.3-codex-spark").expect("the spent family is blocked");
+        assert_eq!(block.reset_at, Some(1_788_795_746));
+        assert!(gate.scope_block("gpt-6-astra").is_none(), "one family's window is not another's");
+    }
+
+    /// A named limit that is not spent must not block anything — the block list
+    /// is for windows the vendor says are finished, and a family at 40% is
+    /// selling.
+    #[test]
+    fn a_named_limit_with_room_blocks_nothing() {
+        let w = normalize_codex_headers(
+            &headers(&[
+                ("x-codex-primary-used-percent", "1"),
+                ("x-codex-primary-window-minutes", "10080"),
+                ("x-codex-primary-reset-after-seconds", "600"),
+                ("x-codex-bengalfox-primary-used-percent", "40"),
+                ("x-codex-bengalfox-primary-window-minutes", "300"),
+                ("x-codex-bengalfox-primary-reset-after-seconds", "600"),
+                ("x-codex-bengalfox-limit-name", "GPT-5.3-Codex-Spark"),
+            ]),
+            NOW,
+        );
+        let gate = gate_of(&w, NOW).expect("gate");
+        assert!(gate.scope_block("gpt-5.3-codex-spark").is_none());
     }
 
     /// Whether the gate can read a window at all is decided by its key, so a

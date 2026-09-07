@@ -296,6 +296,7 @@ pub async fn begin(p: &OAuthProvider) -> anyhow::Result<(String, AuthCodeFuture)
     let redirect2 = redirect_uri.clone();
     let verifier = pkce.verifier.clone();
     let state2 = state.clone();
+    let expected_state = state.clone();
 
     // Minimal callback server: capture ?code= and close. It keeps accepting
     // until a request actually carries a code — a browser will happily spend
@@ -321,7 +322,12 @@ pub async fn begin(p: &OAuthProvider) -> anyhow::Result<(String, AuthCodeFuture)
             // request carrying neither is not the callback at all (favicon, probe):
             // answer it and keep waiting for the real one.
             let denied = !extract_query(&req, "error").is_empty();
-            if code.is_empty() && !denied {
+            // A request carrying neither is not the callback at all; neither is
+            // one echoing somebody else's `state` — any local process can
+            // connect to this port, and a spoofed callback must not spend the
+            // one-shot sender the real one is about to need (C7).
+            let echoed_state = extract_query(&req, "state");
+            if (code.is_empty() && !denied) || echoed_state != expected_state {
                 let _ = sock.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").await;
                 continue;
             }
@@ -333,7 +339,7 @@ pub async fn begin(p: &OAuthProvider) -> anyhow::Result<(String, AuthCodeFuture)
             };
             write_page(&mut sock, &body).await;
             if let Some(sender) = tx.lock().unwrap().take() {
-                let _ = sender.send((code, extract_query(&req, "state")));
+                let _ = sender.send((code, echoed_state));
             }
             break;
         }

@@ -899,6 +899,21 @@ async fn forget_custom_endpoint(state: &AppState, account_id: &str) -> R<bool> {
 /// Re-running it for an existing `label` updates that account in place: the
 /// endpoint, the key and the terms are all rewritten, and the cached model list
 /// is replaced by what the probe just returned.
+/// Whether an `http://` base points at this machine or a private network —
+/// the only places a key may travel in the clear.
+fn plaintext_base_is_local(base: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base) else { return false };
+    let Some(host) = url.host_str() else { return false };
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        Ok(std::net::IpAddr::V6(ip)) => {
+            ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00 || (ip.segments()[0] & 0xffc0) == 0xfe80
+        }
+        Err(_) => host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost"),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn connect_custom_endpoint(
     state: &AppState,
@@ -919,6 +934,14 @@ pub async fn connect_custom_endpoint(
         return Err(cmd_err!(
             "errors.cli.customBaseScheme",
             "base URL must start with http:// or https://"
+        ));
+    }
+    // C7: the key rides on every request to this base, so plaintext is only
+    // acceptable where the wire never leaves the machine or the LAN.
+    if base.starts_with("http://") && !plaintext_base_is_local(&base) {
+        return Err(cmd_err!(
+            "errors.cli.customBaseScheme",
+            "an http:// base URL is only accepted for localhost or a private-network address — use https:// for anything else"
         ));
     }
     let key = api_key.trim().trim_matches(['"', '\'']).trim().to_string();
@@ -1285,6 +1308,20 @@ pub async fn remove_account(state: &AppState, provider: String, account_id: Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// C7: a key in the clear only ever goes to this machine or the LAN.
+    #[test]
+    fn a_plaintext_custom_base_must_be_local() {
+        assert!(plaintext_base_is_local("http://localhost:11434"));
+        assert!(plaintext_base_is_local("http://127.0.0.1:8080/v1"));
+        assert!(plaintext_base_is_local("http://[::1]:8080/v1"));
+        assert!(plaintext_base_is_local("http://192.168.1.20:8000/v1"));
+        assert!(plaintext_base_is_local("http://10.0.0.5/v1"));
+        assert!(plaintext_base_is_local("http://ollama.localhost/v1"));
+        assert!(!plaintext_base_is_local("http://api.example.com/v1"));
+        assert!(!plaintext_base_is_local("http://8.8.8.8/v1"));
+        assert!(!plaintext_base_is_local("not a url"));
+    }
 
     /// The Sell page hides every window-derived figure for these, so the
     /// classifier has to catch all three shapes a key arrives in — including a

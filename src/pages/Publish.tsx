@@ -877,6 +877,111 @@ function VerifyGateDialog({
   );
 }
 
+/**
+ * Finishing a sign-in that needs the person, in front of them.
+ *
+ * Both interactive logins can stall in a place only the operator can clear: a
+ * loopback callback that never arrived needs the address bar pasted back, and a
+ * device-code flow needs a code read off this screen and confirmed in a browser.
+ * Both used to render as a panel underneath the provider tiles — correct, and
+ * routinely missed: re-authenticating from an account row deep in the list left
+ * the box off-screen at the top of the page, and a login with an unnoticed next
+ * step reads as a login that silently did nothing.
+ *
+ * So it is a dialog. The backdrop deliberately does not dismiss it — a stray
+ * click landing on the page behind would throw away the one input that can
+ * finish the login — and the explicit close is what abandons the attempt.
+ */
+function SignInDialog({
+  provider, code, url, draft, onDraft, onSubmit, onClose,
+}: {
+  provider: string;
+  /** Device-code flow: the code to confirm, and where. Absent on a paste flow. */
+  code?: { code: string; url: string };
+  /** Paste flow: where the browser was sent, for the operator to recognise. */
+  url?: string;
+  draft: string;
+  onDraft: (v: string) => void;
+  onSubmit: () => void;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const input = useRef<HTMLInputElement>(null);
+  // The whole point is that the next step is unmissable, so the field it needs
+  // is focused rather than waiting to be found.
+  useEffect(() => { input.current?.focus(); }, []);
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal signin-modal" role="dialog" aria-modal="true">
+        <div className="modal-head">
+          <span className="pick-ico"><Mark id={provider} /></span>
+          <h3>{t("publish.signIn.title")}</h3>
+          <button type="button" className="modal-x" onClick={onClose} aria-label={t("publish.signIn.cancel")}>
+            <IconX />
+          </button>
+        </div>
+        <div className="signin-body">
+          {code ? (
+            <>
+              <div className="callout info">
+                <IconInfo />
+                <span>
+                  {t("publish.deviceHint")}{" "}
+                  <a href={code.url} target="_blank" rel="noreferrer">{code.url}</a>
+                </span>
+              </div>
+              {code.code && (
+                <div className="devicecode">
+                  <span className="devicecode-label">{t("publish.deviceCode")}</span>
+                  <CopyChip value={code.code} />
+                </div>
+              )}
+              <p className="muted">{t("publish.deviceWaiting")}</p>
+            </>
+          ) : (
+            <>
+              <div className="callout info">
+                <IconInfo />
+                <span>{t(realTauri ? "publish.pasteHintDesktop" : "publish.pasteHint")}</span>
+              </div>
+              {/* Where the browser was sent. On the desktop it opened by
+                  itself and may have been closed by accident; in a browser tab
+                  it can simply be reopened. Either way the login is only
+                  finishable by someone who can get back to it. */}
+              {url && (
+                <p className="muted signin-authurl">
+                  <a href={url} target="_blank" rel="noreferrer">{t("publish.signIn.reopen")}</a>
+                </p>
+              )}
+              <div className="field">
+                <label htmlFor="oauthpaste">{t("publish.pasteLabel")}</label>
+                <div className="paste-row">
+                  <input
+                    id="oauthpaste"
+                    ref={input}
+                    className="input mono"
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={draft}
+                    placeholder={t("publish.pastePlaceholder")}
+                    onChange={(e) => onDraft(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && draft.trim()) onSubmit(); }}
+                  />
+                  <button className="btn" onClick={onSubmit} disabled={!draft.trim()}>
+                    {t("publish.pasteSubmit")}
+                  </button>
+                </div>
+              </div>
+              <p className="muted">{t("publish.signIn.waiting")}</p>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** What came back, in the terms the seller asked the question in.
  *
  * A pass is not "200 OK" — it is that a request took the buyer's path and this
@@ -1004,8 +1109,11 @@ export function Publish() {
   // The code a device-code login is waiting on, shown until it completes.
   const [deviceCode, setDeviceCode] = useState<{ provider: string; code: string; url: string } | null>(null);
   /** The in-flight loopback login, so its code can be pasted back when the
-   *  callback lands on a machine that is not the daemon's. */
-  const [pasteFlow, setPasteFlow] = useState<{ provider: string; flowId: string } | null>(null);
+   *  callback lands on a machine that is not the daemon's. `authUrl` is kept
+   *  beside it because a browser tab closed by accident is the ordinary way
+   *  this flow stalls, and reopening it is the fix. */
+  const [pasteFlow, setPasteFlow] =
+    useState<{ provider: string; flowId: string; authUrl: string } | null>(null);
   const [pasteDraft, setPasteDraft] = useState("");
 
   /** What this account may connect, as the daemon last answered. Not a
@@ -1425,7 +1533,7 @@ export function Publish() {
       const r = await runOAuthFlow<{ account_id: string }>(
         "oauth_login",
         { provider },
-        (start) => setPasteFlow({ provider, flowId: start.flow_id }),
+        (start) => setPasteFlow({ provider, flowId: start.flow_id, authUrl: start.auth_url }),
       );
       setMsg(t("publish.connected", { provider, account: r.account_id }));
       loadAccounts();
@@ -1685,58 +1793,6 @@ export function Publish() {
         ))}
       </div>
 
-      {/* Offered in the desktop shell too. Its callback lands on the same
-          machine as the daemon so it usually arrives on its own — but "usually"
-          is not "always" (a blocked loopback port, a browser that swallowed the
-          redirect), and a login with no way to finish it is a dead end. Only the
-          reason it can fail differs, so only the hint does. */}
-      {pasteFlow && (
-        <div className="keyform fade-in">
-          <div className="callout info">
-            <IconInfo />
-            <span>{t(realTauri ? "publish.pasteHintDesktop" : "publish.pasteHint")}</span>
-          </div>
-          {/* The callback URL is long, so it gets the full row and the submit
-              button sits beside it rather than on a line of its own. */}
-          <div className="field">
-            <label htmlFor="oauthpaste">{t("publish.pasteLabel")}</label>
-            <div className="paste-row">
-              <input
-                id="oauthpaste"
-                className="input mono"
-                autoComplete="off"
-                spellCheck={false}
-                value={pasteDraft}
-                placeholder={t("publish.pastePlaceholder")}
-                onChange={(e) => setPasteDraft(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter" && pasteDraft.trim()) submitPastedCode(); }}
-              />
-              <button className="btn" onClick={submitPastedCode} disabled={!pasteDraft.trim()}>
-                {t("publish.pasteSubmit")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {deviceCode && (
-        <div className="keyform fade-in">
-          <div className="callout info">
-            <IconInfo />
-            <span>
-              {t("publish.deviceHint")}{" "}
-              <a href={deviceCode.url} target="_blank" rel="noreferrer">{deviceCode.url}</a>
-            </span>
-          </div>
-          {deviceCode.code && (
-            <div className="devicecode">
-              <span className="devicecode-label">{t("publish.deviceCode")}</span>
-              <CopyChip value={deviceCode.code} />
-            </div>
-          )}
-          <p className="muted">{t("publish.deviceWaiting")}</p>
-        </div>
-      )}
 
       {open && (
         <div className="keyform fade-in">
@@ -2435,6 +2491,25 @@ export function Publish() {
             setGate("");
             loadAccounts();
           }}
+        />
+      )}
+
+      {/* Rendered here, beside the other dialogs, rather than inside the
+          connect panel it used to live in: the flow it belongs to can be
+          started from an account row far down the page, and a panel the page
+          never scrolls to is a step nobody takes. */}
+      {(pasteFlow || deviceCode) && (
+        <SignInDialog
+          provider={(deviceCode ?? pasteFlow)!.provider}
+          code={deviceCode ? { code: deviceCode.code, url: deviceCode.url } : undefined}
+          url={pasteFlow?.authUrl}
+          draft={pasteDraft}
+          onDraft={setPasteDraft}
+          onSubmit={submitPastedCode}
+          // Abandoning the attempt. The poll behind it is still running and
+          // will report whatever it ends up with — a login that completes in
+          // the browser after this is closed still lands.
+          onClose={() => { setPasteFlow(null); setDeviceCode(null); }}
         />
       )}
     </div>
