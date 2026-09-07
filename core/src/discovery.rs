@@ -414,16 +414,22 @@ impl ToolAdapter for CodexAdapter {
     }
 }
 
-/// The Codex CLI version the model list is asked for.
+/// The Codex CLI version claimed when npm cannot be reached.
 ///
 /// `/backend-api/codex/models` answers per calling version: every entry carries
 /// a `minimal_client_version`, and a request naming an older one is answered
 /// with an empty list rather than an error (`client_version=0.50.0` returns
-/// `{"models":[]}` while `0.146.0` returns six models). Keep this in step with
-/// the user-agent the relay sends upstream — `translator::responses::CODEX_UA`
-/// on the server — or this device would advertise a model the relay then
-/// addresses as a client too old to be given it.
-pub const CODEX_CLIENT_VERSION: &str = "0.146.0";
+/// `{"models":[]}` while `0.146.0` returns six models). Each new slug arrives
+/// gated behind the release that introduced it, which is how `gpt-6-astra`
+/// (`minimal_client_version` 0.153.0) stayed invisible to every seller while
+/// this number was 0.146.0 and the accounts could serve it fine.
+///
+/// So this is the floor, not the claim: what actually goes on the wire is
+/// [`crate::executor::codex_cli_version`], asked of npm. Kept in step with the
+/// user-agent the gateway builds from `spec(Provider::Codex)` — a test below
+/// holds the two together — because that constant is what an un-upgraded seller
+/// still sends, and what this one falls back to.
+pub const CODEX_CLIENT_VERSION: &str = "0.153.4";
 
 /// The model slugs a ChatGPT account's Codex surface will actually serve.
 ///
@@ -446,13 +452,12 @@ pub const CODEX_CLIENT_VERSION: &str = "0.146.0";
 /// An empty list is a real answer — "this account may not use this surface" —
 /// and not an error.
 pub async fn codex_servable_models(token: &str, chatgpt_account_id: &str) -> anyhow::Result<Vec<String>> {
+    let version = crate::executor::codex_cli_version();
     let mut req = crate::http::upstream()
-        .get(format!(
-            "https://chatgpt.com/backend-api/codex/models?client_version={CODEX_CLIENT_VERSION}"
-        ))
+        .get(format!("https://chatgpt.com/backend-api/codex/models?client_version={version}"))
         .header("authorization", format!("Bearer {token}"))
         .header("originator", "codex_cli_rs")
-        .header("user-agent", format!("codex_cli_rs/{CODEX_CLIENT_VERSION}"))
+        .header("user-agent", format!("codex_cli_rs/{version}"))
         .timeout(Duration::from_secs(20));
     // Known for an account asale logged in itself; absent on older rows, where
     // the bearer's own claim is the fallback (same as the executor's).
@@ -1044,5 +1049,16 @@ mod tests {
             "organization": { "uuid": "…", "rate_limit_tier": "default_claude_max_5x" }
         });
         assert_eq!(claude_plan_from_profile(&tokens).as_deref(), Some("max5"));
+    }
+
+    /// Asking for the model list as one version and then serving the models it
+    /// returns as another is how a lane advertises a slug the upstream will
+    /// refuse it — so the two numbers are one number.
+    #[test]
+    fn the_codex_user_agent_claims_the_version_the_model_list_was_asked_for() {
+        assert_eq!(
+            asale_protocol::spec(Provider::Codex).user_agent,
+            format!("codex_cli_rs/{CODEX_CLIENT_VERSION}"),
+        );
     }
 }

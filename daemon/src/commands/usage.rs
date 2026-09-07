@@ -842,7 +842,7 @@ async fn fetch_codex_headers(
         .header("accept", "text/event-stream")
         .header("openai-beta", "responses=experimental")
         .header("originator", "codex_cli_rs")
-        .header("user-agent", format!("codex_cli_rs/{}", discovery::CODEX_CLIENT_VERSION))
+        .header("user-agent", asale_client_core::executor::codex_user_agent())
         .header("session_id", uuid::Uuid::new_v4().to_string())
         .header("authorization", format!("Bearer {token}"))
         .json(&body)

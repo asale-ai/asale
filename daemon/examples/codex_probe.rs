@@ -95,7 +95,7 @@ async fn probe(token: &str, account_id: &str, name: &str, body: &Value) {
         .header("accept", "text/event-stream")
         .header("openai-beta", "responses=experimental")
         .header("originator", "codex_cli_rs")
-        .header("user-agent", "codex_cli_rs/0.146.0")
+        .header("user-agent", &format!("codex_cli_rs/{}", asale_client_core::discovery::CODEX_CLIENT_VERSION))
         .header("session_id", uuid::Uuid::new_v4().to_string())
         .header("authorization", format!("Bearer {token}"))
         .header("chatgpt-account-id", account_id)

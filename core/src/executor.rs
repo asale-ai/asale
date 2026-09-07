@@ -729,13 +729,26 @@ pub async fn execute(
         // alongside — `reqwest` appends, and two `anthropic-beta` headers is a
         // shape no first-party client ever puts on the wire.
         let claude_identity = is_claude(&provider) && custom.is_none();
+        // Same move for Codex, for one header. The gateway spells the CLI
+        // version from a compile-time constant, and OpenAI gates new models on
+        // it — so the device that asked its account which models it may serve
+        // (`discovery::codex_servable_models`) is the one that has to claim the
+        // same version when serving them, not the gateway that has no idea when
+        // npm last moved.
+        let codex_identity = provider == "codex" && custom.is_none();
         for (k, v) in &req.upstream.headers {
             if let Some(s) = v.as_str() {
                 if claude_identity && CLAUDE_IDENTITY_HEADERS.iter().any(|h| k.eq_ignore_ascii_case(h)) {
                     continue;
                 }
+                if codex_identity && k.eq_ignore_ascii_case("user-agent") {
+                    continue;
+                }
                 builder = builder.header(k, s);
             }
+        }
+        if codex_identity {
+            builder = builder.header("user-agent", codex_user_agent());
         }
         builder = match custom {
             Some((_, wire)) => authorize_custom(builder, wire, &token, &req.upstream.headers),
@@ -1487,12 +1500,93 @@ const BILLING_PREFIX: &str = "x-anthropic-billing-header:";
 /// The version the fingerprint claims when npm cannot be reached. Kept in step
 /// with `asale_protocol::CLAUDE_CLI_USER_AGENT`, which a test below holds to it.
 const CLAUDE_CODE_VERSION: &str = "2.1.260";
-/// Where `claude update` looks, and so where we look.
-const CLAUDE_CODE_NPM: &str = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
+
+/// A CLI version read from npm's `latest`, cached, with the build's own number
+/// standing in until an answer arrives.
+///
+/// Both vendors gate new models on the version their CLI claims, so a number
+/// baked into the binary is stale from the day the next model ships — see
+/// [`claude_code_version`] and [`codex_cli_version`] for what each one costs.
+struct NpmVersion {
+    /// Where that CLI's own updater looks, and so where we look.
+    url: &'static str,
+    /// What to claim until npm has answered once.
+    fallback: &'static str,
+    latest: std::sync::RwLock<Option<(String, Instant)>>,
+    fetching: std::sync::atomic::AtomicBool,
+}
+
 /// How long a version answer is trusted before another is fetched.
-const CLAUDE_CODE_TTL: Duration = Duration::from_secs(6 * 3600);
-static CLAUDE_CODE_LATEST: std::sync::RwLock<Option<(String, Instant)>> = std::sync::RwLock::new(None);
-static CLAUDE_CODE_FETCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+const NPM_VERSION_TTL: Duration = Duration::from_secs(6 * 3600);
+
+impl NpmVersion {
+    const fn new(url: &'static str, fallback: &'static str) -> NpmVersion {
+        NpmVersion {
+            url,
+            fallback,
+            latest: std::sync::RwLock::new(None),
+            fetching: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Never blocks a call: a request that finds the cache cold or stale kicks
+    /// off the fetch and uses what it has.
+    fn get(&'static self) -> String {
+        let cached = self.latest.read().unwrap().clone();
+        match cached {
+            Some((v, at)) if at.elapsed() < NPM_VERSION_TTL => v,
+            Some((v, _)) => {
+                self.refresh();
+                v
+            }
+            None => {
+                self.refresh();
+                self.fallback.to_string()
+            }
+        }
+    }
+
+    /// Ask npm, once at a time, off the request path. A miss leaves the cache as
+    /// it was, so an offline seller keeps claiming the built-in version rather
+    /// than re-fetching on every call.
+    fn refresh(&'static self) {
+        use std::sync::atomic::Ordering;
+        // Tests must not reach npm: the answer would change what the wire-format
+        // assertions below see, the day either vendor ships the next release.
+        if cfg!(test) {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else { return };
+        if self.fetching.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        handle.spawn(async move {
+            if let Some(v) = self.fetch().await {
+                *self.latest.write().unwrap() = Some((v, Instant::now()));
+            }
+            self.fetching.store(false, Ordering::SeqCst);
+        });
+    }
+
+    async fn fetch(&self) -> Option<String> {
+        let body: serde_json::Value =
+            crate::http::upstream().get(self.url).timeout(Duration::from_secs(15)).send().await.ok()?.json().await.ok()?;
+        let v = body.get("version")?.as_str()?.trim();
+        // A proxy's captive-portal page deserializes as anything; only a plain
+        // dotted release goes anywhere near the user-agent. Pre-releases are
+        // rejected too — claiming a build the vendor has not shipped widely is
+        // the opposite of blending in.
+        is_release_version(v).then(|| v.to_string())
+    }
+}
+
+static CLAUDE_CODE: NpmVersion =
+    NpmVersion::new("https://registry.npmjs.org/@anthropic-ai/claude-code/latest", CLAUDE_CODE_VERSION);
+
+static CODEX_CLI: NpmVersion = NpmVersion::new(
+    "https://registry.npmjs.org/@openai/codex/latest",
+    crate::discovery::CODEX_CLIENT_VERSION,
+);
 
 /// The Claude Code version this client claims, in the user-agent and in the
 /// billing header alike.
@@ -1500,66 +1594,29 @@ static CLAUDE_CODE_FETCHING: std::sync::atomic::AtomicBool = std::sync::atomic::
 /// Anthropic gates new models on it — a subscription request from
 /// `claude-cli/2.1.220` is answered `400 claude_code_version_too_old` for a
 /// model that shipped with 2.1.251, which reads on our side as the model being
-/// broken. A number baked into the binary is therefore stale from the day the
-/// next model ships, so npm's `latest` is asked instead, at most every
-/// [`CLAUDE_CODE_TTL`], and the build's own number stands in until an answer
-/// arrives (which is exactly where this was before).
-///
-/// Never blocks a call: a request that finds the cache cold or stale kicks off
-/// the fetch and uses what it has.
+/// broken.
 pub(crate) fn claude_code_version() -> String {
-    let cached = CLAUDE_CODE_LATEST.read().unwrap().clone();
-    match cached {
-        Some((v, at)) if at.elapsed() < CLAUDE_CODE_TTL => v,
-        Some((v, _)) => {
-            refresh_claude_code_version();
-            v
-        }
-        None => {
-            refresh_claude_code_version();
-            CLAUDE_CODE_VERSION.to_string()
-        }
-    }
+    CLAUDE_CODE.get()
 }
 
-/// Ask npm, once at a time, off the request path. A miss leaves the cache as it
-/// was, so an offline seller keeps claiming the built-in version rather than
-/// re-fetching on every call.
-fn refresh_claude_code_version() {
-    use std::sync::atomic::Ordering;
-    // Tests must not reach npm: the answer would change what the wire-format
-    // assertions below see, the day Anthropic ships the next release.
-    if cfg!(test) {
-        return;
-    }
-    let Ok(handle) = tokio::runtime::Handle::try_current() else { return };
-    if CLAUDE_CODE_FETCHING.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    handle.spawn(async move {
-        if let Some(v) = fetch_claude_code_version().await {
-            *CLAUDE_CODE_LATEST.write().unwrap() = Some((v, Instant::now()));
-        }
-        CLAUDE_CODE_FETCHING.store(false, Ordering::SeqCst);
-    });
+/// The Codex CLI version this client claims on every ChatGPT-backend call.
+///
+/// OpenAI gates new models on it twice over: `/backend-api/codex/models` only
+/// lists a slug to a caller claiming at least its `minimal_client_version`
+/// (which is how `gpt-6-astra` stayed invisible to every seller while this was
+/// pinned at 0.146.0), and the request that then serves it has to claim the
+/// same thing. The gateway puts its own `user-agent` on the relayed spec from
+/// the same compile-time constant; [`execute`] drops that one and re-emits this,
+/// so a seller picks up a new model within [`NPM_VERSION_TTL`] of OpenAI
+/// shipping it rather than waiting for a release of ours.
+pub fn codex_cli_version() -> String {
+    CODEX_CLI.get()
 }
 
-async fn fetch_claude_code_version() -> Option<String> {
-    let body: serde_json::Value = crate::http::upstream()
-        .get(CLAUDE_CODE_NPM)
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await
-        .ok()?
-        .json()
-        .await
-        .ok()?;
-    let v = body.get("version")?.as_str()?.trim();
-    // A proxy's captive-portal page deserializes as anything; only a plain
-    // dotted release goes anywhere near the user-agent. Pre-releases are
-    // rejected too — claiming a build Anthropic has not shipped widely is the
-    // opposite of blending in.
-    is_release_version(v).then(|| v.to_string())
+/// The user-agent a Codex call travels under. Same shape the gateway builds
+/// from [`asale_protocol::spec`], with the version asked of npm.
+pub fn codex_user_agent() -> String {
+    format!("codex_cli_rs/{}", codex_cli_version())
 }
 
 fn is_release_version(v: &str) -> bool {
@@ -3389,14 +3446,17 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
         assert!(ua.contains(&claude_code_version()), "{ua} does not claim {}", claude_code_version());
     }
 
-    /// npm really does answer with a plain release string — the one thing the
-    /// parser above cannot check for itself. Ignored by default: it is a call
-    /// over the network, run it when npm's shape is in question.
+    /// npm really does answer with a plain release string, for both packages —
+    /// the one thing the parser above cannot check for itself. Ignored by
+    /// default: it is a call over the network, run it when npm's shape is in
+    /// question.
     #[tokio::test]
     #[ignore = "hits registry.npmjs.org"]
     async fn npm_answers_with_a_release_version() {
-        let v = fetch_claude_code_version().await.expect("npm answered");
-        assert!(is_release_version(&v), "{v}");
+        for pkg in [&CLAUDE_CODE, &CODEX_CLI] {
+            let v = pkg.fetch().await.unwrap_or_else(|| panic!("npm answered for {}", pkg.url));
+            assert!(is_release_version(&v), "{v}");
+        }
     }
 
     /// npm's answer goes straight into the user-agent, so anything that is not
@@ -3470,6 +3530,14 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
     fn codex_req(url: &str) -> HttpRequestPayload {
         let mut r = req(url, "gpt-5.1", 0);
         r.upstream.provider = "codex".into();
+        r
+    }
+
+    /// The same request as the gateway actually sends it: with a user-agent
+    /// built from the gateway's own compile-time constant.
+    fn codex_req_from_gateway(url: &str, gateway_ua: &str) -> HttpRequestPayload {
+        let mut r = codex_req(url);
+        r.upstream.headers.insert("user-agent".into(), json!(gateway_ua));
         r
     }
 
@@ -3607,6 +3675,40 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
         assert!(raw.contains("chatgpt-account-id: acc-1"), "account id missing from the wire: {raw}");
         // Claude's OAuth requirements are Claude's; they must not follow along.
         assert!(!raw.contains("anthropic-beta"), "claude headers leaked onto codex: {raw}");
+    }
+
+    /// OpenAI gates a new model on the version the caller claims, and the
+    /// gateway's constant is the one number that cannot know when npm moved.
+    /// The device that asked its account which models it may serve is the one
+    /// that has to claim the same version when serving them — so the relayed
+    /// user-agent gives way to this client's, and does not travel beside it.
+    #[tokio::test]
+    async fn the_relayed_codex_user_agent_is_replaced_with_this_clients() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = seen.clone();
+        let server = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                *sink.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).to_string();
+                let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                let _ = sock.flush().await;
+            }
+        });
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let url = format!("http://127.0.0.1:{port}/");
+        let stale = "codex_cli_rs/0.1.0";
+        let payload = codex_req_from_gateway(&url, stale);
+        execute(&crate::http::plain(), &CodexToken(Some("acc-1")), payload, &tx, None, &test_verifier(), never_canceled()).await;
+        let _ = server.await;
+
+        let raw = seen.lock().unwrap().to_lowercase();
+        assert_eq!(raw.matches("user-agent:").count(), 1, "one user-agent, not two: {raw}");
+        assert!(!raw.contains(stale), "the gateway's stale version travelled: {raw}");
+        assert!(raw.contains(&format!("user-agent: {}", codex_user_agent().to_lowercase())), "{raw}");
     }
 
     /// The shape has to name the roles and carry no prompt text — that pairing is

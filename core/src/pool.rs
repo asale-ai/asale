@@ -450,7 +450,8 @@ pub struct AccountRuntime {
 /// Models whose upstream cannot serve a tool-carrying request on the chat
 /// route at all.
 ///
-/// OpenAI's "responses lite" generation — `gpt-5.6-sol`, `-luna`, `-terra` —
+/// OpenAI's "responses lite" generation — `gpt-5.6-sol`, `-luna`, `-terra` and
+/// `gpt-6-astra` —
 /// answers `/v1/chat/completions` with a `400` the moment `tools` and
 /// `reasoning_effort` arrive together:
 ///
@@ -478,7 +479,7 @@ pub struct AccountRuntime {
 // ponytail: the upgrade path is that same flag on `SellableCatalog`, which
 // would make this list a fallback rather than the source.
 pub fn needs_responses_wire(model: &str) -> bool {
-    const LITE: &[&str] = &["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra"];
+    const LITE: &[&str] = &["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-astra"];
     LITE.contains(&model)
 }
 
@@ -1464,7 +1465,7 @@ mod tests {
     /// chat route, so a chat-only endpoint may sell it.
     #[test]
     fn only_the_lite_models_are_kept_off_the_chat_route() {
-        for lite in ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra"] {
+        for lite in ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-astra"] {
             assert!(needs_responses_wire(lite), "{lite}");
         }
         for ok in ["gpt-5.6-codex", "gpt-5.5", "claude-opus-5", "gpt-5.6"] {

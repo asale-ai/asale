@@ -296,7 +296,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         // version, so this has to stay in step with
         // `discovery::CODEX_CLIENT_VERSION`, which is what the model list is
         // asked for.
-        user_agent: "codex_cli_rs/0.146.0",
+        user_agent: "codex_cli_rs/0.153.4",
         extra_headers: &[],
         verify_hosts: &[],
         verify_path: "/models",
