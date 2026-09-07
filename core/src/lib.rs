@@ -6,6 +6,7 @@
 //! The wsrelay protocol here mirrors the server's; the server's e2e test
 //! already exercises a publisher speaking these exact frames.
 
+mod builtin_search;
 pub mod cli_import;
 pub mod config;
 pub mod device_flow;

@@ -41,6 +41,7 @@ fn with_model(body: &[u8], model_id: &str) -> Option<Vec<u8>> {
 /// built is what carries the request and only the origin is ours to replace.
 fn custom_url(base: &str, wire: Wire, built: &str) -> String {
     let base = base.trim().trim_end_matches('/');
+    let base = base.strip_suffix("/chat/completions").or_else(|| base.strip_suffix("/responses")).unwrap_or(base);
     // Between the two OpenAI routes the gateway's path wins over the recorded
     // dialect. It built the *body* for one of them and `custom_placeholder`
     // keeps that path, while this side's record can be a rebuild stale — and
@@ -757,7 +758,14 @@ pub async fn execute(
             .as_deref()
             .map(str::trim)
             .filter(|b| !b.is_empty())
-            .map(|base| (base, lease.upstream_wire.unwrap_or_default()));
+            .map(|base| {
+                let built = req.upstream.url.split('?').next().unwrap_or("");
+                let wire = if built.ends_with("/responses") { Wire::Responses }
+                    else if built.ends_with("/messages") { Wire::Claude }
+                    else if built.contains("/models/") { Wire::Gemini }
+                    else { lease.upstream_wire.unwrap_or_default() };
+                (base, wire)
+            });
         let url = match custom {
             Some((base, wire)) => custom_url(base, wire, &req.upstream.url),
             None => req.upstream.url.clone(),
@@ -776,6 +784,7 @@ pub async fn execute(
         // npm last moved.
         let codex_identity = provider == "codex" && custom.is_none();
         for (k, v) in &req.upstream.headers {
+            if k.eq_ignore_ascii_case("x-asale-search-max-uses") { continue; }
             if let Some(s) = v.as_str() {
                 if claude_identity && CLAUDE_IDENTITY_HEADERS.iter().any(|h| k.eq_ignore_ascii_case(h)) {
                     continue;
@@ -906,6 +915,9 @@ pub async fn execute(
         // can be recorded: the gateway builds this body and never sees the
         // rejection; this process sees the rejection and never kept the body.
         let shape = body_shape(&body);
+        let builtin_search = crate::builtin_search::requested(&body);
+        let search_request = if builtin_search { serde_json::from_slice::<serde_json::Value>(&body).ok() } else { None };
+        let search_template = if builtin_search { builder.try_clone() } else { None };
         builder = builder.body(body);
 
         let send = tokio::select! {
@@ -1116,7 +1128,7 @@ pub async fn execute(
             .unwrap_or_default()
             .to_string();
         let upstream_is_sse = content_type.trim_start().starts_with("text/event-stream");
-        if req.stream || upstream_is_sse {
+        if (req.stream && !builtin_search) || upstream_is_sse {
             break (lease, resp, status);
         }
 
@@ -1175,6 +1187,28 @@ pub async fn execute(
             }
         };
 
+        let body = if let (Some(template), Some(request)) = (search_template, search_request) {
+            let max_searches = req.upstream.headers.get("x-asale-search-max-uses").and_then(|v| v.as_str()).and_then(|v| v.parse::<usize>().ok()).unwrap_or(5).clamp(1, 10);
+            let progress = std::sync::Mutex::new(usage_from_body(&body));
+            let result = tokio::select! {
+                result = crate::builtin_search::complete(template, request, &body, req.budget_tokens, max_searches, &progress) => result,
+                _ = &mut cancel => {
+                    let usage = *progress.lock().unwrap();
+                    finish_canceled(tokens, records, &provider, &lease.account_id, &model, &task_id, &usage).await;
+                    return;
+                }
+            };
+            match result {
+                Ok(bytes) => bytes,
+                Err(message) => {
+                    send_error(out, &task_id, "UPSTREAM_4XX", &message, true);
+                    let usage = *progress.lock().unwrap();
+                    tokens.report(&provider, &lease.account_id, &model, TaskOutcome::Success { tokens_used: usage.quota_tokens().max(0) as u64 });
+                    if let Some(r) = records { r.record(&task_id, &provider, &lease.account_id, &model, &usage, "search_failed").await; }
+                    return;
+                }
+            }
+        } else { body.to_vec() };
         let usage = usage_from_body(&body);
         let _ = out.send(Envelope::with_id(
             &task_id,

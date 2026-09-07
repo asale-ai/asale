@@ -117,6 +117,8 @@ pub struct SupplyItem {
     /// stands on its expiry alone, exactly as before this field existed.
     #[serde(default)]
     pub credential_fp: String,
+    #[serde(default)]
+    pub search_adapter: String,
 }
 
 fn default_true() -> bool {
@@ -146,6 +148,7 @@ impl SupplyItem {
             resume_at: 0,
             wire: String::new(),
             credential_fp: String::new(),
+            search_adapter: String::new(),
         }
     }
 
@@ -287,6 +290,7 @@ mod tests {
             resume_at: 0,
             wire: String::new(),
             credential_fp: "a1b2c3d4".into(),
+            search_adapter: String::new(),
         };
         let v = serde_json::to_value(&item).unwrap();
         assert_eq!(v["provider"], "claude");

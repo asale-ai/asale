@@ -21,6 +21,7 @@ pub mod frame;
 pub mod ids;
 pub mod payload;
 pub mod providers;
+pub mod search;
 
 pub use frame::{codes, is_bad_credential, is_out_of_credit, is_retriable, Envelope, MAX_FRAME_BYTES};
 pub use ids::{Modality, Provider, TokenType, Vendor};

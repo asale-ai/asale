@@ -1080,6 +1080,7 @@ struct LaneOffer {
     /// account, collected in a set so the declaration does not change when the
     /// accounts happen to be iterated in a different order.
     credentials: std::collections::BTreeSet<String>,
+    search_adapters: std::collections::BTreeSet<String>,
 }
 
 #[async_trait]
@@ -1136,6 +1137,9 @@ pub async fn build_supply_items(store: &LocalStore, pool: &StdMutex<AccountPool>
             }
         }
         let offer = offers.entry(key).or_default();
+        if let Some(provider) = Provider::from_str_opt(&v.provider) {
+            offer.search_adapters.insert(asale_protocol::search::adapter(provider, v.upstream_base.as_deref().unwrap_or(""), &v.model).to_string());
+        }
         offer.credentials.insert(credential_mark(&v.provider, &v.account_id, &v.upstream_base));
         if v.status == "selling" {
             // Each account's headroom is its own (spec §4): summing here never
@@ -1210,6 +1214,11 @@ pub async fn build_supply_items(store: &LocalStore, pool: &StdMutex<AccountPool>
                 item = item.asking(ask as i32);
             }
             item.credential_fp = lane_credential_fp(&o.credentials);
+            // A mixed lane can lease any contributing account, so only report
+            // native search when every account agrees on its owner.
+            if o.search_adapters.len() == 1 {
+                item.search_adapter = o.search_adapters.iter().next().cloned().unwrap_or_default();
+            }
             Some(if o.window_remaining > 0 {
                 item
             } else {
