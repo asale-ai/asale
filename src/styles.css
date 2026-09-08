@@ -2093,23 +2093,10 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 }
 .cq-note { margin: var(--s4) 0 0; font-size: var(--fs-micro); color: var(--fg-3); line-height: 1.6; }
 .card-pay-btn { width: 100%; justify-content: center; }
-.card-waiting {
-  display: flex; align-items: center; flex-wrap: wrap; gap: var(--s8);
-  font-size: var(--fs-meta); color: var(--fg-2);
-}
-.card-waiting svg { width: 14px; height: 14px; flex-shrink: 0; color: var(--fg-3); }
-/* The way back to a checkout page that was closed. A link, not a button, in
-   everything but the markup — it has to open in the OS browser, which on the
-   desktop build is a call rather than an href. */
-.card-waiting a, .card-waiting .linkish { color: var(--accent); }
-.card-waiting .linkish {
-  background: none; border: none; padding: 0; font: inherit; cursor: pointer;
-  text-decoration: underline; text-underline-offset: 2px;
-}
-.card-waiting .dot {
-  width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex-shrink: 0;
-  animation: pulse 1.6s ease-in-out infinite;
-}
+/* Both the waiting room and the receipt are short and the body is a fixed
+   height — centred, the empty half reads as breathing room instead of as a
+   panel that forgot to load. */
+.wdlg-body > .pay-done { min-height: 100%; justify-content: center; }
 
 /* ── Amount picker ──────────────────────────────────────────────────────────
    The common top-ups as chips, with a free field in the last cell. One row: the
