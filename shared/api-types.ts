@@ -297,6 +297,9 @@ export interface DepositSessionTx {
   amount: number | null;
   confirmations: number | null;
   credited: boolean;
+  /** What was actually charged, micro-USDT — meaningful once `credited`.
+   *  Absent on servers older than 2026-09-08. */
+  fee?: number | null;
 }
 
 /** `POST /api/v1/wallet/deposit-session` and

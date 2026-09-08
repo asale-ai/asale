@@ -486,10 +486,16 @@ function PayReceipt({
   const { t } = useTranslation();
   const credited = session.status === "credited";
   const received = session.deposit?.amount ?? null;
+  // Once credited the server says what it actually took; the prop is the
+  // estimate for the confirming screen (and for older servers). Recomputing a
+  // percentage off the gross overstated the card fee, since the surcharge
+  // rides on top of the requested figure.
+  const applied = credited ? (session.deposit?.fee ?? fee) : fee;
   // Clamped exactly as the server clamps it (bin/chain.rs), so a deposit
   // smaller than the fee reads as the zero it will actually credit rather than
   // as a negative number no ledger will ever show.
-  const charged = received != null && fee != null ? Math.min(Math.max(fee, 0), received) : null;
+  const charged =
+    received != null && applied != null ? Math.min(Math.max(applied, 0), received) : null;
   const net = received != null && charged != null ? received - charged : received;
   return (
     <div className="pay-done fade-in">
@@ -705,15 +711,16 @@ function CardTopUpSheet({
               {err ? (
                 <Err>{err}</Err>
               ) : (
-                <div className="card-waiting">
-                  <IconRefresh className="spin" />
-                  <span>{t("wallet.cardWaiting")}</span>
+                /* Same shape as the receipt it turns into: mark, title, the
+                   one figure, a line of context, one action. */
+                <div className="pay-done fade-in">
+                  <span className="pay-done-mark"><IconRefresh className="spin" /></span>
+                  <p className="pay-done-title">{t("wallet.cardWaiting")}</p>
                   {session.charge != null && (
-                    <span className="cq-note">
-                      {t("wallet.cardWaitingFor", { charge: fmtUsdt(session.charge) })}
-                    </span>
+                    <p className="pay-done-amount mono">{fmtUsdt(session.charge)} USDT</p>
                   )}
-                  <button type="button" className="linkish" onClick={() => openExternal(session.checkout_url)}>
+                  <p className="pay-done-desc">{t("wallet.cardWaitingHint")}</p>
+                  <button type="button" className="btn ghost sm" onClick={() => openExternal(session.checkout_url)}>
                     {t("wallet.cardReopen")}
                   </button>
                 </div>
