@@ -307,6 +307,8 @@ pub enum Vendor {
     AnthraciteOrg,
     #[serde(rename = "arcee-ai")]
     ArceeAi,
+    /// BAAI's BGE embedding family.
+    Baai,
     Baidu,
     Cognitivecomputations,
     Cohere,
@@ -317,7 +319,10 @@ pub enum Vendor {
     Inception,
     Inclusionai,
     Inflection,
+    Intfloat,
     Kwaipilot,
+    /// Liquid AI's LFM family.
+    Liquid,
     Mancer,
     Meituan,
     #[serde(rename = "meta-llama")]
@@ -333,12 +338,17 @@ pub enum Vendor {
     Relace,
     Sakana,
     Sao10k,
+    #[serde(rename = "sentence-transformers")]
+    SentenceTransformers,
     Stepfun,
     Tencent,
     Thedrummer,
+    Thenlper,
     Thinkingmachines,
     Undi95,
     Upstage,
+    /// Voyage AI's embedding and rerank models, now Anthropic's.
+    Voyageai,
     Writer,
 }
 
@@ -381,6 +391,7 @@ impl Vendor {
             Vendor::Amazon => "amazon",
             Vendor::AnthraciteOrg => "anthracite-org",
             Vendor::ArceeAi => "arcee-ai",
+            Vendor::Baai => "baai",
             Vendor::Baidu => "baidu",
             Vendor::Cognitivecomputations => "cognitivecomputations",
             Vendor::Cohere => "cohere",
@@ -390,7 +401,9 @@ impl Vendor {
             Vendor::Inception => "inception",
             Vendor::Inclusionai => "inclusionai",
             Vendor::Inflection => "inflection",
+            Vendor::Intfloat => "intfloat",
             Vendor::Kwaipilot => "kwaipilot",
+            Vendor::Liquid => "liquid",
             Vendor::Mancer => "mancer",
             Vendor::Meituan => "meituan",
             Vendor::MetaLlama => "meta-llama",
@@ -404,12 +417,15 @@ impl Vendor {
             Vendor::Relace => "relace",
             Vendor::Sakana => "sakana",
             Vendor::Sao10k => "sao10k",
+            Vendor::SentenceTransformers => "sentence-transformers",
             Vendor::Stepfun => "stepfun",
             Vendor::Tencent => "tencent",
             Vendor::Thedrummer => "thedrummer",
+            Vendor::Thenlper => "thenlper",
             Vendor::Thinkingmachines => "thinkingmachines",
             Vendor::Undi95 => "undi95",
             Vendor::Upstage => "upstage",
+            Vendor::Voyageai => "voyageai",
             Vendor::Writer => "writer",
         }
     }
@@ -456,6 +472,7 @@ impl Vendor {
             Vendor::Amazon => "Amazon",
             Vendor::AnthraciteOrg => "Anthracite",
             Vendor::ArceeAi => "Arcee AI",
+            Vendor::Baai => "BAAI",
             Vendor::Baidu => "Baidu",
             Vendor::Cognitivecomputations => "Cognitive Computations",
             Vendor::Cohere => "Cohere",
@@ -465,7 +482,9 @@ impl Vendor {
             Vendor::Inception => "Inception",
             Vendor::Inclusionai => "InclusionAI",
             Vendor::Inflection => "Inflection",
+            Vendor::Intfloat => "intfloat",
             Vendor::Kwaipilot => "KwaiPilot",
+            Vendor::Liquid => "Liquid AI",
             Vendor::Mancer => "Mancer",
             Vendor::Meituan => "Meituan",
             Vendor::MetaLlama => "Meta Llama",
@@ -479,12 +498,15 @@ impl Vendor {
             Vendor::Relace => "Relace",
             Vendor::Sakana => "Sakana AI",
             Vendor::Sao10k => "Sao10K",
+            Vendor::SentenceTransformers => "Sentence Transformers",
             Vendor::Stepfun => "StepFun",
             Vendor::Tencent => "Tencent",
             Vendor::Thedrummer => "TheDrummer",
+            Vendor::Thenlper => "thenlper",
             Vendor::Thinkingmachines => "Thinking Machines",
             Vendor::Undi95 => "Undi95",
             Vendor::Upstage => "Upstage",
+            Vendor::Voyageai => "Voyage AI",
             Vendor::Writer => "Writer",
         }
     }
@@ -527,6 +549,7 @@ impl Vendor {
             "amazon" => Vendor::Amazon,
             "anthracite-org" => Vendor::AnthraciteOrg,
             "arcee-ai" => Vendor::ArceeAi,
+            "baai" => Vendor::Baai,
             "baidu" => Vendor::Baidu,
             "cognitivecomputations" => Vendor::Cognitivecomputations,
             "cohere" => Vendor::Cohere,
@@ -536,7 +559,9 @@ impl Vendor {
             "inception" => Vendor::Inception,
             "inclusionai" => Vendor::Inclusionai,
             "inflection" => Vendor::Inflection,
+            "intfloat" => Vendor::Intfloat,
             "kwaipilot" => Vendor::Kwaipilot,
+            "liquid" => Vendor::Liquid,
             "mancer" => Vendor::Mancer,
             "meituan" => Vendor::Meituan,
             "meta-llama" => Vendor::MetaLlama,
@@ -550,12 +575,15 @@ impl Vendor {
             "relace" => Vendor::Relace,
             "sakana" => Vendor::Sakana,
             "sao10k" => Vendor::Sao10k,
+            "sentence-transformers" => Vendor::SentenceTransformers,
             "stepfun" => Vendor::Stepfun,
             "tencent" => Vendor::Tencent,
             "thedrummer" => Vendor::Thedrummer,
+            "thenlper" => Vendor::Thenlper,
             "thinkingmachines" => Vendor::Thinkingmachines,
             "undi95" => Vendor::Undi95,
             "upstage" => Vendor::Upstage,
+            "voyageai" => Vendor::Voyageai,
             "writer" => Vendor::Writer,
             _ => return None,
         })
@@ -618,6 +646,7 @@ impl Vendor {
             | Vendor::Amazon
             | Vendor::AnthraciteOrg
             | Vendor::ArceeAi
+            | Vendor::Baai
             | Vendor::Baidu
             | Vendor::Cognitivecomputations
             | Vendor::Cohere
@@ -627,7 +656,9 @@ impl Vendor {
             | Vendor::Inception
             | Vendor::Inclusionai
             | Vendor::Inflection
+            | Vendor::Intfloat
             | Vendor::Kwaipilot
+            | Vendor::Liquid
             | Vendor::Mancer
             | Vendor::Meituan
             | Vendor::MetaLlama
@@ -641,17 +672,20 @@ impl Vendor {
             | Vendor::Relace
             | Vendor::Sakana
             | Vendor::Sao10k
+            | Vendor::SentenceTransformers
             | Vendor::Stepfun
             | Vendor::Tencent
             | Vendor::Thedrummer
+            | Vendor::Thenlper
             | Vendor::Thinkingmachines
             | Vendor::Undi95
             | Vendor::Upstage
+            | Vendor::Voyageai
             | Vendor::Writer => &[Provider::Openrouter],
         }
     }
 
-    pub const ALL: [Vendor; 66] = [
+    pub const ALL: [Vendor; 72] = [
         Vendor::Anthropic,
         Vendor::Openai,
         Vendor::Google,
@@ -688,6 +722,7 @@ impl Vendor {
         Vendor::Amazon,
         Vendor::AnthraciteOrg,
         Vendor::ArceeAi,
+        Vendor::Baai,
         Vendor::Baidu,
         Vendor::Cognitivecomputations,
         Vendor::Cohere,
@@ -697,7 +732,9 @@ impl Vendor {
         Vendor::Inception,
         Vendor::Inclusionai,
         Vendor::Inflection,
+        Vendor::Intfloat,
         Vendor::Kwaipilot,
+        Vendor::Liquid,
         Vendor::Mancer,
         Vendor::Meituan,
         Vendor::MetaLlama,
@@ -711,12 +748,15 @@ impl Vendor {
         Vendor::Relace,
         Vendor::Sakana,
         Vendor::Sao10k,
+        Vendor::SentenceTransformers,
         Vendor::Stepfun,
         Vendor::Tencent,
         Vendor::Thedrummer,
+        Vendor::Thenlper,
         Vendor::Thinkingmachines,
         Vendor::Undi95,
         Vendor::Upstage,
+        Vendor::Voyageai,
         Vendor::Writer,
     ];
 }
@@ -962,6 +1002,10 @@ pub enum Modality {
     Speech,
     /// Speech-to-text: audio in, a transcript out.
     Transcription,
+    /// Text in, a vector out. Spelled the way the catalog spells it —
+    /// OpenRouter's `output_modalities` says `"embeddings"`, plural, and the
+    /// route is `/v1/embeddings` — so no side has a second spelling to map.
+    Embeddings,
 }
 
 impl Modality {
@@ -972,6 +1016,7 @@ impl Modality {
             Modality::Video => "video",
             Modality::Speech => "speech",
             Modality::Transcription => "transcription",
+            Modality::Embeddings => "embeddings",
         }
     }
 
@@ -982,6 +1027,7 @@ impl Modality {
             "video" => Modality::Video,
             "speech" => Modality::Speech,
             "transcription" => Modality::Transcription,
+            "embeddings" => Modality::Embeddings,
             _ => return None,
         })
     }
@@ -1000,6 +1046,7 @@ impl Modality {
             Modality::Video => "/videos",
             Modality::Speech => "/audio/speech",
             Modality::Transcription => "/audio/transcriptions",
+            Modality::Embeddings => "/embeddings",
         })
     }
 
@@ -1021,7 +1068,13 @@ impl Modality {
     /// listing nothing is text, which is both the overwhelming majority and
     /// what every row meant before the column existed.
     pub fn of_outputs<S: AsRef<str>>(outputs: &[S]) -> Modality {
-        for m in [Modality::Video, Modality::Image, Modality::Speech, Modality::Transcription] {
+        for m in [
+            Modality::Video,
+            Modality::Image,
+            Modality::Speech,
+            Modality::Transcription,
+            Modality::Embeddings,
+        ] {
             if outputs.iter().any(|o| o.as_ref() == m.as_str()) {
                 return m;
             }
@@ -1038,12 +1091,13 @@ impl Modality {
         Modality::of_outputs(&parts)
     }
 
-    pub const ALL: [Modality; 5] = [
+    pub const ALL: [Modality; 6] = [
         Modality::Text,
         Modality::Image,
         Modality::Video,
         Modality::Speech,
         Modality::Transcription,
+        Modality::Embeddings,
     ];
 }
 
@@ -1074,6 +1128,8 @@ mod modality_tests {
         assert_eq!(Modality::of_modality_str("text+image->video"), Modality::Video);
         assert_eq!(Modality::of_modality_str("text->speech"), Modality::Speech);
         assert_eq!(Modality::of_modality_str("audio->transcription"), Modality::Transcription);
+        assert_eq!(Modality::of_modality_str("text->embeddings"), Modality::Embeddings);
+        assert_eq!(Modality::of_modality_str("text+image->embeddings"), Modality::Embeddings);
         assert_eq!(Modality::of_modality_str("text->text"), Modality::Text);
         // A sparse row is text, which is what every row meant before the
         // column existed — never "unroutable", which would silently withdraw

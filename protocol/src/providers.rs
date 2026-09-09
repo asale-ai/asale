@@ -625,6 +625,43 @@ pub fn denied_providers(source: &str) -> &'static [Provider] {
     }
 }
 
+/// Whether this family serves `POST {api_base}/embeddings`.
+///
+/// Every other modality on the media path is the aggregator's alone — a chat
+/// subscription has no image route — but a vector is the one thing an ordinary
+/// vendor key does answer for, and two of the families here do: OpenRouter
+/// (`/api/v1/embeddings`) and Model Studio, whose compatible-mode base carries
+/// the OpenAI route verbatim. Both were checked against the live hosts, which
+/// answer `401` to an unauthenticated POST rather than `404`.
+///
+/// `custom` is deliberately out. Its URL is rebuilt on the seller's own machine
+/// from the account's base and its declared dialect
+/// (`asale_client_core::executor::custom_url`), and that rebuild only knows the
+/// three chat routes — an embeddings call would arrive at `/chat/completions`.
+pub const fn serves_embeddings(p: Provider) -> bool {
+    matches!(p, Provider::Openrouter | Provider::Qwen)
+}
+
+/// The complement of [`serves_embeddings`], as the static slice the matcher's
+/// candidate filter takes.
+///
+/// Written out rather than derived because the filter wants a `&'static [_]`
+/// and the test below is what keeps it honest: a family added to [`Provider`]
+/// has to be classified here or the assertion fails.
+pub const NO_EMBEDDINGS_ROUTE: &[Provider] = &[
+    Provider::Claude,
+    Provider::ClaudeWork,
+    Provider::ClaudeExtra,
+    Provider::Codex,
+    Provider::Gemini,
+    Provider::Kimi,
+    Provider::KimiApi,
+    Provider::Xai,
+    Provider::XaiApi,
+    Provider::Deepseek,
+    Provider::Custom,
+];
+
 /// The record for a wire string, or `None` if nothing answers to it.
 pub fn spec_of(id: &str) -> Option<&'static ProviderSpec> {
     PROVIDERS.iter().find(|s| s.id == id)
@@ -633,6 +670,16 @@ pub fn spec_of(id: &str) -> Option<&'static ProviderSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every family is either one that serves `/embeddings` or one on the deny
+    /// list — a new provider cannot be left unclassified, which would put it in
+    /// the candidate set for a route it answers 404 to.
+    #[test]
+    fn the_embeddings_deny_list_is_every_other_family() {
+        let derived: Vec<Provider> =
+            Provider::ALL.into_iter().filter(|p| !serves_embeddings(*p)).collect();
+        assert_eq!(NO_EMBEDDINGS_ROUTE, derived);
+    }
 
     /// The table and the enum are two halves of one thing. A variant with no
     /// row would panic in `spec` at whatever moment a user first connected it.

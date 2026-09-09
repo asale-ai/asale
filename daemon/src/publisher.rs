@@ -138,12 +138,30 @@ fn providers_for_vendor(vendor: &str) -> &'static [Provider] {
 /// Text is every family's to sell, including the aggregator's, and an
 /// unreadable modality is text: a sparse catalog row must not silently remove
 /// capacity that has been selling all along.
+///
+/// A vector is the exception in the other direction. `/embeddings` is an
+/// ordinary OpenAI-shaped route and a plain vendor key answers it, so the
+/// families `providers::serves_embeddings` names may all declare those rows —
+/// which is what makes the embeddings market the first non-text one that is not
+/// operator-supplied. Whether a given key really serves a given id is still the
+/// vendor's own answer: `vendor_endpoint_models` intersects this with the
+/// account's `/models`, so a Model Studio key advertises the embedding models
+/// DashScope lists and nothing else.
+///
+/// The server enforces the same rule on the buy side rather than trusting this
+/// one — `gateway::relay::relay_media` denies every family without the route —
+/// because a client too old to know the modality reads it as text and would
+/// otherwise offer a vector request to a Claude subscription.
 fn providers_for_modality(m: Modality) -> Option<&'static [Provider]> {
     match m {
         Modality::Text => None,
+        Modality::Embeddings => Some(EMBEDDING_PROVIDERS),
         _ => Some(&[Provider::Openrouter]),
     }
 }
+
+/// The families with an `/embeddings` route, in `Provider` order.
+const EMBEDDING_PROVIDERS: &[Provider] = &[Provider::Openrouter, Provider::Qwen];
 
 /// What a catalog row produces, from whichever of the two fields the server
 /// sent. `output_modalities` is the authority — it is the column the gateway's
@@ -2598,6 +2616,21 @@ mod tests {
         // the same answer an older build would have given.
         assert!(can_serve_modality("nope", Modality::Text));
         assert!(!can_serve_modality("nope", Modality::Image));
+    }
+
+    /// The one non-text modality an ordinary vendor key serves, and the list
+    /// that says which — held to the protocol's own answer, which is what the
+    /// gateway denies buyers on. Two lists that drifted would put a lane on the
+    /// market that every buy refuses.
+    #[test]
+    fn a_vector_is_sold_by_every_family_with_the_route() {
+        for p in Provider::ALL {
+            assert_eq!(
+                can_serve_modality(p.as_str(), Modality::Embeddings),
+                asale_protocol::providers::serves_embeddings(p),
+                "`{p}` disagrees with the protocol about `/embeddings`"
+            );
+        }
     }
 
     #[test]
