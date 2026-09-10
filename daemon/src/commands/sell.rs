@@ -112,12 +112,26 @@ pub async fn client_status(state: &AppState) -> R<Value> {
 
     // Lane counts are what explain a device that is online and still earning
     // nothing: every lane of every selling account can be cooling or paused.
-    let (lanes_selling, lanes_blocked) = {
+    let (lanes_selling, lanes_blocked, attention) = {
         let pool = state.pool.lock().map_err(|_| "pool lock poisoned".to_string())?;
         let views = pool.lane_views(now_secs());
         let selling = views.iter().filter(|l| l.status == "selling").count();
         let blocked = views.iter().filter(|l| l.sell_enabled && l.status != "selling").count();
-        (selling, blocked)
+        // Lanes that stay down until a person acts — what the desktop shell
+        // turns into an OS notification. `manual` is the operator's own doing.
+        let attention: Vec<Value> = views
+            .iter()
+            .filter(|l| l.sell_enabled && l.requires_user && l.paused_reason.as_deref() != Some("manual"))
+            .map(|l| {
+                json!({
+                    "provider": l.provider,
+                    "account_id": l.account_id,
+                    "model": l.model,
+                    "reason": l.paused_reason,
+                })
+            })
+            .collect();
+        (selling, blocked, attention)
     };
 
     let mut buying: Vec<&str> = Vec::new();
@@ -139,6 +153,7 @@ pub async fn client_status(state: &AppState) -> R<Value> {
         "selling": selling,
         "lanes_selling": lanes_selling,
         "lanes_blocked": lanes_blocked,
+        "attention": attention,
         "buying": buying,
         "version": env!("CARGO_PKG_VERSION"),
         "upgrade": super::settings::upgrade_notice(),

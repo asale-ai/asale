@@ -55,6 +55,12 @@ struct TrayStrings {
     state_online: &'static str,
     state_offline: &'static str,
     state_connecting: &'static str,
+    /// Notification body for a lane that stays down until the operator acts.
+    /// `{account}`/`{provider}` = whose lane, `{reason}` = one of the three below.
+    attention: &'static str,
+    reason_auth: &'static str,
+    reason_blocked: &'static str,
+    reason_breaker: &'static str,
 }
 
 const EN: TrayStrings = TrayStrings {
@@ -66,6 +72,10 @@ const EN: TrayStrings = TrayStrings {
     state_online: "online",
     state_offline: "offline",
     state_connecting: "connecting",
+    attention: "{account} ({provider}): {reason}. Selling is paused until you fix it in Asale.",
+    reason_auth: "sign-in needed",
+    reason_blocked: "upstream refused this machine",
+    reason_breaker: "repeated errors",
 };
 
 const ZH: TrayStrings = TrayStrings {
@@ -77,6 +87,10 @@ const ZH: TrayStrings = TrayStrings {
     state_online: "在线",
     state_offline: "离线",
     state_connecting: "连接中",
+    attention: "{account}（{provider}）：{reason}，出售已暂停，请打开 Asale 处理。",
+    reason_auth: "需重新登录",
+    reason_blocked: "上游拒绝本机",
+    reason_breaker: "连续报错",
 };
 
 const ZH_TW: TrayStrings = TrayStrings {
@@ -88,6 +102,10 @@ const ZH_TW: TrayStrings = TrayStrings {
     state_online: "上線",
     state_offline: "離線",
     state_connecting: "連線中",
+    attention: "{account}（{provider}）：{reason}，出售已暫停，請開啟 Asale 處理。",
+    reason_auth: "需重新登入",
+    reason_blocked: "上游拒絕本機",
+    reason_breaker: "連續報錯",
 };
 
 const JA: TrayStrings = TrayStrings {
@@ -99,6 +117,10 @@ const JA: TrayStrings = TrayStrings {
     state_online: "オンライン",
     state_offline: "オフライン",
     state_connecting: "接続中",
+    attention: "{account}（{provider}）：{reason}。Asale で対処するまで販売は停止します。",
+    reason_auth: "再ログインが必要",
+    reason_blocked: "上流がこの端末を拒否",
+    reason_breaker: "連続エラー",
 };
 
 fn strings(locale: &str) -> &'static TrayStrings {
@@ -116,6 +138,14 @@ impl TrayStrings {
             "online" => self.state_online,
             "connecting" => self.state_connecting,
             _ => self.state_offline,
+        }
+    }
+
+    fn reason_label(&self, reason: &str) -> &'static str {
+        match reason {
+            "auth" => self.reason_auth,
+            "blocked" => self.reason_blocked,
+            _ => self.reason_breaker,
         }
     }
 }
@@ -312,6 +342,7 @@ async fn sync(
 
     let text = match rpc(base, token, "client_status", serde_json::json!({})).await {
         Some(v) => {
+            notify_attention(shell, tray.app_handle(), s, &v["attention"]);
             let state = v["publish_state"].as_str().unwrap_or("offline");
             let selling = v["selling"].as_array().map(|a| a.len()).unwrap_or(0);
             let total = v["accounts_total"].as_u64().unwrap_or(0);
@@ -326,4 +357,74 @@ async fn sync(
     // The tooltip is the only status readout available without clicking, which
     // on a machine that is only ever selling is the one that gets read.
     let _ = tray.set_tooltip(Some(format!("Asale — {text}")));
+}
+
+/// Announce sell lanes that have just stopped waiting on a person, once each.
+///
+/// The window is usually hidden to the tray for days, and a lane that needs a
+/// sign-in or has tripped its breaker earns nothing until somebody looks — so
+/// the OS notification is the one thing that will get them to. Keyed per
+/// account and reason, not per model: a bad credential takes every model of
+/// the account down at once, and that is one problem, not twenty.
+fn notify_attention(shell: &Shell, app: &AppHandle, s: &TrayStrings, attention: &serde_json::Value) {
+    let mut current: Vec<(String, String, String)> = Vec::new();
+    for l in attention.as_array().into_iter().flatten() {
+        let (Some(p), Some(a), Some(r)) =
+            (l["provider"].as_str(), l["account_id"].as_str(), l["reason"].as_str())
+        else {
+            continue;
+        };
+        current.push((p.to_string(), a.to_string(), r.to_string()));
+    }
+    let Ok(mut seen) = shell.notified.lock() else { return };
+    for (provider, account, reason) in fresh(&mut seen, &current) {
+        let body = s
+            .attention
+            .replace("{account}", &account)
+            .replace("{provider}", &provider)
+            .replace("{reason}", s.reason_label(&reason));
+        use tauri_plugin_notification::NotificationExt;
+        if let Err(e) = app.notification().builder().title("Asale").body(&body).show() {
+            tracing::warn!("could not show the lane notification: {e}");
+        }
+    }
+}
+
+/// Which of `current` are new since the last tick. `seen` is left equal to
+/// `current`, so a problem that clears and comes back is reported again.
+fn fresh(
+    seen: &mut std::collections::HashSet<String>,
+    current: &[(String, String, String)],
+) -> Vec<(String, String, String)> {
+    let mut next = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for item in current {
+        let key = format!("{}|{}|{}", item.0, item.1, item.2);
+        if next.insert(key.clone()) && !seen.contains(&key) {
+            out.push(item.clone());
+        }
+    }
+    *seen = next;
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fresh;
+
+    fn lane(a: &str, r: &str) -> (String, String, String) {
+        ("claude".into(), a.into(), r.into())
+    }
+
+    #[test]
+    fn announces_once_per_account_and_again_after_it_clears() {
+        let mut seen = Default::default();
+        // Two models of one account down for one reason: one notification.
+        assert_eq!(fresh(&mut seen, &[lane("a", "auth"), lane("a", "auth")]).len(), 1);
+        assert!(fresh(&mut seen, &[lane("a", "auth")]).is_empty(), "still down, already told");
+        assert!(fresh(&mut seen, &[]).is_empty(), "cleared: nothing to say");
+        assert_eq!(fresh(&mut seen, &[lane("a", "auth")]).len(), 1, "back again: say it again");
+        // A different reason on the same account is a different problem.
+        assert_eq!(fresh(&mut seen, &[lane("a", "auth"), lane("a", "breaker")]).len(), 1);
+    }
 }

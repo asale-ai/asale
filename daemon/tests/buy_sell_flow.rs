@@ -302,6 +302,20 @@ async fn selling_intent_follows_the_account_switches() {
         1
     );
 
+    // A lane that stays down until a person acts is reported for the desktop
+    // shell to announce; one the operator switched off themselves is not.
+    {
+        use asale_client_core::pool::PauseReason;
+        let mut pool = state.pool.lock().unwrap();
+        let model = pool.lane_views(0).into_iter().find(|l| l.sell_enabled).expect("a lane").model;
+        pool.pause_lane("claude", "a@x.com", &model, PauseReason::Auth, 0);
+        pool.pause_lane("claude", "a@x.com", "claude-manual-probe", PauseReason::Manual, 0);
+    }
+    let attention = commands::client_status(&state).await.unwrap()["attention"].clone();
+    let reasons: Vec<&str> = attention.as_array().unwrap().iter().map(|l| l["reason"].as_str().unwrap()).collect();
+    assert_eq!(reasons, ["auth"], "auth needs the operator, manual was the operator: {attention}");
+    assert_eq!(attention[0]["account_id"], "a@x.com");
+
     // Switching the last one off takes the device back off the market, session
     // included — a device with nothing to sell must not hold a live session.
     commands::set_account_sell(&state, "claude".into(), "a@x.com".into(), false, None, None, None, None, None).await.unwrap();

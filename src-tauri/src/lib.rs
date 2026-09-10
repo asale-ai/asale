@@ -47,6 +47,10 @@ pub struct Shell {
     /// The panel sizes itself to its content *after* it is placed, so the
     /// re-anchoring that follows needs the click long after it happened.
     pub panel_anchor: std::sync::Mutex<Option<(f64, f64)>>,
+    /// Sell-lane problems already announced with an OS notification, as
+    /// `provider|account|reason` keys. A key leaves the set when the problem
+    /// clears, so the same lane failing again is announced again.
+    pub notified: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 /// The panel's width, and the height it opens at before the frontend has
@@ -111,6 +115,7 @@ pub fn run() {
         })
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .invoke_handler(tauri::generate_handler![
             show_main_window,
@@ -147,6 +152,7 @@ pub fn run() {
                 // within a tick if the user has chosen otherwise.
                 close_to_tray: AtomicBool::new(true),
                 panel_anchor: std::sync::Mutex::new(None),
+                notified: std::sync::Mutex::new(Default::default()),
             });
             app.manage(shell.clone());
 

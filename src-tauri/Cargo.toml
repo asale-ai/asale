@@ -31,6 +31,8 @@ tracing-subscriber.workspace = true
 
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
+# OS notifications for sell lanes that stay down until the operator acts (tray.rs).
+tauri-plugin-notification = "2"
 tauri-plugin-deep-link = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
