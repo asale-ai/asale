@@ -424,6 +424,15 @@ pub fn quota_exhausted(status: u16, body: &str) -> bool {
     asale_protocol::is_out_of_credit(status, body)
 }
 
+/// Whether a non-429 4xx is really a rate limit.
+///
+/// The vocabulary lives in the protocol crate for the same reason the credential
+/// one does: the gateway reads the same body off the error frame for sellers
+/// still on an older client. See [`asale_protocol::is_rate_limited`].
+pub fn rate_limited(status: u16, body: &str) -> bool {
+    asale_protocol::is_rate_limited(status, body)
+}
+
 /// How to resolve the upstream bearer token for a provider.
 ///
 /// Both hooks carry the model: availability and failure state are tracked per
@@ -1001,6 +1010,13 @@ pub async fn execute(
                 // below that arm, this predicate could never see one.
                 s if unsupported_model(s, &detail) => TaskOutcome::Unsupported,
                 429 => TaskOutcome::RateLimited { reset_at },
+                // A rate limit the vendor chose to report as something other than
+                // a 429 — OpenRouter caps a key by the day and says so with a 403.
+                // Must sit above the credential/machine arm: read there, a daily
+                // cap becomes `Blocked`, which parks the lane until its operator
+                // notices, for something that clears itself overnight. See
+                // [`rate_limited`].
+                s if rate_limited(s, &detail) => TaskOutcome::RateLimited { reset_at },
                 401 | 403 => refusal_outcome(status, &detail),
                 s if s >= 500 => TaskOutcome::ServerError,
                 // A 400 that is really "out of credit" — cools the account like the
@@ -3898,6 +3914,31 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
         // leaves the rate-limited lane advertised for the next buyer to hit.
         assert_eq!(e.payload["code"], "UPSTREAM_RATE_LIMIT");
         assert_eq!(e.payload["retriable"], true);
+    }
+
+    /// A per-key daily cap is a rate limit, whatever status the vendor picked.
+    ///
+    /// OpenRouter says it with a **403**, which the `401 | 403` arm reads as the
+    /// *machine* being refused. That parks the lane "waiting for the operator" —
+    /// right for a geo block, wrong for a cap that clears overnight. On
+    /// 2026-09-10 it took three of one seller's lanes out for the rest of the
+    /// day (`qwen3-vl`, `gpt-image-2`, `seedance-2.0-fast`) and every buyer of
+    /// those models was told nobody was selling.
+    #[test]
+    fn a_daily_key_cap_is_a_rate_limit_not_a_blocked_machine() {
+        let openrouter = r#"{"error":{"message":"Key limit exceeded (daily limit). Manage it using https://openrouter.ai/workspaces/default/keys/100e7de6"}}"#;
+        assert!(rate_limited(403, openrouter));
+        // It must win over `refusal_outcome`, which would call this a blocked
+        // machine — the whole point of the arm's position in the chain.
+        assert_eq!(refusal_outcome(403, openrouter), TaskOutcome::Blocked);
+
+        // Narrow on purpose. A geo refusal keeps its old reading: a genuinely
+        // blocked machine cycling back onto the market every fifteen minutes is
+        // the failure this must not trade for.
+        assert!(!rate_limited(403, r#"{"type":"forbidden","message":"Request not allowed"}"#));
+        assert!(!rate_limited(403, r#"{"error":{"code":"unsupported_country_region_territory"}}"#));
+        // And an ordinary bad request is still the buyer's.
+        assert!(!rate_limited(400, r#"{"error":{"message":"max_tokens: 99999 > 32000"}}"#));
     }
 
     #[test]

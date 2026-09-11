@@ -276,6 +276,47 @@ pub fn is_out_of_credit(status: u16, body: &str) -> bool {
     .any(|needle| body.contains(needle))
 }
 
+/// A rate limit the vendor reported with something other than a `429`.
+///
+/// OpenRouter caps a key by the day and refuses past it with a **403**:
+///
+///   {"error":{"message":"Key limit exceeded (daily limit). Manage it using
+///    https://openrouter.ai/workspaces/default/keys/…"}}
+///
+/// A bare 403 is read as the *machine* being refused — a region block or a
+/// middlebox — which takes the lane off the market and waits for its operator
+/// (see `refusal_outcome`). That reading is right for a geo refusal and wrong
+/// here: nothing about the machine changed, and the limit resets on its own.
+/// On 2026-09-10 it cost one seller three lanes for the rest of the day
+/// (`qwen3-vl`, `gpt-image-2`, `seedance-2.0-fast`), each one paused "waiting
+/// for the operator" while every buyer of those models was told nobody was
+/// selling.
+///
+/// Deliberately narrow. A 403 that says nothing about limits keeps its old
+/// reading: getting *this* wrong the other way would leave a genuinely blocked
+/// machine cycling back onto the market every fifteen minutes.
+///
+/// Lives here for the same reason as [`is_out_of_credit`]: the publisher acts
+/// on it, and the gateway re-reads the frame for sellers on an older client.
+pub fn is_rate_limited(status: u16, body: &str) -> bool {
+    // 429 already means this and is handled before anyone asks.
+    if !(400..500).contains(&status) {
+        return false;
+    }
+    let body = body.to_ascii_lowercase();
+    [
+        // OpenRouter's per-key daily/monthly cap.
+        "key limit exceeded",
+        "daily limit",
+        // The generic spellings, for vendors that pick a 4xx other than 429.
+        "rate limit exceeded",
+        "too many requests",
+        "quota exceeded for quota metric",
+    ]
+    .iter()
+    .any(|needle| body.contains(needle))
+}
+
 /// The words a vendor uses when it is talking about the *credential* rather
 /// than about the request. Deliberately narrow: a geo refusal or a malformed
 /// body never contains them.
