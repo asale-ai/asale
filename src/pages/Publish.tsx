@@ -252,7 +252,7 @@ const BAND_PRESETS = [RATIO_MIN, RATIO_DEFAULT, 50, 60, 80];
  *  floor of 1, because "serve nothing" is the sell switch's job, and a ceiling
  *  that is a sanity bound on a typed number rather than a vendor limit. */
 const SLOTS_MIN = 1;
-const SLOTS_MAX = 64;
+const SLOTS_MAX = 50;
 const SLOTS_DEFAULT = 10;
 const clampSlots = (n: number) => Math.min(SLOTS_MAX, Math.max(SLOTS_MIN, n));
 /** The value in force, with a 0 from a row written before the setting existed

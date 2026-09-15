@@ -113,8 +113,9 @@ pub const DEFAULT_SELL_CONCURRENCY: i64 = 10;
 /// The range an operator may set concurrency to. The floor is 1 — an account
 /// that serves nothing is expressed by switching selling off, not by a zero
 /// here, and a zero would otherwise declare a lane the market can never pick.
-/// The ceiling is a sanity bound on a hand-typed number, not a vendor limit.
-pub const SELL_CONCURRENCY_RANGE: (i64, i64) = (1, 64);
+/// The ceiling is what the market honours from a seller's declaration
+/// (the gateway clamps anything above it to the same number).
+pub const SELL_CONCURRENCY_RANGE: (i64, i64) = (1, 50);
 
 /// Clamp a concurrency setting into its legal range.
 ///
