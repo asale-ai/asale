@@ -103,11 +103,12 @@ pub const RATIO_BAND_FULL: (i64, i64) = (5, 100);
 pub const DEFAULT_SELL_MIN_RATIO: i64 = 10;
 
 /// What one subscription account serves at once when nobody has said
-/// otherwise. Five is the number a single interactive CLI session comfortably
-/// keeps busy without the vendor starting to 429 — high enough that a seller is
-/// not leaving capacity idle, low enough that the default never gets an account
-/// rate-limited on its owner's behalf.
-pub const DEFAULT_SELL_CONCURRENCY: i64 = 5;
+/// otherwise. Ten: a single buyer running an agent loop sends ten-odd calls a
+/// minute, and at five the market read that one buyer as a third of the
+/// model's whole capacity and priced it up accordingly (gpt-6-astra,
+/// 2026-09-15). High enough that a seller is not leaving capacity idle, still
+/// well under where the vendors start to 429 an account.
+pub const DEFAULT_SELL_CONCURRENCY: i64 = 10;
 
 /// The range an operator may set concurrency to. The floor is 1 — an account
 /// that serves nothing is expressed by switching selling off, not by a zero
@@ -167,7 +168,7 @@ CREATE TABLE IF NOT EXISTS tools (
   sell_daily_limit INTEGER NOT NULL DEFAULT 0,
   sell_min_ratio INTEGER NOT NULL DEFAULT 10,
   sell_max_ratio INTEGER NOT NULL DEFAULT 100,
-  sell_concurrency INTEGER NOT NULL DEFAULT 5,
+  sell_concurrency INTEGER NOT NULL DEFAULT 10,
   sell_models_json TEXT NOT NULL DEFAULT '[]',
   UNIQUE(provider, account_id)
 );
@@ -247,9 +248,9 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE tools ADD COLUMN sell_min_ratio INTEGER NOT NULL DEFAULT 10",
     "ALTER TABLE tools ADD COLUMN sell_max_ratio INTEGER NOT NULL DEFAULT 100",
     // How many requests the account serves at once, declared to the market as
-    // the lane's concurrency ceiling. Defaulted to the same 5 a fresh row gets;
-    // `normalise_concurrency` maps a 0 from an older row onto it too.
-    "ALTER TABLE tools ADD COLUMN sell_concurrency INTEGER NOT NULL DEFAULT 5",
+    // the lane's concurrency ceiling. Defaulted to the same 10 a fresh row
+    // gets; `normalise_concurrency` maps a 0 from an older row onto it too.
+    "ALTER TABLE tools ADD COLUMN sell_concurrency INTEGER NOT NULL DEFAULT 10",
     // JSON array of every local store holding this account's token.
     "ALTER TABLE tools ADD COLUMN sources TEXT",
     // The models the account sells; `[]` (the default an older row lands on)
