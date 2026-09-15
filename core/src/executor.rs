@@ -2244,9 +2244,18 @@ fn error_class(status: u16, body: &str) -> String {
             serde_json::Value::Number(n) => Some(n.to_string()),
             _ => None,
         });
-    match class {
+    let class = match class {
         Some(c) => format!("{status} {}", c.chars().take(64).collect::<String>()),
         None => status.to_string(),
+    };
+    // The gateway downgrades to its own search only when it can tell the vendor
+    // refused *search* — and the message that says so is dropped above. A fixed
+    // marker carries that fact and nothing of the body. OpenRouter says it as
+    // `404` + `code: 404`, which alone reads as a missing lane.
+    if asale_protocol::search::unavailable(body) {
+        format!("{class} web_search_unsupported")
+    } else {
+        class
     }
 }
 
@@ -2340,6 +2349,9 @@ mod tests {
         assert_eq!(error_class(402, r#"{"error":{"message":"x","details":{"error_code":"credits_required"}}}"#), "402 credits_required");
         assert_eq!(error_class(401, r#"{"error":{"code":401,"message":"bad key sk-live-secret"}}"#), "401 401");
         assert_eq!(error_class(502, "<html>gateway</html>"), "502");
+        let openrouter = r#"{"error":{"message":"The requested model does not support native web search. Use engine: \"auto\" or \"exa\" instead","code":404}}"#;
+        assert_eq!(error_class(404, openrouter), "404 404 web_search_unsupported");
+        assert!(asale_protocol::search::unavailable(&error_class(404, openrouter)), "the gateway must recognise the marker");
         assert!(!error_class(400, r#"{"error":{"type":"invalid_request_error","message":"secret@example.com"}}"#).contains('@'));
     }
 

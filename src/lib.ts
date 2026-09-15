@@ -867,9 +867,9 @@ export interface ServerRecord {
   out_tokens: number;
   amount_usdt: number;
   provider_income: number;
-  platform_fee: number;
-  /** Share of the vendor's list price this task was billed at (0.82 = 82% of
-   *  list). Null for tasks settled before the server recorded it. */
+  /** Share of the vendor's list price (0.82 = 82% of list): what the buyer
+   *  paid in the consumer role, what the seller earned in the provider role.
+   *  Null for tasks settled before the server recorded it. */
   mkt_ratio: number | null;
   status: number;
   /** How the call ended, when "done"/"failed" alone would misreport it:

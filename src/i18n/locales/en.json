@@ -702,6 +702,8 @@
     "statusInterrupted": "interrupted",
     "discount": "Discount (of list)",
     "discountHint": "What this call was billed at, as a share of the vendor's list price",
+    "incomeRatio": "Income (of list)",
+    "incomeRatioHint": "What you earned on this call, as a share of the vendor's list price",
     "refresh": "Refresh",
     "emptyProviderDesc": "Requests you serve to the market will be listed here with their earnings.",
     "emptyConsumerDesc": "Requests your CLIs buy through Asale will be listed here with their cost."

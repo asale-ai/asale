@@ -47,7 +47,7 @@ pub fn adapter(provider: Provider, base: &str, model: &str) -> &'static str {
         "doubao" => m.starts_with("doubao-"),
         "hunyuan" => m.starts_with("hunyuan-"),
         "perplexity" => m.starts_with("sonar"),
-        "openrouter_native" => true,
+        "openrouter_native" => openrouter_native_search(m),
         _ => false,
     };
     if !owns_model {
@@ -60,6 +60,39 @@ pub fn adapter(provider: Provider, base: &str, model: &str) -> &'static str {
     } else {
         owner
     }
+}
+
+/// The families OpenRouter runs `engine: "native"` search for. Every other
+/// model answers that plugin with a `404` — 50 `seed-2-1-turbo` requests on
+/// 2026-09-15, when this was `true` for all of them.
+///
+/// Its catalog API has no flag for it: `web_search_options` is listed by 19 of
+/// 445 models and by no Claude, Gemini or Grok. So this follows the list in its
+/// docs, and the gateway's platform search covers whatever it leaves out:
+/// <https://openrouter.ai/docs/guides/features/server-tools/web-search#native-search-providers>
+fn openrouter_native_search(m: &str) -> bool {
+    // Image models share their family's name but not its search.
+    if m.contains("image") {
+        return false;
+    }
+    let num = |s: &str| -> u32 {
+        s.split(|c: char| !c.is_ascii_digit()).find(|n| !n.is_empty()).and_then(|n| n.parse().ok()).unwrap_or(0)
+    };
+    if let Some(r) = m.strip_prefix("claude-") {
+        // 3.5 Haiku, 3.7 Sonnet, then everything from 4.
+        let dotted = |a: &str, b: &str| r.contains(&format!("{a}.{b}")) || r.contains(&format!("{a}-{b}"));
+        return num(r) >= 4 || dotted("3", "7") || (dotted("3", "5") && r.contains("haiku"));
+    }
+    if let Some(r) = m.strip_prefix("gpt-") {
+        return r.starts_with("4.1") || num(r) >= 5;
+    }
+    if let Some(r) = m.strip_prefix("gemini-") {
+        return num(r) >= 3;
+    }
+    if let Some(r) = m.strip_prefix("grok-") {
+        return num(r) >= 4;
+    }
+    m == "o3" || m.starts_with("o3-pro") || m.starts_with("o4-mini") || m.starts_with("sonar")
 }
 
 /// A search downgrade needs a search-specific refusal, not a generic API error.
@@ -129,5 +162,22 @@ mod tests {
             adapter(Provider::Deepseek, "", "deepseek-v4-pro"),
             "deepseek"
         );
+    }
+
+    #[test]
+    fn openrouter_searches_natively_only_for_the_families_it_documents() {
+        for m in [
+            "claude-opus-5", "claude-fable-5-1", "claude-sonnet-4.5", "claude-3.7-sonnet", "claude-3-5-haiku",
+            "anthropic/claude-opus-5", "gpt-5.5", "gpt-6-astra", "gpt-4.1-mini", "o3", "o3-pro", "o4-mini",
+            "gemini-3.8-flash", "gemini-3-pro", "grok-4.6", "sonar", "sonar-pro",
+        ] {
+            assert_eq!(adapter(Provider::Openrouter, "", m), "openrouter_native", "{m}");
+        }
+        for m in [
+            "seed-2-1-turbo", "qwen3-max", "deepseek-v4-pro", "kimi-k2", "gpt-4o", "gpt-4o-mini", "o3-mini",
+            "gemini-2.5-pro", "grok-3", "claude-3-haiku", "claude-3-5-sonnet", "gemini-3-pro-image", "gpt-5-image-mini",
+        ] {
+            assert_eq!(adapter(Provider::Openrouter, "", m), "", "{m}");
+        }
     }
 }
