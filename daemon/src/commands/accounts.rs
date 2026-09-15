@@ -375,6 +375,7 @@ pub async fn list_accounts(state: &AppState) -> R<Value> {
 
     let mut out = Vec::with_capacity(statuses.len());
     for s in statuses {
+        if !asale_protocol::PROVIDERS.iter().any(|p|p.id==s.provider&&p.offered_by_default){continue;}
         let tool = tools.iter().find(|t| t.provider == s.provider && t.account_id == s.account_id);
         let plan = s.plan.clone();
         let window_cap = Provider::from_str_opt(&s.provider)
@@ -674,7 +675,7 @@ pub async fn capabilities(state: &AppState) -> Option<Capabilities> {
 /// working screen.
 pub async fn connect_offer(state: &AppState) -> R<Value> {
     Ok(match capabilities(state).await {
-        Some(c) => json!({"providers": c.providers, "sections": c.sections, "answered": true}),
+        Some(c) => json!({"providers": c.providers.into_iter().filter(|id|asale_protocol::PROVIDERS.iter().any(|s|s.id==id&&s.offered_by_default)).collect::<Vec<_>>(), "sections": [], "answered": true}),
         None => json!({
             "providers": asale_protocol::PROVIDERS
                 .iter()
@@ -693,6 +694,10 @@ pub async fn connect_offer(state: &AppState) -> R<Value> {
 /// gateway will drop from every declaration, which looks to its owner like a
 /// lane that sells nothing for no reason.
 async fn require_granted(state: &AppState, provider: &str) -> R<()> {
+    if !asale_protocol::PROVIDERS.iter().any(|s|s.id==provider&&s.offered_by_default) {
+        return Err(cmd_err!("errors.auth.notGranted", "platform channels are managed in the administration center"));
+    }
+
     match capabilities(state).await {
         Some(c) if c.grants(provider) => Ok(()),
         _ => Err(cmd_err!(
@@ -739,26 +744,11 @@ async fn granted_family_accounts(state: &AppState) -> Vec<(String, String)> {
 /// would be asking a question about a feature it does not use on the same
 /// one-minute clock.
 pub async fn enforce_provider_policy(state: &AppState) -> usize {
-    let held = granted_family_accounts(state).await;
-    if held.is_empty() {
-        return 0;
-    }
-    // Only on a definite answer: not signed in, or a server that did not reply,
-    // must never be the reason somebody's pasted-in keys are deleted.
-    //
-    // That guard leans on the server telling the two apart — `api::capabilities`
-    // answers an anonymous caller with the default set and a *rejected*
-    // credential with a 401, so an expired access token reaches `authed`'s
-    // refresh-and-retry rather than arriving here as "you are granted nothing".
-    // It did not always: on 2026-09-02 a fifteen-minute token lapsed under a
-    // live operator's daemon and the next sweep deleted their aggregator key.
-    let Some(caps) = capabilities(state).await else { return 0 };
-    let revoked: Vec<(String, String)> =
-        held.into_iter().filter(|(provider, _)| !caps.grants(provider)).collect();
-    if revoked.is_empty() {
-        return 0;
-    }
-    purge_accounts(state, &revoked).await
+    // Remove legacy platform supply from the runtime, but retain sealed local
+    // material until the operator has completed the explicit migration.
+    let held=granted_family_accounts(state).await;
+    if !held.is_empty(){publisher::rebuild_pool(&state.store,&state.pool).await;}
+    held.len()
 }
 
 /// Remove the named accounts, keys and settings included.
