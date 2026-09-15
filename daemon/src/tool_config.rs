@@ -150,6 +150,7 @@ const CODEX_API_KEY: &str = "OPENAI_API_KEY";
 /// The `[model_providers.<id>]` entry asale owns. Named distinctly so a restore
 /// can identify exactly what we added without guessing.
 const CODEX_PROVIDER_ID: &str = "asale";
+const CODEX_BEARER: &str = "experimental_bearer_token";
 /// Codex ≥ 0.146 refuses to load a config that still says `wire_api = "chat"`
 /// ("`wire_api = \"chat\"` is no longer supported"), and a config it refuses to
 /// load takes the whole switch with it — the tool silently keeps using its
@@ -510,7 +511,17 @@ pub fn points_at_proxy(tool: &str) -> bool {
 /// upgrade that adds a field to it takes *every* Codex command down until the
 /// catalog is rebuilt (see `codex_catalog::matches_installed_codex`).
 pub fn needs_reapply(tool: &str) -> bool {
-    !points_at_proxy(tool) || (tool == "codex" && !crate::codex_catalog::matches_installed_codex())
+    !points_at_proxy(tool)
+        || (tool == "codex" && (!crate::codex_catalog::matches_installed_codex() || !codex_has_bearer()))
+}
+
+/// Configs written before the provider carried its own bearer 401 on Codex
+/// >= 0.153 while still pointing at the proxy; this makes them reapply.
+fn codex_has_bearer() -> bool {
+    read_raw(&primary_config_path("codex"))
+        .and_then(|raw| raw.parse::<toml_edit::DocumentMut>().ok())
+        .and_then(|doc| doc.get("model_providers")?.get(CODEX_PROVIDER_ID)?.get(CODEX_BEARER)?.as_str().map(|s| !s.is_empty()))
+        .unwrap_or(false)
 }
 
 /// Is this tool buying right now?
@@ -740,6 +751,11 @@ fn apply_codex(base_url: &str, token: &str, models: &[String]) -> Result<()> {
         // The proxy serves the Responses API, the only dialect this Codex
         // generation still speaks.
         entry["wire_api"] = toml_edit::value(CODEX_WIRE_API);
+        // Codex >= 0.153 picks credentials by auth.json's `auth_mode`: signed in
+        // to ChatGPT, it sends the ChatGPT token (or nothing) to a custom
+        // provider and ignores OPENAI_API_KEY, so the proxy answers 401. A
+        // provider-level bearer wins over both.
+        entry[CODEX_BEARER] = toml_edit::value(token);
         tbl.insert(CODEX_PROVIDER_ID, toml_edit::Item::Table(entry));
     }
 
@@ -1994,6 +2010,12 @@ mod tests {
                 Some("responses"),
                 "`chat` is rejected outright by Codex >= 0.146"
             );
+            assert_eq!(
+                doc["model_providers"][CODEX_PROVIDER_ID][CODEX_BEARER].as_str(),
+                Some("sk-asale-codex"),
+                "a ChatGPT-signed-in Codex ignores OPENAI_API_KEY"
+            );
+            assert!(codex_has_bearer(), "an old config without it gets reapplied");
             assert_eq!(
                 doc[CODEX_MODEL].as_str(),
                 Some("gpt-5.5"),
