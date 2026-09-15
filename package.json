@@ -1,6 +1,6 @@
 {
   "name": "asale-client",
-  "version": "0.10.1",
+  "version": "1.0.2",
   "private": true,
   "type": "module",
   "scripts": {
