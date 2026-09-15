@@ -1137,6 +1137,7 @@ pub async fn build_supply_items(store: &LocalStore, pool: &StdMutex<AccountPool>
     let mut offers: std::collections::BTreeMap<(String, String), LaneOffer> = Default::default();
     let mut wire_conflicts = 0usize;
     for v in views {
+        if !asale_protocol::PROVIDERS.iter().any(|p|p.id==v.provider&&p.offered_by_default){continue;}
         // An account the operator has not switched on for selling is not on
         // the market at all — not even as a paused lane.
         if !v.sell_enabled {
@@ -1635,6 +1636,7 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
     // `set_accounts`, which is the call that decides which lanes exist.
     let mut scoped_blocks: Vec<(String, String, String, i64)> = Vec::new();
     for tool in &tools {
+        if !asale_protocol::PROVIDERS.iter().any(|p|p.id==tool.provider&&p.offered_by_default){continue;}
         if tool.origin.as_deref() == Some("import") && buying.contains(&tool.provider) {
             continue;
         }
@@ -2065,6 +2067,7 @@ async fn refresh_due_tokens(store: &LocalStore, pool: &Arc<StdMutex<AccountPool>
     let tools = store.list_tools().await?;
     let now = now_secs();
     for tool in tools {
+        if !asale_protocol::PROVIDERS.iter().any(|p|p.id==tool.provider&&p.offered_by_default){continue;}
         let adapter = match adapter_for(&tool.provider) {
             Some(a) => a,
             None => continue,

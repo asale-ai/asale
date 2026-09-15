@@ -593,20 +593,6 @@ rpc_args! {
         /// `[]` puts every model it can serve back on the market.
         #[serde(default)] models: Option<Vec<String>>,
     }
-    // Custom endpoints. Every term past the URL and key is optional and falls
-    // back to the account's current value (or, on a first connect, to the
-    // ordinary defaults) — `wire` to whatever the probe finds the endpoint
-    // speaking.
-    CustomEndpointArgs {
-        #[serde(alias = "base_url")] base_url: String,
-        #[serde(alias = "api_key")] api_key: String,
-        #[serde(default)] wire: Option<String>,
-        #[serde(default)] label: Option<String>,
-        #[serde(default, alias = "min_ratio")] min_ratio: Option<i64>,
-        #[serde(default)] concurrency: Option<i64>,
-        #[serde(default)] enabled: Option<bool>,
-    }
-    EndpointArgs   { #[serde(alias = "account_id")] account_id: String }
     LaneArgs       {
         #[serde(default)] provider: Option<String>,
         #[serde(default, alias = "account_id")] account_id: Option<String>,
@@ -861,36 +847,7 @@ async fn rpc(
         // An endpoint of its owner's own, sold as if it were a subscription.
         // Refused unless the server has granted this login the family — see
         // `commands::accounts::require_granted`.
-        "connect_custom_endpoint" => {
-            let p: CustomEndpointArgs = args(&a)?;
-            commands::connect_custom_endpoint(
-                st,
-                p.base_url,
-                p.api_key,
-                p.wire,
-                p.label,
-                p.min_ratio,
-                p.concurrency,
-                p.enabled,
-            )
-            .await?
-        },
-        "list_custom_endpoints" => commands::list_custom_endpoints(st).await?,
-        // Always answerable, so the UI can decide whether to offer the tab.
-        // What the connect screen may draw, and the forms for it. Named for
-        // what it answers rather than for one family — see
-        // `commands::accounts::connect_offer`.
         "connect_offer" => commands::connect_offer(st).await?,
-        // Kept under its old name for a frontend that has not been rebuilt.
-        "custom_endpoints_status" => commands::connect_offer(st).await?,
-        "refresh_custom_endpoint" => {
-            let p: EndpointArgs = args(&a)?;
-            commands::refresh_custom_endpoint(st, p.account_id).await?
-        },
-        "remove_custom_endpoint" => {
-            let p: EndpointArgs = args(&a)?;
-            commands::remove_custom_endpoint(st, p.account_id).await.map(Value::Bool)?
-        },
         // Buy from this device's own lane, on purpose. Costs real money and
         // real subscription quota — see `commands::probe`.
         "test_supply" => {

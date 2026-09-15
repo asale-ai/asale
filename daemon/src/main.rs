@@ -17,6 +17,12 @@ fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--export-platform-channels" => {
+                let path=args.next().ok_or_else(||anyhow::anyhow!("output file required"))?;
+                let count=tokio::runtime::Runtime::new()?.block_on(asale_daemon::platform_export::export(&path))?;
+                println!("Exported {count} platform accounts to {path}. Import this private file in the admin center, review prices, then delete it.");
+                return Ok(());
+            }
             "--bind" | "-b" => bind_arg = args.next(),
             "--help" | "-h" => {
                 println!("asaled — Asale client daemon\n\nUSAGE:\n  asaled [--bind <ip:port>]   (default {}, env ASALE_BIND)", asale_daemon::DEFAULT_BIND);
