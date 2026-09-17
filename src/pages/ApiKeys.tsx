@@ -1021,16 +1021,20 @@ function RowMenu({
                 {row.enabled ? <IconLock /> : <IconCheck />}
                 {row.enabled ? t("apikeys.disable") : t("apikeys.enable")}
               </button>
-              <div className="menu-sep" />
-              <button
-                role="menuitem"
-                className="menu-item danger"
-                disabled={busy}
-                onClick={() => setConfirming(true)}
-              >
-                <IconTrash />
-                {t("apikeys.delete")}
-              </button>
+              {!row.is_default && (
+                <>
+                  <div className="menu-sep" />
+                  <button
+                    role="menuitem"
+                    className="menu-item danger"
+                    disabled={busy}
+                    onClick={() => setConfirming(true)}
+                  >
+                    <IconTrash />
+                    {t("apikeys.delete")}
+                  </button>
+                </>
+              )}
             </>
           )}
         </div>
