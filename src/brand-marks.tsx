@@ -149,6 +149,8 @@ const GLYPHS: Record<string, ReactNode> = {
 const MARK_OF: Record<string, string> = {
   // Anthropic
   claude: "claude", claude_work: "claude", claude_extra: "claude", anthropic: "anthropic",
+  // The desktop app ships under the same mark; its row is told apart by the label.
+  "claude-desktop": "claude",
   // OpenAI — Codex ships under the OpenAI mark.
   codex: "openai", openai: "openai",
   // Google

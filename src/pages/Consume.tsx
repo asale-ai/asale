@@ -383,7 +383,11 @@ export function Consume() {
                     <div className="callout info compact">
                       <IconRefresh />
                       <div className="callout-body">
-                        <span>{t("consume.restartNeeded", { tool: tool.label })}</span>
+                        <span>
+                          {tool.id === "claude-desktop"
+                            ? t("consume.desktopRestartNeeded")
+                            : t("consume.restartNeeded", { tool: tool.label })}
+                        </span>
                         {procs?.scanned && (
                           <div className="callout-found">
                             {(procs.running[tool.id] ?? []).length === 0 ? (
@@ -419,6 +423,18 @@ export function Consume() {
                       >
                         <IconX />
                       </button>
+                    </div>
+                  )}
+
+                  {/* Claude's desktop app writes its own ANTHROPIC_BASE_URL over
+                      whatever ~/.claude/settings.json says, so this switch
+                      covers the `claude` CLI only — the app has its own row.
+                      Said here, next to the switch that just reported "in
+                      effect", because the alternative way to learn it is an
+                      Anthropic invoice. */}
+                  {tool.shadowed_by_desktop_app && (
+                    <div className="callout info compact">
+                      <IconAlert /><span>{t("consume.claudeDesktopShadow")}</span>
                     </div>
                   )}
 
@@ -462,6 +478,24 @@ export function Consume() {
                       {tool.id === "dsh" && tool.models.length === 0 && (
                         <div className="callout warn compact card-foot">
                           <IconAlert /><span>{t("consume.dshNeedsModel")}</span>
+                        </div>
+                      )}
+                      {/* The desktop app refuses any model id outside its own
+                          four role slots, so the selection is published under
+                          those — which caps it at four, and makes an empty
+                          selection an empty model menu. */}
+                      {tool.id === "claude-desktop" && (
+                        <div
+                          className={`callout ${tool.models.length === 0 ? "warn" : "info"} compact card-foot`}
+                        >
+                          <IconAlert />
+                          <span>
+                            {tool.models.length === 0
+                              ? t("consume.desktopNeedsModel")
+                              : t("consume.desktopRoleSlots", {
+                                  n: Math.min(tool.models.length, 4),
+                                })}
+                          </span>
                         </div>
                       )}
                     </div>

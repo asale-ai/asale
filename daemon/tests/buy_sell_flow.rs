@@ -98,6 +98,14 @@ async fn buy_switch_rewrites_and_restores_every_tool() {
             // opencode reads JSON, and its switch refuses to rewrite a file it
             // cannot round-trip — same reason as Hermes above.
             "opencode" => "{\n  \"theme\": \"tokyonight\"\n}",
+            // The Claude desktop app's own config file is JSON, and its switch
+            // refuses to rewrite one it cannot parse — same reason again.
+            "claude-desktop" => "{\n  \"locale\": \"en-US\"\n}",
+            // DeepSeek Harness reads YAML *mappings*: `MY_FLAG=1` parses as a
+            // bare scalar, which its switch refuses for the same reason Hermes'
+            // does. (The `_` seed was left behind when the tool was added, so
+            // this loop has been failing on `dsh` at HEAD.)
+            "dsh" => "# mine\nmy_flag: 1\n",
             _ => "# mine\nMY_FLAG=1\n",
         };
         std::fs::write(&path, original).unwrap();

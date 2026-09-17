@@ -724,7 +724,15 @@ export interface ConsumeModeInfo {
 
 // ── Buy side: one switch + model multi-select per installed CLI (flow §4/§6) ──
 /** Keep in sync with `tool_config::TOOLS` — the daemon is the list's owner. */
-export type BuyToolId = "claude" | "codex" | "gemini" | "openclaw" | "hermes" | "opencode" | "dsh";
+export type BuyToolId =
+  | "claude"
+  | "claude-desktop"
+  | "codex"
+  | "gemini"
+  | "openclaw"
+  | "hermes"
+  | "opencode"
+  | "dsh";
 export interface BuyTool {
   id: BuyToolId;
   label: string;
@@ -740,6 +748,11 @@ export interface BuyTool {
   enabled: boolean;
   /** True when the tool's live config really points at the asale proxy. */
   in_effect: boolean;
+  /** Claude Code only: the Claude desktop app is installed, and its own Code
+   *  sessions ignore the file this switch writes (it forces its own
+   *  ANTHROPIC_BASE_URL), so this switch reaches the `claude` CLI and nothing
+   *  else — the app has a switch of its own. A note, not a block. */
+  shadowed_by_desktop_app: boolean;
   /** Models this tool may buy; empty = any model the market offers. */
   models: string[];
   since: number;

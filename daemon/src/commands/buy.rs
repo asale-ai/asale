@@ -181,15 +181,22 @@ pub async fn buy_tools(state: &AppState) -> R<Value> {
     let mut out = Vec::new();
     for tool in tool_config::TOOLS {
         let t = tool.to_string();
-        let (installed, current_base, points_at_proxy) = tokio::task::spawn_blocking(move || {
-            (
-                tool_config::installed(&t),
-                tool_config::current_base_url(&t),
-                tool_config::points_at_proxy(&t),
-            )
-        })
-        .await
-        .map_err(err)?;
+        let (installed, current_base, points_at_proxy, shadowed_by_desktop_app) =
+            tokio::task::spawn_blocking(move || {
+                (
+                    tool_config::installed(&t),
+                    tool_config::current_base_url(&t),
+                    tool_config::points_at_proxy(&t),
+                    // Claude Code's switch writes a file the Claude desktop
+                    // app overrides, so on a machine with the app installed
+                    // that row has to say which of the two it reaches — the
+                    // app has a switch of its own. See
+                    // `claude_desktop_installed`.
+                    t == "claude" && tool_config::claude_desktop_installed(),
+                )
+            })
+            .await
+            .map_err(err)?;
 
         // The account this CLI is locally signed in as (identity only — the buy
         // side never imports or uses these credentials).
@@ -222,6 +229,7 @@ pub async fn buy_tools(state: &AppState) -> R<Value> {
             "current_base_url": current_base,
             "enabled": buy.enabled,
             "in_effect": in_effect,
+            "shadowed_by_desktop_app": shadowed_by_desktop_app,
             "models": buy.models,
             "since": buy.since_ts,
         }));

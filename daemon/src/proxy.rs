@@ -170,6 +170,17 @@ async fn buy_gate(st: &ProxyState, tool: Option<&str>, model: &str) -> BuyDecisi
         }
     }
 
+    // Same story for the Claude desktop app, for a stricter reason: it refuses
+    // any model id outside its own role whitelist, so what it was offered are
+    // four role slots standing in for the selection (see
+    // `tool_config::CLAUDE_DESKTOP_ROLES`). Resolve the slot it asked for back
+    // to the model that was bought.
+    if tool == "claude-desktop" {
+        if let Some(bought) = crate::tool_config::claude_desktop_alias(model, &allowed) {
+            return BuyDecision::Substitute(bought);
+        }
+    }
+
     if !allowed.is_empty() && !model.is_empty() && !in_buy_list(model) {
         // No tool can be told to ask for the model that was bought. Their
         // pickers only offer their own vendor's catalog (Claude Code lists
@@ -186,6 +197,35 @@ async fn buy_gate(st: &ProxyState, tool: Option<&str>, model: &str) -> BuyDecisi
         return BuyDecision::Substitute(allowed[0].clone());
     }
     BuyDecision::Pass
+}
+
+/// The model list the Claude desktop app is served, built from its buy
+/// selection: one role slot per selected model, labelled with the real name.
+///
+/// Anthropic's own `/v1/models` shape, because that is the dialect the app
+/// speaks to a gateway. With nothing selected the list is empty — which is the
+/// honest answer, and the Buy page asks for a selection for this very reason.
+async fn claude_desktop_models(st: &ProxyState) -> Response {
+    let models = crate::commands::buy_models(&st.store, "claude-desktop").await;
+    let data: Vec<serde_json::Value> = models
+        .iter()
+        .zip(crate::tool_config::CLAUDE_DESKTOP_ROLES)
+        .map(|(model, role)| {
+            serde_json::json!({
+                "type": "model",
+                "id": role,
+                "display_name": model,
+                "created_at": "2024-01-01T00:00:00Z",
+            })
+        })
+        .collect();
+    axum::Json(serde_json::json!({
+        "data": data,
+        "has_more": false,
+        "first_id": data.first().and_then(|m| m.get("id").cloned()),
+        "last_id": data.last().and_then(|m| m.get("id").cloned()),
+    }))
+    .into_response()
 }
 
 /// Providers whose native dialect matches this local path — candidates for
@@ -272,7 +312,12 @@ fn refuse_foreign_caller(headers: &HeaderMap, _uri: &axum::http::Uri, local_key:
         return Some((StatusCode::FORBIDDEN, "browser-originated requests are not accepted by the local proxy").into_response());
     }
     let presented = |h: &str| {
-        headers.get(h).and_then(|v| v.to_str().ok()).map(|v| v.strip_prefix("Bearer ").unwrap_or(v).trim())
+        headers.get(h).and_then(|v| v.to_str().ok()).map(|v| {
+            // Case-insensitively: the scheme name is case-insensitive per
+            // RFC 7235, and a tool that spells it `bearer` means the same thing.
+            let bare = v.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("Bearer ")).then(|| &v[7..]);
+            bare.unwrap_or(v).trim()
+        })
     };
     let ok = local_key.is_some_and(|k| {
         !k.is_empty()
@@ -312,6 +357,19 @@ async fn forward(
         return (StatusCode::NOT_FOUND, format!("unknown tool prefix `/{head}`")).into_response();
     }
     let path = crate::tool_config::strip_tool_prefix(raw_path).to_string();
+
+    // The desktop app discovers its model menu from the gateway it was pointed
+    // at, and the market catalog is exactly what it must not be shown: it drops
+    // the whole list over one id outside its role whitelist. Answer here with
+    // the slots its profile was written with, so the menu names what was bought
+    // and nothing else reaches it.
+    if tool == Some("claude-desktop")
+        && method == axum::http::Method::GET
+        && path.starts_with("/v1/models")
+    {
+        return claude_desktop_models(&st).await;
+    }
+
     let path_and_query = uri
         .path_and_query()
         .map(|pq| crate::tool_config::strip_tool_prefix(pq.as_str()).to_string())
@@ -1384,6 +1442,97 @@ mod tests {
         let sent = captured_body(rx.await.unwrap());
         assert_eq!(sent["model"], "claude-fable-5", "relabelled to the first bought model");
         assert_eq!(sent["input"], "title this", "the rest of the request survives");
+    }
+
+    #[tokio::test]
+    async fn a_desktop_role_slot_buys_the_model_it_stands_for() {
+        // The Claude desktop app will not accept a market model id, so its
+        // profile offers four role slots standing in for the selection. What it
+        // asks for has to be resolved back before the request leaves.
+        let (addr, rx) = capturing_gateway().await;
+        let mut st = state(Some("sk-asale-test")).await;
+        st.server_api_base = format!("http://{addr}");
+        st.store
+            .set_buy_tool(
+                "claude-desktop",
+                None,
+                Some(&["kimi-k2-thinking".into(), "deepseek-v3".into()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let port = serve(st).await;
+
+        let ask = |model: &'static str| async move {
+            let resp = asale_client_core::http::plain()
+                .post(format!("http://127.0.0.1:{port}/claude-desktop/v1/messages"))
+                .header("authorization", "Bearer sk-asale-test")
+                .json(&serde_json::json!({"model": model, "messages": []}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200, "{model} is served, not refused");
+        };
+
+        // Slot two → the second selected model.
+        ask("claude-opus-4-8").await;
+        assert_eq!(captured_body(rx.await.unwrap())["model"], "deepseek-v3");
+
+        // A slot the profile never published — the app asks for one of its own
+        // accord — still buys the first selected model rather than failing.
+        let (addr, rx) = capturing_gateway().await;
+        let mut st = state(Some("sk-asale-test")).await;
+        st.server_api_base = format!("http://{addr}");
+        st.store
+            .set_buy_tool("claude-desktop", None, Some(&["kimi-k2-thinking".into()]), None, None)
+            .await
+            .unwrap();
+        let port = serve(st).await;
+        let resp = asale_client_core::http::plain()
+            .post(format!("http://127.0.0.1:{port}/claude-desktop/v1/messages"))
+            .header("authorization", "Bearer sk-asale-test")
+            .json(&serde_json::json!({"model": "claude-haiku-4-5", "messages": []}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(captured_body(rx.await.unwrap())["model"], "kimi-k2-thinking");
+    }
+
+    #[tokio::test]
+    async fn the_desktop_model_menu_is_answered_locally_with_role_slots() {
+        // Forwarding this to the gateway would show the app the market catalog,
+        // and one id outside its role whitelist makes it drop the whole list.
+        let st = state(Some("sk-asale-test")).await;
+        st.store
+            .set_buy_tool(
+                "claude-desktop",
+                None,
+                Some(&["kimi-k2-thinking".into(), "deepseek-v3".into()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let port = serve(st).await;
+
+        let body: serde_json::Value = asale_client_core::http::plain()
+            .get(format!("http://127.0.0.1:{port}/claude-desktop/v1/models?limit=1000"))
+            .header("authorization", "Bearer sk-asale-test")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["data"][0]["id"], "claude-sonnet-5", "slot one, not the market id");
+        assert_eq!(body["data"][0]["display_name"], "kimi-k2-thinking");
+        assert_eq!(body["data"][1]["id"], "claude-opus-4-8");
+        assert_eq!(body["data"].as_array().unwrap().len(), 2, "one slot per selected model");
+        assert_eq!(body["has_more"], false);
+        assert_eq!(body["first_id"], "claude-sonnet-5");
+        assert_eq!(body["last_id"], "claude-opus-4-8");
     }
 
     #[tokio::test]

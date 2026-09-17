@@ -7,6 +7,12 @@
 //! switches are fully independent:
 //!
 //!   claude   → `~/.claude/settings.json`  (`env.ANTHROPIC_BASE_URL` / `…_AUTH_TOKEN`)
+//!   claude-desktop
+//!            → the Claude *desktop app*, which reads none of the above: it
+//!              composes its Code sessions' environment itself and forces its
+//!              own `ANTHROPIC_BASE_URL`. Its third-party ("3p") deployment
+//!              mode is the way in — a config profile under its own user-data
+//!              directory, four files, see `apply_claude_desktop`.
 //!   codex    → `~/.codex/config.toml` (`model_provider` + `[model_providers.asale]`
 //!              + `model` + `model_catalog_json`) and `~/.codex/auth.json`
 //!              (`OPENAI_API_KEY`)
@@ -34,13 +40,15 @@ use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 
 /// The tools a buy switch can be turned on for.
-pub const TOOLS: &[&str] = &["claude", "codex", "gemini", "openclaw", "hermes", "opencode", "dsh"];
+pub const TOOLS: &[&str] =
+    &["claude", "claude-desktop", "codex", "gemini", "openclaw", "hermes", "opencode", "dsh"];
 
 /// Display name for a tool id. Lowercase where the tool's own name is — asale
 /// is not the one who decides how somebody else's product is spelled.
 pub fn label(tool: &str) -> &'static str {
     match tool {
         "claude" => "Claude Code",
+        "claude-desktop" => "Claude Desktop",
         "codex" => "Codex",
         "gemini" => "Gemini CLI",
         "openclaw" => "OpenClaw",
@@ -118,6 +126,53 @@ const ANTHROPIC_AUTH_TOKEN: &str = "ANTHROPIC_AUTH_TOKEN";
 /// Claude Code also honours ANTHROPIC_API_KEY; clear it so a stale key can't
 /// shadow the token we set (cc-switch resolves the same ambiguity).
 const ANTHROPIC_API_KEY: &str = "ANTHROPIC_API_KEY";
+
+// ── Claude Desktop (third-party deployment profile) ────────────────────────
+//
+// Shapes verified against the app's own main bundle (`app.asar`), not docs:
+// the settings resolver reads `<userData>/configLibrary/_meta.json`, takes
+// `appliedId` (which must match its own UUID regex), and loads
+// `<userData>/configLibrary/<appliedId>.json` as a *locally* managed config —
+// the same keys an MDM profile would carry. `deploymentMode` in
+// `claude_desktop_config.json` accepts only "3p" / "1p", and third-party mode
+// runs out of a separate user-data directory (suffix `-3p`), which is why
+// turning this switch on cannot disturb the Claude.ai login in the normal one.
+
+/// Our profile's id. Permanent: `_meta.json` addresses a profile by it, so
+/// changing it later would orphan the entry we wrote.
+const CD_PROFILE_ID: &str = "a5a1e000-0000-4000-8000-000000000001";
+/// The name shown for the profile inside the app.
+const CD_PROFILE_NAME: &str = "asale";
+const CD_MODE_KEY: &str = "deploymentMode";
+const CD_FILE: &str = "claude_desktop_config.json";
+const CD_LIBRARY_DIR: &str = "configLibrary";
+const CD_META_FILE: &str = "_meta.json";
+
+/// The model ids the desktop app will accept, in the order our selection fills
+/// them.
+///
+/// Not a cosmetic choice: the app validates every model id it is offered
+/// against a role whitelist (`sonnet` / `opus` / `haiku` / `fable` / `mythos`)
+/// *and* a vendor denylist (`gpt`, `gemini`, `deepseek`, `qwen`, `kimi`, `glm`,
+/// `grok`, …), and one rejected id makes it drop the whole set. So a market
+/// model never travels under its own name here: it is published under one of
+/// these four slots with its real name as the menu label, and the proxy maps
+/// the slot back before the request leaves this machine (see
+/// `claude_desktop_alias`).
+pub const CLAUDE_DESKTOP_ROLES: &[&str] =
+    &["claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5", "claude-fable-5"];
+
+/// The market model a desktop role slot stands for, given a buy selection.
+///
+/// Slots are filled in selection order. A slot we never published still
+/// resolves — to the first selected model — because the app asks for models of
+/// its own accord (a new conversation's default, its title generation), and
+/// such a request has to buy *something* rather than fail.
+pub fn claude_desktop_alias(role: &str, models: &[String]) -> Option<String> {
+    let idx = CLAUDE_DESKTOP_ROLES.iter().position(|r| *r == role)?;
+    models.get(idx).or_else(|| models.first()).cloned()
+}
+
 
 // ── DeepSeek Harness ───────────────────────────────────────────────────────
 //
@@ -224,6 +279,9 @@ fn home() -> PathBuf {
 pub fn tool_dir(tool: &str) -> PathBuf {
     match tool {
         "claude" => home().join(".claude"),
+        // The third-party directory: the one every file this switch writes
+        // hangs off, bar the deployment-mode flag in the normal one.
+        "claude-desktop" => claude_desktop_dirs().1,
         "codex" => home().join(".codex"),
         "gemini" => home().join(".gemini"),
         "openclaw" => home().join(".openclaw"),
@@ -232,6 +290,31 @@ pub fn tool_dir(tool: &str) -> PathBuf {
         "dsh" => dsh_home(),
         _ => home().join(".asale-unknown"),
     }
+}
+
+/// The Claude desktop app's two user-data directories: `(normal, third-party)`.
+///
+/// The `-3p` suffix is the app's own constant, and the split is the whole
+/// reason this switch is safe to flip: third-party mode keeps its sessions,
+/// cookies and identity in the second directory, so the Claude.ai login in the
+/// first one survives untouched and is there again when the switch goes off.
+fn claude_desktop_dirs() -> (PathBuf, PathBuf) {
+    let parent = if cfg!(target_os = "macos") {
+        home().join("Library").join("Application Support")
+    } else if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| home().join("AppData").join("Local"))
+    } else {
+        // Linux: XDG, and only an absolute `XDG_CONFIG_HOME` — a relative one
+        // would put the profile somewhere the app never looks.
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| home().join(".config"))
+    };
+    (parent.join("Claude"), parent.join("Claude-3p"))
 }
 
 /// opencode's config directory.
@@ -329,6 +412,18 @@ pub fn config_paths(tool: &str) -> Vec<PathBuf> {
     let d = tool_dir(tool);
     match tool {
         "claude" => vec![d.join("settings.json")],
+        // Four files, in write order: the deployment-mode flag in *both*
+        // user-data directories (the app reads it from whichever it starts
+        // in), then the profile and the index that points at it.
+        "claude-desktop" => {
+            let (normal, threep) = claude_desktop_dirs();
+            vec![
+                normal.join(CD_FILE),
+                threep.join(CD_FILE),
+                threep.join(CD_LIBRARY_DIR).join(CD_META_FILE),
+                threep.join(CD_LIBRARY_DIR).join(format!("{CD_PROFILE_ID}.json")),
+            ]
+        }
         "codex" => vec![d.join("config.toml"), d.join("auth.json")],
         // `.env` carries the endpoint and key; `settings.json` carries the one
         // thing the CLI will not start without — see `apply_gemini`.
@@ -352,6 +447,11 @@ pub fn primary_config_path(tool: &str) -> PathBuf {
 /// Is this tool present on the machine? True if its config dir/file exists or
 /// its binary is on PATH. Detection only — never mutates anything.
 pub fn installed(tool: &str) -> bool {
+    // The desktop app is a GUI application, not a CLI: no binary on PATH, and
+    // its third-party directory does not exist until this switch creates it.
+    if tool == "claude-desktop" {
+        return claude_desktop_installed();
+    }
     if tool_dir(tool).is_dir() || config_paths(tool).iter().any(|p| p.exists()) {
         return true;
     }
@@ -367,6 +467,36 @@ pub fn installed(tool: &str) -> bool {
     })
 }
 
+/// Is Anthropic's Claude *desktop app* on this machine?
+///
+/// Not a tool a buy switch can be turned on for, and never will be: the app
+/// composes the environment for its own Code sessions and hard-sets
+/// `ANTHROPIC_BASE_URL` to its own API host (blanking `ANTHROPIC_AUTH_TOKEN`
+/// and deleting any provider-routing variable it inherited) *after* everything
+/// else, so the `~/.claude/settings.json` the `claude` switch rewrites has no
+/// say over it. Pointing the app elsewhere is only possible through enterprise
+/// managed configuration — an MDM plist / root-owned policy file, which also
+/// flips the whole app into cookieless third-party mode.
+///
+/// Detected for one reason: a user with the app installed turns the Claude Code
+/// switch on, sees "in effect", and then watches the desktop app keep billing
+/// Anthropic. The Buy page says so rather than letting them find out from an
+/// invoice.
+pub fn claude_desktop_installed() -> bool {
+    // The app's user-data directory (present once it has been run) and, on
+    // macOS, the bundle itself — installed-but-never-started still counts.
+    [
+        Some(home().join("Library/Application Support/Claude")),
+        Some(home().join(".config/Claude")),
+        std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Claude")),
+        Some(PathBuf::from("/Applications/Claude.app")),
+        Some(home().join("Applications/Claude.app")),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|p| p.is_dir())
+}
+
 fn binary_on_path(name: &str) -> bool {
     let Ok(path) = std::env::var("PATH") else { return false };
     std::env::split_paths(&path).any(|dir| dir.join(name).is_file())
@@ -379,6 +509,12 @@ pub fn current_base_url(tool: &str) -> Option<String> {
         "claude" => read_json(&primary_config_path(tool))
             .get("env")?
             .get(ANTHROPIC_BASE_URL)?
+            .as_str()
+            .map(String::from),
+        // The profile is the only file that names an endpoint; the other three
+        // say which profile is live, not where it points.
+        "claude-desktop" => read_json(&config_paths(tool)[3])
+            .get("inferenceGatewayBaseUrl")?
             .as_str()
             .map(String::from),
         // Only our own route's endpoint. Another route being pointed elsewhere
@@ -483,6 +619,9 @@ pub fn proxy_base_for(tool: &str) -> String {
     match tool {
         "codex" => format!("{base}/v1"),
         "openclaw" | "hermes" | "opencode" | "dsh" => format!("{base}/{tool}/v1"),
+        // The app appends `/v1/models` and `/v1/messages` to the gateway base
+        // URL itself, so this one stops at the tool prefix.
+        "claude-desktop" => format!("{base}/{tool}"),
         _ => base,
     }
 }
@@ -501,7 +640,23 @@ pub fn proxy_base() -> String {
 pub fn points_at_proxy(tool: &str) -> bool {
     let base = proxy_base();
     let expected = proxy_base_for(tool);
-    current_base_url(tool).is_some_and(|b| b == expected || b == base || b == format!("{base}/v1"))
+    let endpoint_is_ours =
+        current_base_url(tool).is_some_and(|b| b == expected || b == base || b == format!("{base}/v1"));
+    // The desktop app takes three more things to actually *use* that endpoint:
+    // third-party mode in both directories, and our profile named as the
+    // applied one. Leaving them out of this answer is what would let the page
+    // report "in effect" for an app that had been switched back to its normal
+    // mode — and would stop the reconcile loop from putting it back.
+    if tool == "claude-desktop" {
+        let paths = config_paths(tool);
+        let in_3p = paths[..2]
+            .iter()
+            .all(|p| read_json(p).get(CD_MODE_KEY).and_then(Value::as_str) == Some("3p"));
+        let applied = read_json(&paths[2]).get("appliedId").and_then(Value::as_str)
+            == Some(CD_PROFILE_ID);
+        return endpoint_is_ours && in_3p && applied;
+    }
+    endpoint_is_ours
 }
 
 /// Does this tool's config have to be re-applied before it will work?
@@ -664,6 +819,7 @@ pub fn apply(tool: &str, base_url: &str, token: &str, models: &[String]) -> Resu
 
     match tool {
         "claude" => apply_claude(base_url, token)?,
+        "claude-desktop" => apply_claude_desktop(token, models)?,
         "codex" => apply_codex(base_url, token, models)?,
         "gemini" => apply_gemini(base_url, token)?,
         "openclaw" => apply_openclaw(token, models)?,
@@ -725,6 +881,124 @@ fn apply_claude(base_url: &str, token: &str) -> Result<()> {
     env_obj.insert(ANTHROPIC_AUTH_TOKEN.to_string(), Value::String(token.to_string()));
     env_obj.remove(ANTHROPIC_API_KEY);
     write_atomic(&path, &serde_json::to_string_pretty(&Value::Object(obj))?)
+}
+
+// ── Claude Desktop ─────────────────────────────────────────────────────────
+
+/// Put the desktop app into its third-party deployment mode, pointed at our
+/// proxy.
+///
+/// Four files (see [`config_paths`]): the deployment-mode flag in both
+/// user-data directories, the gateway profile, and the index naming it as the
+/// applied one. Written in that order, each atomically, each snapshotted
+/// beforehand by [`apply`] — and every other key in those files is preserved,
+/// because the app keeps unrelated settings in them.
+///
+/// `base_url` is not a parameter for the same reason as OpenClaw's: the app is
+/// addressed under its own `/{tool}` prefix, which [`proxy_base_for`] owns.
+fn apply_claude_desktop(token: &str, models: &[String]) -> Result<()> {
+    let paths = config_paths("claude-desktop");
+
+    let mut profile = Map::new();
+    profile.insert("inferenceProvider".into(), Value::String("gateway".into()));
+    profile.insert(
+        "inferenceGatewayBaseUrl".into(),
+        Value::String(proxy_base_for("claude-desktop")),
+    );
+    profile.insert("inferenceGatewayAuthScheme".into(), Value::String("bearer".into()));
+    profile.insert("inferenceGatewayApiKey".into(), Value::String(token.to_string()));
+    // Keep the app from offering a Claude.ai sign-in while it is buying: taking
+    // that offer leaves third-party mode, which would look like the switch
+    // silently stopped working. Switching back is this switch's job, and
+    // turning it off restores the chooser with everything else.
+    profile.insert("disableDeploymentModeChooser".into(), Value::Bool(true));
+    // The bought models, published under the slots the app will accept and
+    // labelled with what they really are. An empty selection publishes none —
+    // there is no id the app would take that means "any model the market
+    // offers" (the Buy page says so).
+    let published: Vec<Value> = models
+        .iter()
+        .zip(CLAUDE_DESKTOP_ROLES)
+        .map(|(model, role)| {
+            let mut item = Map::new();
+            item.insert("name".into(), Value::String((*role).to_string()));
+            item.insert("labelOverride".into(), Value::String(model.clone()));
+            Value::Object(item)
+        })
+        .collect();
+    if !published.is_empty() {
+        profile.insert("inferenceModels".into(), Value::Array(published));
+    }
+
+    // The two mode files and the index belong to the app, not to us: they carry
+    // its own settings and anybody else's profiles. A file we cannot parse is
+    // therefore a file we must not rewrite — `read_json` would hand us an empty
+    // object and the write would take the user's settings with it.
+    for path in [&paths[0], &paths[1], &paths[2]] {
+        anyhow::ensure!(
+            json_is_editable(path),
+            "{} is not valid JSON — rewriting it would discard whatever the Claude desktop app \
+             keeps in it. Fix the file and switch buying on again.",
+            path.display()
+        );
+    }
+
+    for path in &paths[..2] {
+        let mut obj = read_json(path).as_object().cloned().unwrap_or_default();
+        obj.insert(CD_MODE_KEY.into(), Value::String("3p".into()));
+        write_atomic(path, &serde_json::to_string_pretty(&Value::Object(obj))?)?;
+    }
+    write_atomic(&paths[3], &serde_json::to_string_pretty(&Value::Object(profile))?)?;
+    write_atomic(&paths[2], &serde_json::to_string_pretty(&cd_meta_with_us(&paths[2]))?)
+}
+
+/// Is this file one we can merge into — absent, or a JSON object?
+///
+/// A missing file is editable (we create it); anything present has to parse and
+/// be an object, because every key we write goes beside the app's own.
+fn json_is_editable(path: &Path) -> bool {
+    match read_raw(path) {
+        None => true,
+        Some(raw) if raw.trim().is_empty() => true,
+        Some(raw) => serde_json::from_str::<Value>(&raw).is_ok_and(|v| v.is_object()),
+    }
+}
+
+/// The profile index with our entry applied, preserving anybody else's.
+fn cd_meta_with_us(path: &Path) -> Value {
+    let mut obj = read_json(path).as_object().cloned().unwrap_or_default();
+    let mut entries = obj.get("entries").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    entries.retain(|e| e.get("id").and_then(Value::as_str) != Some(CD_PROFILE_ID));
+    entries.push(json!({ "id": CD_PROFILE_ID, "name": CD_PROFILE_NAME }));
+    obj.insert("entries".into(), Value::Array(entries));
+    obj.insert("appliedId".into(), Value::String(CD_PROFILE_ID.into()));
+    Value::Object(obj)
+}
+
+/// The profile index with our entry taken back out.
+///
+/// `appliedId` is only cleared when it still names *our* profile — a profile
+/// somebody else applied in the meantime is theirs, and pointing the app at
+/// nothing would be a worse answer than leaving it alone. When ours was the
+/// applied one, the first remaining entry takes over, or the key goes.
+fn strip_cd_meta(raw: &str) -> Option<String> {
+    let mut obj = serde_json::from_str::<Value>(raw).ok()?.as_object()?.clone();
+    let mut entries = obj.get("entries").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    entries.retain(|e| e.get("id").and_then(Value::as_str) != Some(CD_PROFILE_ID));
+    let ours_applied =
+        obj.get("appliedId").and_then(Value::as_str) == Some(CD_PROFILE_ID);
+    if ours_applied {
+        match entries.iter().find_map(|e| e.get("id").and_then(Value::as_str)) {
+            Some(next) => obj.insert("appliedId".into(), Value::String(next.to_string())),
+            None => obj.remove("appliedId"),
+        };
+    }
+    if entries.is_empty() {
+        obj.remove("entries");
+    } else {
+        obj.insert("entries".into(), Value::Array(entries));
+    }
+    (!obj.is_empty()).then(|| serde_json::to_string_pretty(&Value::Object(obj)).unwrap_or_default())
 }
 
 // ── Codex ──────────────────────────────────────────────────────────────────
@@ -1704,6 +1978,13 @@ fn strip_ours(tool: &str, path: &Path) -> Result<()> {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
     let stripped = match (tool, name) {
         ("claude", _) => strip_json_env(&raw, &[ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN]),
+        // Our profile in full — nothing of the user's is in it.
+        ("claude-desktop", name) if name == format!("{CD_PROFILE_ID}.json") => None,
+        ("claude-desktop", CD_META_FILE) => strip_cd_meta(&raw),
+        // Dropping the key, not writing "1p": an absent deployment mode *is*
+        // the normal one, and this file only exists at all on a machine the app
+        // has run on, where `apply`'s snapshot restores it verbatim anyway.
+        ("claude-desktop", _) => strip_json_keys(&raw, &[CD_MODE_KEY]),
         ("codex", "config.toml") => strip_codex_config(&raw),
         ("codex", "auth.json") => strip_json_keys(&raw, &[CODEX_API_KEY]),
         ("openclaw", _) => strip_openclaw(&raw),
@@ -1949,6 +2230,120 @@ mod tests {
             restore("claude", &backup).unwrap();
             assert_eq!(read_raw(&path).unwrap(), original, "restore is byte-exact");
         });
+    }
+
+    #[test]
+    fn claude_desktop_publishes_role_slots_and_leaves_nothing_behind() {
+        with_temp_home(|| {
+            let paths = config_paths("claude-desktop");
+            let (normal, threep, meta, profile) = (&paths[0], &paths[1], &paths[2], &paths[3]);
+            // A machine the app has run on: its own settings, and somebody
+            // else's profile already applied.
+            std::fs::create_dir_all(normal.parent().unwrap()).unwrap();
+            std::fs::write(normal, "{\n  \"locale\": \"en-US\"\n}").unwrap();
+            std::fs::create_dir_all(meta.parent().unwrap()).unwrap();
+            std::fs::write(
+                meta,
+                "{\"appliedId\":\"11111111-0000-4000-8000-000000000001\",\"entries\":[{\"id\":\"11111111-0000-4000-8000-000000000001\",\"name\":\"theirs\"}]}",
+            )
+            .unwrap();
+
+            let models = vec!["kimi-k2-thinking".to_string(), "deepseek-v3".to_string()];
+            let backup = apply("claude-desktop", "unused", "sk-asale-xyz", &models).unwrap();
+
+            // Third-party mode, in both directories.
+            assert_eq!(read_json(normal).get(CD_MODE_KEY).unwrap(), "3p");
+            assert_eq!(read_json(threep).get(CD_MODE_KEY).unwrap(), "3p");
+            assert_eq!(
+                read_json(normal).get("locale").unwrap(),
+                "en-US",
+                "the app's own settings survive"
+            );
+
+            // The profile: our gateway, and the selection under role slots the
+            // app will accept — never under the market's own model ids.
+            let prof = read_json(profile);
+            assert_eq!(prof.get("inferenceProvider").unwrap(), "gateway");
+            assert_eq!(prof.get("inferenceGatewayApiKey").unwrap(), "sk-asale-xyz");
+            assert_eq!(
+                prof.get("inferenceGatewayBaseUrl").unwrap(),
+                &Value::String(proxy_base_for("claude-desktop"))
+            );
+            let published = prof.get("inferenceModels").unwrap().as_array().unwrap();
+            assert_eq!(published[0]["name"], "claude-sonnet-5");
+            assert_eq!(published[0]["labelOverride"], "kimi-k2-thinking");
+            assert_eq!(published[1]["name"], "claude-opus-4-8");
+            assert_eq!(published.len(), 2, "one slot per selected model");
+            assert!(points_at_proxy("claude-desktop"));
+
+            // The index names ours as applied, and keeps theirs listed.
+            let m = read_json(meta);
+            assert_eq!(m.get("appliedId").unwrap(), CD_PROFILE_ID);
+            assert_eq!(m.get("entries").unwrap().as_array().unwrap().len(), 2);
+
+            restore("claude-desktop", &backup).unwrap();
+
+            // Files that existed come back byte-exact; ours go away entirely,
+            // and the profile somebody else had applied is applied again.
+            assert_eq!(read_json(normal).get(CD_MODE_KEY), None);
+            assert!(read_raw(profile).is_none(), "our profile is gone");
+            assert!(read_raw(threep).is_none(), "the file we created is gone");
+            let m = read_json(meta);
+            assert_eq!(m.get("appliedId").unwrap(), "11111111-0000-4000-8000-000000000001");
+            assert_eq!(m.get("entries").unwrap().as_array().unwrap().len(), 1);
+            assert!(!points_at_proxy("claude-desktop"));
+        });
+    }
+
+    #[test]
+    fn a_desktop_app_switched_back_to_its_normal_mode_reads_as_drift() {
+        with_temp_home(|| {
+            let models = vec!["kimi-k2-thinking".to_string()];
+            apply("claude-desktop", "unused", "sk-1", &models).unwrap();
+            assert!(points_at_proxy("claude-desktop"));
+
+            // What the app itself writes when the user takes its sign-in offer:
+            // the profile still names our proxy, but nothing reads it.
+            let normal = &config_paths("claude-desktop")[0];
+            let mut obj = read_json(normal).as_object().cloned().unwrap();
+            obj.insert(CD_MODE_KEY.into(), Value::String("1p".into()));
+            write_atomic(normal, &serde_json::to_string_pretty(&Value::Object(obj)).unwrap())
+                .unwrap();
+
+            assert!(!points_at_proxy("claude-desktop"), "1p is not in effect");
+            assert!(needs_reapply("claude-desktop"), "and the daemon puts it back");
+        });
+    }
+
+    #[test]
+    fn claude_desktop_refuses_to_rewrite_a_config_it_cannot_parse() {
+        with_temp_home(|| {
+            let path = &config_paths("claude-desktop")[0];
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let original = "{ this is not json";
+            std::fs::write(path, original).unwrap();
+            assert!(apply("claude-desktop", "unused", "sk-1", &[]).is_err());
+            assert_eq!(read_raw(path).unwrap(), original, "left exactly as it was");
+        });
+    }
+
+    #[test]
+    fn a_desktop_role_slot_resolves_to_the_model_it_stands_for() {
+        let models = vec!["kimi-k2-thinking".to_string(), "deepseek-v3".to_string()];
+        assert_eq!(
+            claude_desktop_alias("claude-sonnet-5", &models).as_deref(),
+            Some("kimi-k2-thinking")
+        );
+        assert_eq!(claude_desktop_alias("claude-opus-4-8", &models).as_deref(), Some("deepseek-v3"));
+        // An unpublished slot — the app asks for these on its own — falls back
+        // to the first selected model rather than failing.
+        assert_eq!(
+            claude_desktop_alias("claude-fable-5", &models).as_deref(),
+            Some("kimi-k2-thinking")
+        );
+        // Not a slot at all, and nothing selected: nothing to resolve to.
+        assert_eq!(claude_desktop_alias("gpt-5", &models), None);
+        assert_eq!(claude_desktop_alias("claude-sonnet-5", &[]), None);
     }
 
     #[test]

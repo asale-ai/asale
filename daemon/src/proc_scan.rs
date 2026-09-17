@@ -71,6 +71,16 @@ const SPECS: &[Spec] = &[
         // the Windows package ships a `claude.exe` shim, which `bin` catches.
         markers: &["@anthropic-ai/claude-code", "claude-code/cli.js"],
     },
+    // The desktop app, matched by its bundle path — its executable is called
+    // `Claude`, which `exe_name` lowercases into Claude Code's own `bin`. The
+    // marker also catches the CLI the app bundles for its Code tab
+    // (`…/Claude/claude-code/<ver>/claude.app/…`), which is right: those
+    // sessions are the desktop app's, and restarting it restarts them.
+    Spec {
+        tool: "claude-desktop",
+        bin: "claude-desktop",
+        markers: &["claude.app/contents/macos/claude", "anthropicclaude/"],
+    },
     Spec { tool: "codex", bin: "codex", markers: &["@openai/codex"] },
     Spec { tool: "gemini", bin: "gemini", markers: &["@google/gemini-cli"] },
     // No markers for these two: their names are ordinary words (React Native
@@ -125,9 +135,14 @@ pub fn scan() -> Option<Vec<(&'static str, Running)>> {
 fn tool_of(p: &Proc) -> Option<&'static str> {
     let hay = p.cmd.replace('\\', "/").to_lowercase();
     let base = exe_name(&p.cmd).to_lowercase();
+    // Markers before names, across the whole table: a path that names one
+    // tool's package outranks an executable whose bare name happens to be
+    // another's. Without that order the Claude desktop app — argv0
+    // `…/Claude.app/Contents/MacOS/Claude` — reads as a Claude Code session.
     SPECS
         .iter()
-        .find(|s| base == s.bin || s.markers.iter().any(|m| hay.contains(m)))
+        .find(|s| s.markers.iter().any(|m| hay.contains(m)))
+        .or_else(|| SPECS.iter().find(|s| base == s.bin))
         .map(|s| s.tool)
 }
 
@@ -262,6 +277,33 @@ mod tests {
         };
         assert_eq!(exe_name(&p.cmd), "node");
         assert_eq!(tool_of(&p), Some("gemini"));
+    }
+
+    #[test]
+    fn the_desktop_app_is_not_a_claude_code_session() {
+        // Its executable is called `Claude`, which lowercases into Claude
+        // Code's own `bin` — so the bundle path has to outrank the name, or
+        // turning the Claude Code switch on would tell the user to restart an
+        // app that never read it.
+        let p = Proc {
+            pid: 1,
+            parent: 0,
+            cmd: "/Applications/Claude.app/Contents/MacOS/Claude".into(),
+        };
+        assert_eq!(exe_name(&p.cmd).to_lowercase(), "claude");
+        assert_eq!(tool_of(&p), Some("claude-desktop"));
+
+        // And the CLI the app bundles for its Code tab belongs to the app too.
+        let bundled = Proc {
+            pid: 2,
+            parent: 1,
+            cmd: "/Users/u/Library/Application Support/Claude/claude-code/2.1.270/claude.app/Contents/MacOS/claude --resume".into(),
+        };
+        assert_eq!(tool_of(&bundled), Some("claude-desktop"));
+
+        // A terminal session is still Claude Code's.
+        let cli = Proc { pid: 3, parent: 0, cmd: "/opt/homebrew/bin/claude".into() };
+        assert_eq!(tool_of(&cli), Some("claude"));
     }
 
     #[test]
