@@ -510,7 +510,7 @@
     "withdrawAmount": "金額（USDT）",
     "withdrawSubmit": "出金を申請",
     "withdrawing": "送信中…",
-    "withdrawOk": "出金申請 #{{id}} を送信しました — 審査とブロードキャスト待ちです。",
+    "withdrawOk": "出金申請 #{{id}} を送信しました。リスク審査中です。通常 3 営業日以内に処理されます。",
     "invalidAddress": "有効な {{network}} アドレスを入力してください。",
     "invalidAmount": "金額は 0 より大きく、利用可能残高以下にしてください。",
     "refresh": "更新",

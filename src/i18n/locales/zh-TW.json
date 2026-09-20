@@ -510,7 +510,7 @@
     "withdrawAmount": "金額（USDT）",
     "withdrawSubmit": "提交提領",
     "withdrawing": "提交中…",
-    "withdrawOk": "提領申請 #{{id}} 已提交 — 等待審核與廣播。",
+    "withdrawOk": "提領申請 #{{id}} 已送出，正在風控審核中，通常 3 個工作日內處理完成。",
     "invalidAddress": "請輸入有效的 {{network}} 地址。",
     "invalidAmount": "金額需大於 0 且不超過可用餘額。",
     "refresh": "重新整理",

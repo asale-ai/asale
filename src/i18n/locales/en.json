@@ -510,7 +510,7 @@
     "withdrawAmount": "Amount (USDT)",
     "withdrawSubmit": "Request withdrawal",
     "withdrawing": "Submitting…",
-    "withdrawOk": "Withdrawal #{{id}} submitted — pending review and broadcast.",
+    "withdrawOk": "Withdrawal #{{id}} submitted — it is now in risk review, usually settled within 3 business days.",
     "invalidAddress": "Enter a valid {{network}} address.",
     "invalidAmount": "Amount must be greater than 0 and at most your available balance.",
     "refresh": "Refresh",

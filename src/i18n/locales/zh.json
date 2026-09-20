@@ -510,7 +510,7 @@
     "withdrawAmount": "金额（USDT）",
     "withdrawSubmit": "提交提现",
     "withdrawing": "提交中…",
-    "withdrawOk": "提现申请 #{{id}} 已提交 — 等待审核与广播。",
+    "withdrawOk": "提现申请 #{{id}} 已提交，正在风控审核中，通常 3 个工作日内处理完成。",
     "invalidAddress": "请输入有效的 {{network}} 地址。",
     "invalidAmount": "金额需大于 0 且不超过可用余额。",
     "refresh": "刷新",
