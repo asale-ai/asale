@@ -257,10 +257,12 @@ pub fn run() {
         // Closing the window only hides it, so the dock/taskbar icon is the way
         // back in for anyone who never looks at the tray. Without this the click
         // is swallowed: the app is running, has no visible window, and looks
-        // hung. macOS sends it as Reopen (applicationShouldHandleReopen).
-        .run(|app, event| {
-            if let tauri::RunEvent::Reopen { .. } = event {
-                show_main(app);
+        // hung. macOS sends it as Reopen (applicationShouldHandleReopen); the
+        // variant only exists there, hence the cfg.
+        .run(|_app, _event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                show_main(_app);
             }
         });
 }
