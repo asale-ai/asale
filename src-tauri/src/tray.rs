@@ -264,6 +264,12 @@ fn toggle_panel(app: &AppHandle, at: PhysicalPosition<f64>) {
     place(&win, (at.x, at.y), size.width as i32, size.height as i32);
     let _ = win.show();
     let _ = win.set_focus();
+    // A click that puts nothing on screen is indistinguishable from a hung app,
+    // so if the panel did not come up (it can be refused a position, or the
+    // webview can be gone), fall back to the window the user was after.
+    if !win.is_visible().unwrap_or(false) {
+        crate::show_main(app);
+    }
 }
 
 /// Re-anchor the panel to the last tray click, given the size it has just been

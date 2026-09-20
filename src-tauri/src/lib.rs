@@ -252,8 +252,17 @@ pub fn run() {
             }
             _ => {}
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        // Closing the window only hides it, so the dock/taskbar icon is the way
+        // back in for anyone who never looks at the tray. Without this the click
+        // is swallowed: the app is running, has no visible window, and looks
+        // hung. macOS sends it as Reopen (applicationShouldHandleReopen).
+        .run(|app, event| {
+            if let tauri::RunEvent::Reopen { .. } = event {
+                show_main(app);
+            }
+        });
 }
 
 fn build_panel(app: &AppHandle, script: &str) -> tauri::Result<()> {
@@ -292,6 +301,10 @@ pub fn show_main(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("panel") {
         let _ = win.hide();
     }
+    // A hidden *application* (Cmd+H, or hidden on launch) keeps its windows
+    // invisible no matter what is asked of them, so unhide before showing.
+    #[cfg(target_os = "macos")]
+    let _ = app.show();
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.unminimize();
         let _ = win.show();
