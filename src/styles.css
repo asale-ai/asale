@@ -428,6 +428,63 @@ p, li, .sub { text-wrap: pretty; }
   object-fit: contain; display: block;
   margin-left: -4px; margin-right: var(--s4);
 }
+.nav-group-label { font-size: 0; padding: var(--s10) var(--s8) var(--s8); }
+.sidebar.collapsed .nav-group-label::before {
+  content: ""; display: block; height: 1px; background: var(--line);
+}
+/* No label to sit at the end of, so the marker rides the glyph. */
+.sidebar.collapsed .nav-dot { position: absolute; top: 4px; right: 4px; margin: 0; }
+/* Folded, the name comes back on hover. Written out rather than left to
+   `title`: this app is a macOS webview, and a webview never draws one. The
+   rows clip their own labels when expanded, so the clip has to go first. */
+.sidebar.collapsed .navitem,
+.sidebar.collapsed .sidebar-user { overflow: visible; position: relative; }
+.sidebar.collapsed [data-tip]::after {
+  content: attr(data-tip);
+  position: absolute; left: calc(100% + 8px); top: 50%;
+  padding: var(--s6) var(--s10); border-radius: var(--r-sm);
+  background: var(--surface); color: var(--fg);
+  border: 1px solid var(--line-2); box-shadow: var(--shadow-pop);
+  font-size: var(--fs-meta); font-weight: 500; line-height: 1.4;
+  letter-spacing: 0; white-space: nowrap;
+  opacity: 0; transform: translate(-3px, -50%); pointer-events: none; z-index: 60;
+  transition: opacity var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+.sidebar.collapsed [data-tip]:hover::after,
+.sidebar.collapsed [data-tip]:focus-visible::after { opacity: 1; transform: translate(0, -50%); }
+/* The sidebar is a two-column list: a --nav-ico-w icon column starting at the
+   row padding, then the label. The logo, every nav item and the user card all
+   use it, so their labels share one left edge. */
+.logo {
+  display: flex; align-items: center; gap: var(--s12);
+  font-size: var(--fs-lead); font-weight: 600; letter-spacing: -0.02em;
+  padding: 0 var(--s8) var(--s24);
+}
+/* The rail's own fold control, at the far end of the row it belongs to.
+   Folded, the row has one column, so the button drops under the mark and keeps
+   the x every glyph in the rail sits on — it is one of them now. */
+.logo-fold { margin-left: auto; }
+.sidebar.collapsed .logo {
+  flex-direction: column; align-items: center; gap: var(--s8);
+  padding-bottom: var(--s16);
+}
+.sidebar.collapsed .logo-fold { margin-left: 0; }
+.logo .logo-badge {
+  font-size: var(--fs-micro); font-weight: 600; letter-spacing: 0.04em;
+  text-transform: uppercase; line-height: 1;
+  padding: var(--s2) var(--s6); border-radius: var(--r-sm);
+  color: var(--warning); background: var(--warning-soft);
+  border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
+}
+/* Same pull as `.su-avatar` below, for the same reason: the mark fills the 26px
+   icon column while the nav glyphs under it are 17px left-aligned in it, so a
+   shared left edge puts the mark 4px right of their centre line. The space goes
+   back to the gap, so the labels keep their column. */
+.logo .logo-mark {
+  width: var(--nav-ico-w); height: var(--nav-ico-w); border-radius: var(--r-sm); flex-shrink: 0;
+  object-fit: contain; display: block;
+  margin-left: -4px; margin-right: var(--s4);
+}
 /* The beta mark carries a sentence, so its tooltip wraps and hangs under the
    badge — the sidebar starts at the top of the window, and there is nothing
    above the logo to hang it from. Left-anchored: the badge is against the left
