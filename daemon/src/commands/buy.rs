@@ -10,6 +10,170 @@ use super::server_client::{authed, resp_json};
 use super::{R, err, now_secs};
 use crate::cmd_err;
 
+/// The sellable market catalog is the source of default model versions.
+const BUY_CATALOG_KEY: &str = "buy_model_catalog";
+const BUY_CATALOG_UPDATED_KEY: &str = "buy_model_catalog_updated_at";
+const BUY_CATALOG_MAX_AGE_SECS: i64 = 300;
+const DESKTOP_CATALOG_KEY: &str = "claude_desktop_catalog_ids";
+const DESKTOP_DEFAULTS_KEY: &str = "claude_desktop_auto_models";
+const DESKTOP_FAMILIES: &[&str] = &["sonnet", "opus", "haiku", "fable"];
+
+/// Compare numeric release segments (4.10 > 4.9), preferring an undated
+/// release over a frozen snapshot of that same release. Packaging variants
+/// and other vendors are not candidates for a Claude family default.
+fn desktop_model_version(id: &str, family: &str) -> Option<(Vec<u32>, Vec<u32>)> {
+    let bare = if let Some((vendor, bare)) = id.rsplit_once('/') {
+        if vendor != "anthropic" { return None; }
+        bare
+    } else { id };
+    let suffix = bare.strip_prefix(&format!("claude-{family}-"))?;
+    let mut version: Vec<u32> = suffix.split(['-', '.'])
+        .map(str::parse).collect::<Result<_, _>>().ok()?;
+    if version.is_empty() { return None; }
+    let date_at = version.iter().position(|n| *n >= 1000);
+    let snapshot = date_at.map(|i| version.split_off(i)).unwrap_or_default();
+    if version.is_empty() { return None; }
+    while version.last() == Some(&0) { version.pop(); }
+    Some((version, snapshot))
+}
+
+fn latest_desktop_models(ids: &[String]) -> Vec<String> {
+    DESKTOP_FAMILIES.iter().filter_map(|family| {
+        ids.iter().filter_map(|id| desktop_model_version(id, family).map(|v| (id, v)))
+            .max_by(|(a_id, (a, a_date)), (b_id, (b, b_date))| {
+                a.cmp(b)
+                    .then_with(|| a_date.is_empty().cmp(&b_date.is_empty()))
+                    .then_with(|| a_date.cmp(b_date))
+                    .then_with(|| b_id.cmp(a_id))
+            }).map(|(id, _)| id.clone())
+    }).collect()
+}
+
+/// Platforms for tools with native catalogs, and the user's chosen default
+/// platform for the multi-provider clients. Model versions always come from
+/// the market response, never from these platform mappings.
+fn default_platform(tool: &str) -> &'static str {
+    match tool {
+        "claude" | "claude-desktop" => "anthropic",
+        "gemini" => "google",
+        "dsh" => "deepseek",
+        _ => "openai",
+    }
+}
+
+fn auto_models_key(tool: &str) -> String {
+    if tool == "claude-desktop" { DESKTOP_DEFAULTS_KEY.into() }
+    else { format!("buy_auto_models:{tool}") }
+}
+
+/// None = never selected; a nonempty matching snapshot = our defaults;
+/// Some([]) = a manual selection, including an intentional manual clear.
+async fn uses_default_models(store: &asale_client_core::store::LocalStore, tool: &str) -> R<bool> {
+    let buy = store.buy_tool(tool).await.map_err(err)?;
+    let previous: Option<Vec<String>> = store.get_setting(&auto_models_key(tool)).await.map_err(err)?
+        .and_then(|s| serde_json::from_str(&s).ok());
+    Ok(match previous {
+        None => buy.models.is_empty(),
+        Some(previous) => !previous.is_empty() && (buy.models.is_empty() || previous == buy.models),
+    })
+}
+
+/// Normalise release ids into family words plus numeric version segments.
+/// For example gpt-6.10-sol and gpt-6.9-sol belong to the same gpt-sol family.
+fn platform_release(id: &str) -> Option<(String, Vec<u32>, Vec<u32>, bool)> {
+    let bare = id.rsplit('/').next()?;
+    if bare.contains(':') || bare.ends_with("-latest") { return None; }
+    let mut words = Vec::new();
+    let mut version = Vec::new();
+    let mut snapshot = Vec::new();
+    let mut preview = false;
+    for token in bare.split(['-', '.']) {
+        if token == "preview" { preview = true; continue; }
+        let number = token.parse::<u32>().ok()
+            .or_else(|| token.strip_prefix('v').and_then(|s| s.parse().ok()));
+        if let Some(n) = number {
+            if n >= 1000 || !snapshot.is_empty() { snapshot.push(n); }
+            else { version.push(n); }
+        } else if let Some(n) = token.strip_prefix('r').and_then(|s| s.parse::<u32>().ok()) {
+            words.push("r");
+            version.push(n);
+        } else { words.push(token); }
+    }
+    while version.last() == Some(&0) { version.pop(); }
+    Some((words.join("-"), version, snapshot, preview))
+}
+
+fn default_family(provider: &str, family: &str) -> bool {
+    match provider {
+        "openai" => (family == "gpt" || family.starts_with("gpt-"))
+            && !family.chars().any(|c| c.is_ascii_digit())
+            && !family.split('-').any(|word| matches!(word,
+                "audio" | "realtime" | "search" | "transcribe" | "tts" | "image" |
+                "embedding" | "chat" | "o" | "vision" | "instruct" | "turbo")),
+        "google" => matches!(family, "gemini-pro" | "gemini-flash" | "gemini-flash-lite" | "gemini-ultra"),
+        "deepseek" => matches!(family, "deepseek" | "deepseek-r" | "deepseek-chat" | "deepseek-reasoner"),
+        _ => false,
+    }
+}
+
+fn latest_platform_models(catalog: &[Value], provider: &str) -> Vec<String> {
+    let models: Vec<&str> = catalog.iter()
+        .filter(|m| m["provider"].as_str() == Some(provider))
+        .filter(|m| m["modality"].as_str().is_none_or(|modality| modality.is_empty() || modality.ends_with("->text")))
+        .filter_map(|m| m["model"].as_str()).collect();
+    if provider == "anthropic" {
+        return latest_desktop_models(&models.iter().map(|m| (*m).to_string()).collect::<Vec<_>>());
+    }
+    let mut families = std::collections::BTreeMap::new();
+    for id in models {
+        let Some((family, version, snapshot, preview)) = platform_release(id) else { continue };
+        if !default_family(provider, &family) { continue; }
+        // Plain releases beat frozen snapshots and previews of the same version.
+        let rank = (version, snapshot.is_empty(), !preview, snapshot);
+        let best = families.entry(family).or_insert((id, rank.clone()));
+        if rank > best.1 || (rank == best.1 && id < best.0) { *best = (id, rank); }
+    }
+    let mut picked: Vec<_> = families.into_iter().collect();
+    picked.sort_by(|(a_family, (_, a)), (b_family, (_, b))| {
+        // Start on a current flagship; never put an older major release first.
+        b.0.cmp(&a.0).then_with(|| {
+            let priority = |family: &str| match family {
+                "gpt-astra" | "gemini-pro" | "deepseek" => 0,
+                "gpt-sol" | "gpt-codex" | "gemini-flash" | "deepseek-chat" => 1,
+                "gpt" | "gpt-terra" | "deepseek-reasoner" => 2,
+                "gpt-luna" | "gemini-flash-lite" | "deepseek-r" => 3,
+                _ => 4,
+            };
+            priority(a_family).cmp(&priority(b_family)).then(a_family.cmp(b_family))
+        })
+    });
+    picked.into_iter().map(|(_, (id, _))| id.to_string()).collect()
+}
+
+async fn ensure_tool_models(store: &asale_client_core::store::LocalStore, tool: &str) -> R<bool> {
+    if !uses_default_models(store, tool).await? { return Ok(false); }
+    let catalog: Vec<Value> = store.get_setting(BUY_CATALOG_KEY).await.map_err(err)?
+        .and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    let mut defaults = latest_platform_models(&catalog, default_platform(tool));
+    // Read the previous release's Claude-only cache during an upgrade.
+    if catalog.is_empty() && default_platform(tool) == "anthropic" {
+        let ids: Vec<String> = store.get_setting(DESKTOP_CATALOG_KEY).await.map_err(err)?
+            .and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        defaults = latest_desktop_models(&ids);
+    }
+    let buy = store.buy_tool(tool).await.map_err(err)?;
+    if defaults.is_empty() || (tool == "claude-desktop" && defaults.len() != DESKTOP_FAMILIES.len())
+        || defaults == buy.models { return Ok(false); }
+    store.set_buy_tool(tool, None, Some(&defaults), None, None).await.map_err(err)?;
+    store.set_setting(&auto_models_key(tool), &serde_json::to_string(&defaults).map_err(err)?)
+        .await.map_err(err)?;
+    Ok(true)
+}
+
+async fn ensure_desktop_models(store: &asale_client_core::store::LocalStore) -> R<bool> {
+    ensure_tool_models(store, "claude-desktop").await
+}
+
 /// The models a tool is allowed to buy. Empty = no restriction. Takes the store
 /// rather than the whole app state so the local proxy can call it too.
 pub async fn buy_models(store: &asale_client_core::store::LocalStore, tool: &str) -> Vec<String> {
@@ -129,6 +293,15 @@ fn warn_once(tool: &str, msg: String) {
 }
 
 pub async fn reconcile_configs(state: &AppState) -> Vec<String> {
+    // Seed before looking for a key so the picker has defaults even while
+    // signed out. An enabled legacy empty profile must also be republished.
+    let desktop_seeded = match ensure_desktop_models(&state.store).await {
+        Ok(seeded) => seeded,
+        Err(e) => {
+            warn_once("claude-desktop", format!("could not seed default buy models: {e}"));
+            false
+        }
+    };
     let key = match super::wallet::cached_key(state).await {
         Ok(Some(k)) => k,
         // No key to write: nothing to re-apply with. The UI still shows the
@@ -138,14 +311,24 @@ pub async fn reconcile_configs(state: &AppState) -> Vec<String> {
     let base = tool_config::proxy_base();
     let mut repaired = Vec::new();
     for tool in tool_config::TOOLS {
-        let Ok(buy) = state.store.buy_tool(tool).await else { continue };
-        if !buy.enabled {
-            continue;
+        let Ok(mut buy) = state.store.buy_tool(tool).await else { continue };
+        if !buy.enabled { continue; }
+        let defaults_changed = match ensure_tool_models(&state.store, tool).await {
+            Ok(changed) => changed,
+            Err(e) => { warn_once(tool, format!("could not update default models: {e}")); false }
+        };
+        if defaults_changed {
+            let Ok(updated) = state.store.buy_tool(tool).await else { continue };
+            buy = updated;
         }
         let t = tool.to_string();
+        let selected = buy.models.clone();
         let drifted =
-            tokio::task::spawn_blocking(move || tool_config::needs_reapply(&t)).await.unwrap_or(false);
-        if !drifted {
+            tokio::task::spawn_blocking(move || {
+                tool_config::needs_reapply(&t)
+                    || (t == "claude-desktop" && !tool_config::claude_desktop_models_match(&selected))
+            }).await.unwrap_or(false);
+        if !drifted && !defaults_changed && !(*tool == "claude-desktop" && desktop_seeded) {
             continue;
         }
         let (t, b, k, models) = (tool.to_string(), base.clone(), key.clone(), buy.models.clone());
@@ -428,12 +611,28 @@ pub async fn set_buy_tool(
             .set_buy_tool(&tool, None, Some(models), None, None)
             .await
             .map_err(err)?;
+        state.store.set_setting(&auto_models_key(&tool), "[]").await.map_err(err)?;
     }
-
     if enabled {
         // Verify login state (flow §3) before rewriting anything on disk.
         if keychain::get("access_token").map_err(err)?.is_none() {
             return Err(cmd_err!("errors.session.signInToBuy", "sign in before buying"));
+        }
+        if uses_default_models(&state.store, &tool).await? {
+            let has_catalog = state.store.get_setting(BUY_CATALOG_KEY).await.map_err(err)?.is_some()
+                || (default_platform(&tool) == "anthropic"
+                    && state.store.get_setting(DESKTOP_CATALOG_KEY).await.map_err(err)?.is_some());
+            let updated_at = state.store.get_setting(BUY_CATALOG_UPDATED_KEY).await.map_err(err)?
+                .and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+            if !has_catalog || now_secs().saturating_sub(updated_at) > BUY_CATALOG_MAX_AGE_SECS {
+                market_models(state).await?;
+            }
+            ensure_tool_models(&state.store, &tool).await?;
+            if state.store.buy_tool(&tool).await.map_err(err)?.models.is_empty() {
+                return Err(cmd_err!("errors.tool.defaultModelsUnavailable",
+                    "the market catalog has no default models for this tool; refresh it or select models manually",
+                    tool = tool_config::label(&tool)));
+            }
         }
         // A config `apply` would refuse anyway (Hermes ignores YAML it cannot
         // parse). Asked here so the refusal reaches the user in their own
@@ -626,7 +825,21 @@ pub async fn market_models(state: &AppState) -> R<Value> {
         .send()
         .await
         .map_err(err)?;
-    resp_json(resp).await
+    let catalog = resp_json(resp).await?;
+    if let Some(models) = catalog["models"].as_array() {
+        let cached: Vec<Value> = models.iter().map(|m| json!({
+            "model": m["model"], "provider": m["provider"], "modality": m["modality"],
+        })).collect();
+        state.store.set_setting(BUY_CATALOG_KEY, &serde_json::to_string(&cached).map_err(err)?)
+            .await.map_err(err)?;
+        state.store.set_setting(BUY_CATALOG_UPDATED_KEY, &now_secs().to_string()).await.map_err(err)?;
+        let ids: Vec<String> = models.iter()
+            .filter(|m| m["provider"].as_str() == Some("anthropic"))
+            .filter_map(|m| m["model"].as_str().map(str::to_string)).collect();
+        state.store.set_setting(DESKTOP_CATALOG_KEY, &serde_json::to_string(&ids).map_err(err)?)
+            .await.map_err(err)?;
+    }
+    Ok(catalog)
 }
 
 /// The models the platform features, with their current price, 24h change and
@@ -668,6 +881,49 @@ pub async fn market_globe(state: &AppState) -> R<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_defaults_use_numeric_versions_and_exclude_other_products() {
+        let rows = [
+            ("openai", "gpt-7.9-sol"), ("openai", "gpt-7.10-sol"),
+            ("openai", "gpt-7.10-sol-20260928"), ("openai", "gpt-7.10-sol-preview"),
+            ("openai", "gpt-8-astra"), ("openai", "gpt-7-luna"),
+            ("openai", "gpt-99-audio"), ("openai", "gpt-99-image"),
+            ("openai", "gpt-99-sol:batch"), ("openai", "gpt-4o"),
+            ("anthropic", "gpt-99-sol"),
+            ("google", "gemini-4.2-pro"), ("google", "gemini-4.10-pro-preview"),
+            ("google", "gemini-4-flash"), ("google", "gemini-4-flash-lite"),
+            ("google", "gemini-99-flash-image"),
+            ("deepseek", "deepseek-v3.9"), ("deepseek", "deepseek-v3.10"),
+            ("deepseek", "deepseek-r2"), ("deepseek", "deepseek-r1-distill-qwen-32b"),
+        ].map(|(provider, model)| json!({"provider": provider, "model": model}));
+        assert_eq!(latest_platform_models(&rows, "openai"), ["gpt-8-astra", "gpt-7.10-sol", "gpt-7-luna"]);
+        assert_eq!(latest_platform_models(&rows, "google"), ["gemini-4.10-pro-preview", "gemini-4-flash", "gemini-4-flash-lite"]);
+        assert_eq!(latest_platform_models(&rows, "deepseek"), ["deepseek-v3.10", "deepseek-r2"]);
+    }
+
+    #[test]
+    fn desktop_defaults_choose_each_familys_latest_catalog_release() {
+        let ids = [
+            "claude-sonnet-4-9", "claude-sonnet-4-10-20260901", "claude-sonnet-4-10",
+            "claude-opus-7", "claude-opus-6-99", "claude-haiku-5.2", "claude-haiku-5.12",
+            "anthropic/claude-fable-8", "claude-fable-7",
+            "claude-sonnet-99:batch", "claude-opus-99-preview", "other/claude-haiku-99",
+            "claude-fable-latest", "gpt-100",
+        ].map(str::to_string);
+        assert_eq!(latest_desktop_models(&ids), [
+            "claude-sonnet-4-10", "claude-opus-7", "claude-haiku-5.12", "anthropic/claude-fable-8",
+        ]);
+    }
+
+    #[tokio::test]
+    async fn desktop_defaults_wait_for_a_complete_catalog_instead_of_using_fixed_versions() {
+        let store = asale_client_core::store::LocalStore::open_memory().await.unwrap();
+        assert!(!ensure_desktop_models(&store).await.unwrap());
+        store.set_setting(DESKTOP_CATALOG_KEY, r#"["claude-sonnet-9"]"#).await.unwrap();
+        assert!(!ensure_desktop_models(&store).await.unwrap());
+        assert!(store.buy_tool("claude-desktop").await.unwrap().models.is_empty());
+    }
 
     #[test]
     fn market_picker_requests_the_server_sellable_catalog() {

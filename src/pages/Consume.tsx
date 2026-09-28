@@ -117,10 +117,19 @@ export function Consume() {
       .catch((e) => setErr(errText(e)));
   }, [t]);
 
+  const loadCatalog = useCallback(() => {
+    if (!inTauri) return Promise.resolve();
+    return invoke<{ models: MarketModel[] }>("market_models")
+      .then((r) => setModels(toOptions(r.models || [], t)))
+      // The fresh catalog determines automatic defaults; read them after
+      // that response rather than leaving the initial cached selection up.
+      .then(() => loadTools());
+  }, [loadTools, t]);
+
   const refresh = useCallback(() => {
     setRefreshing(true);
-    loadTools().finally(() => setRefreshing(false));
-  }, [loadTools]);
+    loadCatalog().catch((e) => setErr(errText(e))).finally(() => setRefreshing(false));
+  }, [loadCatalog]);
 
   /** Look for CLI sessions still running on the config we just replaced.
    *
@@ -142,9 +151,7 @@ export function Consume() {
     if (!inTauri) { setLoading(false); return; }
     Promise.allSettled([
       loadTools(),
-      invoke<{ models: MarketModel[] }>("market_models")
-        .then((r) => setModels(toOptions(r.models || [], t)))
-        .catch(() => {}),
+      loadCatalog().catch(() => {}),
       // Never written = no ceiling. A failed read is the same case: the proxy
       // reads the setting itself, so showing 100 here matches what it does.
       invoke<string | null>("get_setting", { key: MAX_RATIO_KEY })
@@ -155,7 +162,7 @@ export function Consume() {
         })
         .catch(() => {}),
     ]).finally(() => setLoading(false));
-  }, [loadTools, t]);
+  }, [loadTools, loadCatalog, t]);
 
   /** Persist the price ceiling. The proxy reads the setting per request, so
    *  this takes effect on the next call without restarting anything. */
@@ -480,9 +487,9 @@ export function Consume() {
                           <IconAlert /><span>{t("consume.dshNeedsModel")}</span>
                         </div>
                       )}
-                      {/* The desktop app refuses any model id outside its own
-                          four role slots, so the selection is published under
-                          those — which caps it at four, and makes an empty
+                      {/* The desktop app rejects other vendors’ model ids, so
+                          asale publishes four versionless role slots. This
+                          caps the menu at four, and makes an empty
                           selection an empty model menu. */}
                       {tool.id === "claude-desktop" && (
                         <div

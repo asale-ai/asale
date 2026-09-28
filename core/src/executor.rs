@@ -923,6 +923,8 @@ pub async fn execute(
         // translator bug from a credential problem, and this is the only place it
         // can be recorded: the gateway builds this body and never sees the
         // rejection; this process sees the rejection and never kept the body.
+        let upstream_requests_stream = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok().is_some_and(|v| v["stream"] == true);
         let shape = body_shape(&body);
         let builtin_search = crate::builtin_search::requested(&body);
         let search_request = if builtin_search { serde_json::from_slice::<serde_json::Value>(&body).ok() } else { None };
@@ -1144,7 +1146,7 @@ pub async fn execute(
             .unwrap_or_default()
             .to_string();
         let upstream_is_sse = content_type.trim_start().starts_with("text/event-stream");
-        if (req.stream && !builtin_search) || upstream_is_sse {
+        if ((req.stream || (content_type.is_empty() && upstream_requests_stream)) && !builtin_search) || upstream_is_sse {
             break (lease, resp, status);
         }
 
@@ -2248,6 +2250,13 @@ fn error_class(status: u16, body: &str) -> String {
         Some(c) => format!("{status} {}", c.chars().take(64).collect::<String>()),
         None => status.to_string(),
     };
+    // Only fixed schema names travel. Never send provider messages, unknown
+    // paths, credentials, or account identifiers to the gateway.
+    let field = e["param"].as_str().filter(|p| matches!(*p,
+        "model" | "messages" | "tools" | "tool_choice" | "temperature" |
+        "top_p" | "max_tokens" | "max_completion_tokens" | "response_format" |
+        "stream" | "thinking" | "reasoning_effort"));
+    let class = field.map_or_else(|| class.clone(), |p| format!("{class} param={p}"));
     // The gateway downgrades to its own search only when it can tell the vendor
     // refused *search* — and the message that says so is dropped above. A fixed
     // marker carries that fact and nothing of the body. OpenRouter says it as
@@ -2353,6 +2362,13 @@ mod tests {
         assert_eq!(error_class(404, openrouter), "404 404 web_search_unsupported");
         assert!(asale_protocol::search::unavailable(&error_class(404, openrouter)), "the gateway must recognise the marker");
         assert!(!error_class(400, r#"{"error":{"type":"invalid_request_error","message":"secret@example.com"}}"#).contains('@'));
+    }
+
+    #[test]
+    fn bad_request_diagnostics_only_include_known_parameter_names() {
+        assert_eq!(super::error_class(400,r#"{"error":{"type":"invalid_request_error","param":"max_tokens","message":"private account"}}"#),"400 invalid_request_error param=max_tokens");
+        assert_eq!(super::error_class(404,r#"{"error":{"type":"resource_not_found_error","param":"model"}}"#),"404 resource_not_found_error param=model");
+        assert!(!super::error_class(400,r#"{"error":{"param":"sk-live-secret","message":"secret@example.com"}}"#).contains("secret"));
     }
 
     /// The buyer's half and the operator's half of an upstream rejection travel
@@ -2984,6 +3000,24 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
         let rows = rows.lock().await;
         assert_eq!(rows[0].0, "claude-x"); // model parsed from body
         assert_eq!(rows[0].1, "no_token");
+    }
+
+    #[tokio::test]
+    async fn forced_sse_without_content_type_is_not_buffered_as_json() {
+        let sse = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n\
+data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n\
+data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":11,\"output_tokens\":7}}}\n\n";
+        let url = spawn_http(sse).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut payload = req(&url,"gpt-6-luna",0);
+        payload.stream = false;
+        payload.upstream.body_b64 = B64.encode(serde_json::json!({"model":"gpt-6-luna","stream":true}).to_string());
+        execute(&crate::http::plain(), &StaticToken(Some("k".into())), payload, &tx, None, &test_verifier(), never_canceled()).await;
+        let frames = drain(&mut rx);
+        assert!(frames.iter().any(|f| f.msg_type == protocol::T_STREAM_START));
+        assert!(!frames.iter().any(|f| f.msg_type == protocol::T_HTTP_RESPONSE));
+        let end = frames.iter().find(|f| f.msg_type == protocol::T_STREAM_END).unwrap();
+        assert_eq!(end.payload["usage"]["output_tokens"],7);
     }
 
     #[tokio::test]

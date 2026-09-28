@@ -1476,7 +1476,7 @@ mod tests {
         };
 
         // Slot two → the second selected model.
-        ask("claude-opus-4-8").await;
+        ask("claude-opus").await;
         assert_eq!(captured_body(rx.await.unwrap())["model"], "deepseek-v3");
 
         // A slot the profile never published — the app asks for one of its own
@@ -1492,7 +1492,7 @@ mod tests {
         let resp = asale_client_core::http::plain()
             .post(format!("http://127.0.0.1:{port}/claude-desktop/v1/messages"))
             .header("authorization", "Bearer sk-asale-test")
-            .json(&serde_json::json!({"model": "claude-haiku-4-5", "messages": []}))
+            .json(&serde_json::json!({"model": "claude-haiku", "messages": []}))
             .send()
             .await
             .unwrap();
@@ -1526,13 +1526,13 @@ mod tests {
             .json()
             .await
             .unwrap();
-        assert_eq!(body["data"][0]["id"], "claude-sonnet-5", "slot one, not the market id");
+        assert_eq!(body["data"][0]["id"], "claude-sonnet", "slot one, not the market id");
         assert_eq!(body["data"][0]["display_name"], "kimi-k2-thinking");
-        assert_eq!(body["data"][1]["id"], "claude-opus-4-8");
+        assert_eq!(body["data"][1]["id"], "claude-opus");
         assert_eq!(body["data"].as_array().unwrap().len(), 2, "one slot per selected model");
         assert_eq!(body["has_more"], false);
-        assert_eq!(body["first_id"], "claude-sonnet-5");
-        assert_eq!(body["last_id"], "claude-opus-4-8");
+        assert_eq!(body["first_id"], "claude-sonnet");
+        assert_eq!(body["last_id"], "claude-opus");
     }
 
     #[tokio::test]

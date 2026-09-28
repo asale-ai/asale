@@ -148,18 +148,24 @@ const CD_FILE: &str = "claude_desktop_config.json";
 const CD_LIBRARY_DIR: &str = "configLibrary";
 const CD_META_FILE: &str = "_meta.json";
 
-/// The model ids the desktop app will accept, in the order our selection fills
-/// them.
+/// Versionless desktop role slots, filled in buy-selection order.
 ///
 /// Not a cosmetic choice: the app validates every model id it is offered
 /// against a role whitelist (`sonnet` / `opus` / `haiku` / `fable` / `mythos`)
 /// *and* a vendor denylist (`gpt`, `gemini`, `deepseek`, `qwen`, `kimi`, `glm`,
-/// `grok`, …), and one rejected id makes it drop the whole set. So a market
+/// `grok`, …). So a market
 /// model never travels under its own name here: it is published under one of
 /// these four slots with its real name as the menu label, and the proxy maps
 /// the slot back before the request leaves this machine (see
 /// `claude_desktop_alias`).
+/// Keep versions out of these ids: Desktop uses them in its identity prompt,
+/// and a carrier slot does not describe the bought model's version or vendor.
 pub const CLAUDE_DESKTOP_ROLES: &[&str] =
+    &["claude-sonnet", "claude-opus", "claude-haiku", "claude-fable"];
+
+/// Existing Desktop sessions retain their original slot id after the profile
+/// is regenerated. Keep those ids mapped to the same selection positions.
+const CLAUDE_DESKTOP_LEGACY_ROLES: &[&str] =
     &["claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5", "claude-fable-5"];
 
 /// The market model a desktop role slot stands for, given a buy selection.
@@ -169,7 +175,8 @@ pub const CLAUDE_DESKTOP_ROLES: &[&str] =
 /// its own accord (a new conversation's default, its title generation), and
 /// such a request has to buy *something* rather than fail.
 pub fn claude_desktop_alias(role: &str, models: &[String]) -> Option<String> {
-    let idx = CLAUDE_DESKTOP_ROLES.iter().position(|r| *r == role)?;
+    let idx = CLAUDE_DESKTOP_ROLES.iter().position(|r| *r == role)
+        .or_else(|| CLAUDE_DESKTOP_LEGACY_ROLES.iter().position(|r| *r == role))?;
     models.get(idx).or_else(|| models.first()).cloned()
 }
 
@@ -199,6 +206,7 @@ const DSH_KEY_ENV: &str = "ASALE_API_KEY";
 // ── Gemini CLI env keys ────────────────────────────────────────────────────
 const GEMINI_BASE_URL: &str = "GOOGLE_GEMINI_BASE_URL";
 const GEMINI_API_KEY: &str = "GEMINI_API_KEY";
+const GEMINI_MODEL: &str = "GEMINI_MODEL";
 
 // ── Codex keys ─────────────────────────────────────────────────────────────
 const CODEX_API_KEY: &str = "OPENAI_API_KEY";
@@ -668,6 +676,18 @@ pub fn points_at_proxy(tool: &str) -> bool {
 pub fn needs_reapply(tool: &str) -> bool {
     !points_at_proxy(tool)
         || (tool == "codex" && (!crate::codex_catalog::matches_installed_codex() || !codex_has_bearer()))
+
+}
+
+/// A catalog update can change automatic defaults while the endpoint and
+/// deployment mode stay the same. Republish the menu when its slots differ.
+pub fn claude_desktop_models_match(models: &[String]) -> bool {
+    let expected: Vec<Value> = models.iter().zip(CLAUDE_DESKTOP_ROLES)
+        .map(|(model, role)| serde_json::json!({"name": role, "labelOverride": model}))
+        .collect();
+    let profile = read_json(&config_paths("claude-desktop")[3]);
+    (models.is_empty() && profile.get("inferenceModels").is_none())
+        || profile.get("inferenceModels") == Some(&Value::Array(expected))
 }
 
 /// Configs written before the provider carried its own bearer 401 on Codex
@@ -798,10 +818,9 @@ fn snapshot(tool: &str) -> Backup {
 /// other setting the user had. Returns the pristine originals for a later
 /// restore. Idempotent: re-applying only rewrites the keys asale owns.
 ///
-/// `models` is the tool's buy selection (market model ids, empty = any). Only
-/// Codex needs it: unlike Claude Code and Gemini CLI it does not take the model
-/// from the caller's request — it picks from a catalog of its own, so the
-/// selection has to be written into its config to have any effect at all.
+/// `models` is the tool's buy selection (market model ids, empty = any).
+/// Publish it to tools with model catalogs, and set the startup model and
+/// family aliases for Claude Code and Gemini so their defaults agree with it.
 pub fn apply(tool: &str, base_url: &str, token: &str, models: &[String]) -> Result<Backup> {
     anyhow::ensure!(known(tool), "unknown tool: {tool}");
     let backup = snapshot(tool);
@@ -818,10 +837,10 @@ pub fn apply(tool: &str, base_url: &str, token: &str, models: &[String]) -> Resu
     }
 
     match tool {
-        "claude" => apply_claude(base_url, token)?,
+        "claude" => apply_claude(base_url, token, models)?,
         "claude-desktop" => apply_claude_desktop(token, models)?,
         "codex" => apply_codex(base_url, token, models)?,
-        "gemini" => apply_gemini(base_url, token)?,
+        "gemini" => apply_gemini(base_url, token, models)?,
         "openclaw" => apply_openclaw(token, models)?,
         "hermes" => apply_hermes(token, models)?,
         "opencode" => apply_opencode(token, models)?,
@@ -869,7 +888,7 @@ pub fn strip_all(tool: &str) -> Result<()> {
 
 // ── Claude Code ────────────────────────────────────────────────────────────
 
-fn apply_claude(base_url: &str, token: &str) -> Result<()> {
+fn apply_claude(base_url: &str, token: &str, models: &[String]) -> Result<()> {
     let path = primary_config_path("claude");
     let mut obj = read_json(&path).as_object().cloned().unwrap_or_default();
     let env = obj.entry("env".to_string()).or_insert_with(|| Value::Object(Map::new()));
@@ -880,6 +899,24 @@ fn apply_claude(base_url: &str, token: &str) -> Result<()> {
     env_obj.insert(ANTHROPIC_BASE_URL.to_string(), Value::String(base_url.to_string()));
     env_obj.insert(ANTHROPIC_AUTH_TOKEN.to_string(), Value::String(token.to_string()));
     env_obj.remove(ANTHROPIC_API_KEY);
+    for (family, key) in [
+        ("sonnet", "ANTHROPIC_DEFAULT_SONNET_MODEL"),
+        ("opus", "ANTHROPIC_DEFAULT_OPUS_MODEL"),
+        ("haiku", "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+        ("fable", "ANTHROPIC_DEFAULT_FABLE_MODEL"),
+    ] {
+        if let Some(model) = models.iter().find(|m| m.rsplit('/').next().unwrap_or(m)
+            .starts_with(&format!("claude-{family}-"))).or_else(|| models.first()) {
+            env_obj.insert(key.into(), json!(model));
+        } else {
+            env_obj.remove(key);
+        }
+    }
+    if let Some(model) = models.first() {
+        env_obj.insert("ANTHROPIC_MODEL".into(), json!(model));
+    } else {
+        env_obj.remove("ANTHROPIC_MODEL");
+    }
     write_atomic(&path, &serde_json::to_string_pretty(&Value::Object(obj))?)
 }
 
@@ -1905,11 +1942,18 @@ fn yaml_unescape(v: &str) -> String {
 /// "in effect" against a CLI that could not make a single call.
 const GEMINI_AUTH_TYPE: &str = "gemini-api-key";
 
-fn apply_gemini(base_url: &str, token: &str) -> Result<()> {
+fn apply_gemini(base_url: &str, token: &str, models: &[String]) -> Result<()> {
     let paths = config_paths("gemini");
     let env_path = &paths[0];
     let raw = read_raw(env_path).unwrap_or_default();
-    let body = dotenv_set(&raw, &[(GEMINI_BASE_URL, base_url), (GEMINI_API_KEY, token)]);
+    let raw = if models.is_empty() {
+        strip_dotenv(&raw, &[GEMINI_MODEL]).unwrap_or_default()
+    } else {
+        raw
+    };
+    let mut values = vec![(GEMINI_BASE_URL, base_url), (GEMINI_API_KEY, token)];
+    if let Some(model) = models.first() { values.push((GEMINI_MODEL, model.as_str())); }
+    let body = dotenv_set(&raw, &values);
     write_atomic(env_path, &body)?;
 
     // Only when the user has not chosen for themselves: someone signed in with
@@ -1977,7 +2021,11 @@ fn strip_ours(tool: &str, path: &Path) -> Result<()> {
     let Some(raw) = read_raw(path) else { return Ok(()) };
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
     let stripped = match (tool, name) {
-        ("claude", _) => strip_json_env(&raw, &[ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN]),
+        ("claude", _) => strip_json_env(&raw, &[
+            ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, "ANTHROPIC_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        ]),
         // Our profile in full — nothing of the user's is in it.
         ("claude-desktop", name) if name == format!("{CD_PROFILE_ID}.json") => None,
         ("claude-desktop", CD_META_FILE) => strip_cd_meta(&raw),
@@ -1993,7 +2041,7 @@ fn strip_ours(tool: &str, path: &Path) -> Result<()> {
         ("dsh", ".credentials.yaml") => strip_dsh_credentials(&raw),
         ("dsh", _) => strip_dsh_settings(&raw),
         ("gemini", "settings.json") => strip_gemini_settings(&raw),
-        ("gemini", _) => strip_dotenv(&raw, &[GEMINI_BASE_URL, GEMINI_API_KEY]),
+        ("gemini", _) => strip_dotenv(&raw, &[GEMINI_BASE_URL, GEMINI_API_KEY, GEMINI_MODEL]),
         _ => Some(raw),
     };
     match stripped {
@@ -2233,6 +2281,30 @@ mod tests {
     }
 
     #[test]
+    fn clearing_claude_models_removes_overrides_and_preserves_backup() {
+        with_temp_home(|| {
+            let path = primary_config_path("claude");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let original = r#"{"env":{"OTHER":"keep","ANTHROPIC_MODEL":"user-model","ANTHROPIC_DEFAULT_OPUS_MODEL":"user-opus"}}"#;
+            std::fs::write(&path, original).unwrap();
+            let backup = apply("claude", "http://127.0.0.1:9787", "test-key", &models(&["claude-sonnet-6", "claude-opus-6"])).unwrap();
+            assert_eq!(read_json(&path)["env"]["ANTHROPIC_MODEL"], "claude-sonnet-6");
+
+            apply("claude", "http://127.0.0.1:9787", "test-key", &[]).unwrap();
+            let obj = read_json(&path);
+            let env = &obj["env"];
+            for key in ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL"] {
+                assert!(env.get(key).is_none(), "stale override: {key}");
+            }
+            assert_eq!(env["OTHER"], "keep");
+            assert_eq!(env[ANTHROPIC_AUTH_TOKEN], "test-key");
+            assert_eq!(current_base_url("claude").as_deref(), Some("http://127.0.0.1:9787"));
+            restore("claude", &backup).unwrap();
+            assert_eq!(read_raw(&path).unwrap(), original);
+        });
+    }
+
+    #[test]
     fn claude_desktop_publishes_role_slots_and_leaves_nothing_behind() {
         with_temp_home(|| {
             let paths = config_paths("claude-desktop");
@@ -2270,9 +2342,9 @@ mod tests {
                 &Value::String(proxy_base_for("claude-desktop"))
             );
             let published = prof.get("inferenceModels").unwrap().as_array().unwrap();
-            assert_eq!(published[0]["name"], "claude-sonnet-5");
+            assert_eq!(published[0]["name"], "claude-sonnet");
             assert_eq!(published[0]["labelOverride"], "kimi-k2-thinking");
-            assert_eq!(published[1]["name"], "claude-opus-4-8");
+            assert_eq!(published[1]["name"], "claude-opus");
             assert_eq!(published.len(), 2, "one slot per selected model");
             assert!(points_at_proxy("claude-desktop"));
 
@@ -2329,21 +2401,26 @@ mod tests {
 
     #[test]
     fn a_desktop_role_slot_resolves_to_the_model_it_stands_for() {
+        let bought = vec!["gpt-6-sol".into(), "claude-opus-5-5".into(), "gemini-4-pro".into(), "kimi-k3".into()];
+        for (idx, (role, legacy)) in CLAUDE_DESKTOP_ROLES.iter().zip(CLAUDE_DESKTOP_LEGACY_ROLES).enumerate() {
+            assert_eq!(claude_desktop_alias(role, &bought).as_deref(), Some(bought[idx].as_str()));
+            assert_eq!(claude_desktop_alias(legacy, &bought).as_deref(), Some(bought[idx].as_str()));
+        }
         let models = vec!["kimi-k2-thinking".to_string(), "deepseek-v3".to_string()];
         assert_eq!(
-            claude_desktop_alias("claude-sonnet-5", &models).as_deref(),
+            claude_desktop_alias("claude-sonnet", &models).as_deref(),
             Some("kimi-k2-thinking")
         );
-        assert_eq!(claude_desktop_alias("claude-opus-4-8", &models).as_deref(), Some("deepseek-v3"));
+        assert_eq!(claude_desktop_alias("claude-opus", &models).as_deref(), Some("deepseek-v3"));
         // An unpublished slot — the app asks for these on its own — falls back
         // to the first selected model rather than failing.
         assert_eq!(
-            claude_desktop_alias("claude-fable-5", &models).as_deref(),
+            claude_desktop_alias("claude-fable", &models).as_deref(),
             Some("kimi-k2-thinking")
         );
         // Not a slot at all, and nothing selected: nothing to resolve to.
         assert_eq!(claude_desktop_alias("gpt-5", &models), None);
-        assert_eq!(claude_desktop_alias("claude-sonnet-5", &[]), None);
+        assert_eq!(claude_desktop_alias("claude-sonnet", &[]), None);
     }
 
     #[test]
@@ -3015,6 +3092,28 @@ auxiliary:
     }
 
     #[test]
+    fn clearing_gemini_models_removes_override_and_preserves_backup() {
+        with_temp_home(|| {
+            let path = primary_config_path("gemini");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let original = "# my settings\nGEMINI_MODEL=user-model\nOTHER=keep\n";
+            std::fs::write(&path, original).unwrap();
+            let backup = apply("gemini", "http://127.0.0.1:9787", "test-key", &models(&["gemini-4-pro"])).unwrap();
+            assert_eq!(dotenv_get(&read_raw(&path).unwrap(), GEMINI_MODEL).as_deref(), Some("gemini-4-pro"));
+
+            apply("gemini", "http://127.0.0.1:9787", "test-key", &[]).unwrap();
+            let body = read_raw(&path).unwrap();
+            assert!(dotenv_get(&body, GEMINI_MODEL).is_none());
+            assert!(body.starts_with("# my settings\n"));
+            assert_eq!(dotenv_get(&body, "OTHER").as_deref(), Some("keep"));
+            assert_eq!(dotenv_get(&body, GEMINI_API_KEY).as_deref(), Some("test-key"));
+            assert_eq!(current_base_url("gemini").as_deref(), Some("http://127.0.0.1:9787"));
+            restore("gemini", &backup).unwrap();
+            assert_eq!(read_raw(&path).unwrap(), original);
+        });
+    }
+
+    #[test]
     fn gemini_gets_the_auth_mode_the_cli_refuses_to_start_without() {
         with_temp_home(|| {
             let paths = config_paths("gemini");
@@ -3199,4 +3298,3 @@ llm-pi-ai:
         assert!(!stripped.contains("https://ours.example"));
     }
 }
-

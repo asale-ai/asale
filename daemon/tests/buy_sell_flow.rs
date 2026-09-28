@@ -68,12 +68,218 @@ impl Drop for Sandbox {
     }
 }
 
+fn test_default_catalog() -> serde_json::Value {
+    let models = [
+        ("anthropic", "claude-sonnet-6-2"), ("anthropic", "claude-opus-6-10"),
+        ("anthropic", "claude-haiku-5"), ("anthropic", "claude-fable-6"),
+        ("openai", "gpt-6-astra"), ("openai", "gpt-6-sol"), ("openai", "gpt-5.6-sol"),
+        ("openai", "gpt-6-luna"), ("openai", "gpt-6-terra"),
+        ("google", "gemini-4-pro"), ("google", "gemini-3-pro"),
+        ("google", "gemini-4-flash"), ("google", "gemini-4-flash-lite"),
+        ("deepseek", "deepseek-v4"), ("deepseek", "deepseek-v3.2"),
+        ("deepseek", "deepseek-r2"), ("deepseek", "deepseek-r1"),
+    ];
+    serde_json::Value::Array(models.iter().map(|(provider, model)|
+        serde_json::json!({"provider": provider, "model": model, "modality": "text->text"})).collect())
+}
+
+async fn cache_claude_catalog(store: &LocalStore, ids: &serde_json::Value) {
+    let catalog: Vec<_> = ids.as_array().unwrap().iter().map(|model|
+        serde_json::json!({"provider": "anthropic", "model": model})).collect();
+    store.set_setting("buy_model_catalog", &serde_json::to_string(&catalog).unwrap()).await.unwrap();
+}
+
 /// A signed-in state with a cached consumer key, so no server call is needed.
 async fn signed_in_state() -> std::sync::Arc<AppState> {
     let state = AppState::new().await.expect("app state");
     keychain::set("access_token", "test-access-token").unwrap();
     state.store.set_setting("asale_api_key", "sk-asale-test").await.unwrap();
+    let catalog = test_default_catalog();
+    state.store.set_setting("buy_model_catalog", &catalog.to_string()).await.unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    state.store.set_setting("buy_model_catalog_updated_at", &now.to_string()).await.unwrap();
     std::sync::Arc::new(state)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn first_buy_fetches_the_live_catalog_before_selecting_default_models() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let _sb = Sandbox::new("live-buy-defaults");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let app = axum::Router::new().route("/api/v1/market/models", axum::routing::get(
+        |axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+            assert_eq!(query.get("sellable").map(String::as_str), Some("1"));
+            axum::Json(serde_json::json!({"models": [
+                {"provider": "openai", "model": "gpt-8-sol"},
+                {"provider": "openai", "model": "gpt-8.10-sol"},
+                {"provider": "anthropic", "model": "claude-sonnet-99"}
+            ]}))
+        },
+    ));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let mut state = AppState::new().await.unwrap();
+    state.cfg.server_api_base = base;
+    keychain::set("access_token", "test-access-token").unwrap();
+    state.store.set_setting("asale_api_key", "sk-asale-test").await.unwrap();
+    let state = std::sync::Arc::new(state);
+
+    // No catalog or prior model selection exists on this install.
+    commands::set_buy_tool(&state, "opencode".into(), true, None).await.unwrap();
+    assert_eq!(state.store.buy_tool("opencode").await.unwrap().models, ["gpt-8.10-sol"]);
+    assert!(state.store.get_setting("buy_model_catalog_updated_at").await.unwrap().is_some());
+    commands::set_buy_tool(&state, "opencode".into(), false, None).await.unwrap();
+
+    // Empty fresh catalogs produce an actionable error, not an empty buy menu.
+    state.store.set_setting("buy_model_catalog", "[]").await.unwrap();
+    let error = commands::set_buy_tool(&state, "hermes".into(), true, None).await.unwrap_err();
+    assert_eq!(error.key.as_deref(), Some("errors.tool.defaultModelsUnavailable"));
+    assert!(!state.store.buy_tool("hermes").await.unwrap().enabled);
+    assert!(!tool_config::primary_config_path("hermes").exists());
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn buying_without_a_manual_selection_uses_each_platforms_latest_families() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let _sb = Sandbox::new("all-defaults");
+    let state = signed_in_state().await;
+    for tool in tool_config::TOOLS {
+        let expected = match *tool {
+            "claude" | "claude-desktop" => vec!["claude-sonnet-6-2", "claude-opus-6-10", "claude-haiku-5", "claude-fable-6"],
+            "gemini" => vec!["gemini-4-pro", "gemini-4-flash", "gemini-4-flash-lite"],
+            "dsh" => vec!["deepseek-v4", "deepseek-r2"],
+            _ => vec!["gpt-6-astra", "gpt-6-sol", "gpt-6-terra", "gpt-6-luna"],
+        };
+        let result = commands::set_buy_tool(&state, (*tool).into(), true, None).await.unwrap();
+        assert_eq!(result["models"], serde_json::json!(expected), "{tool}");
+        assert_eq!(state.store.buy_tool(tool).await.unwrap().models, expected, "{tool}: persisted");
+        let config = std::fs::read_to_string(tool_config::primary_config_path(tool)).unwrap();
+        if *tool == "claude" {
+            let config: serde_json::Value = serde_json::from_str(&config).unwrap();
+            assert_eq!(config["env"]["ANTHROPIC_MODEL"], expected[0]);
+            assert_eq!(config["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"], expected[1]);
+        } else if *tool == "gemini" {
+            assert!(config.contains("GEMINI_MODEL=gemini-4-pro"));
+        }
+        commands::set_buy_tool(&state, (*tool).into(), false, None).await.unwrap();
+    }
+
+    // Automatic defaults follow newly catalogued releases on the next start.
+    let mut catalog = test_default_catalog();
+    catalog.as_array_mut().unwrap().push(serde_json::json!({"provider": "openai", "model": "gpt-7-sol"}));
+    state.store.set_setting("buy_model_catalog", &catalog.to_string()).await.unwrap();
+    commands::set_buy_tool(&state, "codex".into(), true, None).await.unwrap();
+    assert_eq!(state.store.buy_tool("codex").await.unwrap().models[0], "gpt-7-sol");
+    assert!(!state.store.buy_tool("codex").await.unwrap().models.contains(&"gpt-6-sol".into()));
+
+    // A manual clear is a real choice, even after stopping and starting.
+    commands::set_buy_tool(&state, "codex".into(), true, Some(vec![])).await.unwrap();
+    commands::set_buy_tool(&state, "codex".into(), false, None).await.unwrap();
+    commands::set_buy_tool(&state, "codex".into(), true, None).await.unwrap();
+    assert!(state.store.buy_tool("codex").await.unwrap().models.is_empty());
+    commands::set_buy_tool(&state, "codex".into(), true, Some(vec!["kimi-k2-thinking".into()])).await.unwrap();
+    commands::buy_tools(&state).await.unwrap();
+    assert_eq!(state.store.buy_tool("codex").await.unwrap().models, ["kimi-k2-thinking"]);
+    commands::set_buy_tool(&state, "codex".into(), false, None).await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn claude_desktop_defaults_populate_and_repair_an_empty_profile() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let _sb = Sandbox::new("desktop-defaults");
+    let state = signed_in_state().await;
+    let expected = vec!["claude-sonnet-6-1", "claude-opus-6", "claude-haiku-5", "claude-fable-6"];
+    let catalog = serde_json::json!([
+        "claude-sonnet-5", "claude-sonnet-6-1", "claude-opus-6", "claude-opus-4-8",
+        "claude-haiku-5", "claude-haiku-4-5", "claude-fable-6", "claude-fable-5"
+    ]);
+    cache_claude_catalog(&state.store, &catalog).await;
+    // Upgrade a legacy four-family default selection, without fixed-version
+    // migration rules in production code.
+    state.store.set_buy_tool("claude-desktop", None, Some(&[
+        "claude-sonnet-5".into(), "claude-opus-4-8".into(),
+        "claude-haiku-4-5".into(), "claude-fable-5".into(),
+    ]), None, None).await.unwrap();
+    let prior_defaults = state.store.buy_tool("claude-desktop").await.unwrap().models;
+    state.store.set_setting("claude_desktop_auto_models", &serde_json::to_string(&prior_defaults).unwrap()).await.unwrap();
+
+    let listed = commands::buy_tools(&state).await.unwrap();
+    let desktop = listed["tools"].as_array().unwrap().iter()
+        .find(|tool| tool["id"] == "claude-desktop").unwrap();
+    assert_eq!(desktop["models"], serde_json::json!(expected));
+    assert_eq!(desktop["enabled"], false);
+    assert!(state.store.buy_tool("claude").await.unwrap().models.is_empty());
+
+    commands::set_buy_tool(&state, "claude-desktop".into(), true, None).await.unwrap();
+    let before = state.store.buy_tool("claude-desktop").await.unwrap();
+    let profile_path = &tool_config::config_paths("claude-desktop")[3];
+    let profile: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(profile_path).unwrap()).unwrap();
+    for (i, model) in expected.iter().enumerate() {
+        assert_eq!(profile["inferenceModels"][i]["name"], tool_config::CLAUDE_DESKTOP_ROLES[i]);
+        assert_eq!(profile["inferenceModels"][i]["labelOverride"], *model);
+        assert_eq!(tool_config::claude_desktop_alias(tool_config::CLAUDE_DESKTOP_ROLES[i], &before.models).as_deref(), Some(*model));
+    }
+
+    // Simulate an older install with buying enabled but no selected models.
+    state.store.set_buy_tool("claude-desktop", None, Some(&[]), None, None).await.unwrap();
+    tool_config::apply("claude-desktop", "unused", "sk-asale-test", &[]).unwrap();
+    assert!(!tool_config::claude_desktop_models_match(&before.models));
+    let listed = commands::buy_tools(&state).await.unwrap();
+    assert!(listed["repaired"].as_array().unwrap().contains(&serde_json::json!("claude-desktop")));
+    assert!(!tool_config::needs_reapply("claude-desktop"));
+    let after = state.store.buy_tool("claude-desktop").await.unwrap();
+    assert_eq!(after.models, before.models);
+    assert_eq!(after.backup_json, before.backup_json);
+    assert_eq!(after.since_ts, before.since_ts);
+
+    // An upgrade from versioned carrier ids republishes the profile without
+    // changing the bought models, backup, or start time.
+    let mut legacy_profile: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&profile_path).unwrap()).unwrap();
+    for (entry, old) in legacy_profile["inferenceModels"].as_array_mut().unwrap().iter_mut()
+        .zip(["claude-sonnet-5", "claude-opus-4-8", "claude-haiku-4-5", "claude-fable-5"]) {
+        entry["name"] = serde_json::json!(old);
+    }
+    std::fs::write(&profile_path, legacy_profile.to_string()).unwrap();
+    assert!(!tool_config::claude_desktop_models_match(&after.models));
+    let listed = commands::buy_tools(&state).await.unwrap();
+    assert!(listed["repaired"].as_array().unwrap().contains(&serde_json::json!("claude-desktop")));
+    assert!(tool_config::claude_desktop_models_match(&after.models));
+    let migrated = state.store.buy_tool("claude-desktop").await.unwrap();
+    assert_eq!(migrated.models, after.models);
+    assert_eq!(migrated.backup_json, after.backup_json);
+    assert_eq!(migrated.since_ts, after.since_ts);
+
+    // New releases replace automatic defaults and republish an enabled menu.
+    let updated = serde_json::json!([
+        "claude-sonnet-6-2", "claude-sonnet-6-1", "claude-opus-6-9", "claude-opus-6-10",
+        "claude-haiku-5", "claude-fable-6"
+    ]);
+    let expected = vec!["claude-sonnet-6-2", "claude-opus-6-10", "claude-haiku-5", "claude-fable-6"];
+    cache_claude_catalog(&state.store, &updated).await;
+    let listed = commands::buy_tools(&state).await.unwrap();
+    assert!(listed["repaired"].as_array().unwrap().contains(&serde_json::json!("claude-desktop")));
+    let upgraded = state.store.buy_tool("claude-desktop").await.unwrap();
+    assert_eq!(upgraded.models, expected);
+    assert_eq!(upgraded.backup_json, before.backup_json);
+    assert_eq!(upgraded.since_ts, before.since_ts);
+    assert!(tool_config::claude_desktop_models_match(&upgraded.models));
+
+    commands::set_buy_tool(&state, "claude-desktop".into(), true, Some(vec!["kimi-k2-thinking".into()])).await.unwrap();
+    commands::buy_tools(&state).await.unwrap();
+    assert_eq!(state.store.buy_tool("claude-desktop").await.unwrap().models, vec!["kimi-k2-thinking"]);
+    let manual = vec!["claude-sonnet-5".into(), "claude-opus-4-8".into(),
+        "claude-haiku-4-5".into(), "claude-fable-5".into()];
+    commands::set_buy_tool(&state, "claude-desktop".into(), true, Some(manual.clone())).await.unwrap();
+    commands::buy_tools(&state).await.unwrap();
+    assert_eq!(state.store.buy_tool("claude-desktop").await.unwrap().models, manual);
+    commands::set_buy_tool(&state, "claude-desktop".into(), true, Some(vec![])).await.unwrap();
+    assert!(state.store.buy_tool("claude-desktop").await.unwrap().models.is_empty());
+    let listed = commands::buy_tools(&state).await.unwrap();
+    assert!(listed["repaired"].as_array().unwrap().is_empty(), "manual clear stays cleared");
+    commands::set_buy_tool(&state, "claude-desktop".into(), false, None).await.unwrap();
 }
 
 #[tokio::test(flavor = "current_thread")]

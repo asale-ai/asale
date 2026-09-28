@@ -302,7 +302,7 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
 }
 *::-webkit-scrollbar-thumb:hover { background: var(--fg-3); background-clip: content-box; }
 
-a { color: var(--accent); text-decoration: none; }
+a { color: var(--fg); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
 /* ── Typography ─────────────────────────────────────────────────────────── */
@@ -762,7 +762,7 @@ p, li, .sub { text-wrap: pretty; }
   margin-top: var(--s12); font-size: var(--fs-title); font-weight: 600; letter-spacing: -0.03em; line-height: 1.2;
   display: flex; align-items: center; gap: var(--s8); min-height: 28px;
 }
-.stat-tile.primary .st-value { color: var(--accent); }
+.stat-tile.primary .st-value { color: var(--fg); }
 .stat-tile .st-value .st-unit { font-size: var(--fs-sub); font-weight: 500; letter-spacing: 0; color: var(--fg-3); }
 /* The closing line: what the headline is about, and the page that manages it.
    One row, pinned to the bottom, so three tiles of unequal content still end
@@ -779,7 +779,7 @@ p, li, .sub { text-wrap: pretty; }
 /* ── Buttons ────────────────────────────────────────────────────────────── */
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: var(--s6);
-  background: var(--accent); color: var(--accent-fg);
+  background: var(--fg); color: var(--bg);
   border: 1px solid transparent; border-radius: var(--r);
   padding: var(--s8) var(--s16); font-weight: 500; font-size: var(--fs-sub); cursor: pointer;
   transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease),
@@ -787,8 +787,8 @@ p, li, .sub { text-wrap: pretty; }
   white-space: nowrap; line-height: 1.3; flex-shrink: 0;
 }
 .btn svg { width: 15px; height: 15px; }
-.btn:hover { background: var(--accent-hover); }
-.btn:disabled { opacity: 0.45; cursor: not-allowed; background: var(--accent); }
+.btn:hover { background: color-mix(in srgb, var(--fg) 84%, var(--bg)); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; background: var(--fg); }
 .btn:focus-visible { outline: none; box-shadow: var(--ring); }
 
 .btn.ghost { background: var(--surface-2); border-color: transparent; color: var(--fg); }
@@ -821,7 +821,7 @@ p, li, .sub { text-wrap: pretty; }
 .icon-btn:hover:not(:disabled) { background: var(--surface-3); color: var(--fg); }
 .icon-btn:focus-visible { outline: none; box-shadow: var(--ring); }
 .icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.icon-btn.on, .icon-btn.busy { color: var(--accent); }
+.icon-btn.on, .icon-btn.busy { color: var(--fg); }
 .icon-btn.busy svg { animation: spin 0.9s linear infinite; }
 .icon-btn svg { width: 15px; height: 15px; }
 .icon-btn.sm { width: 24px; height: 24px; background: transparent; }
@@ -914,7 +914,8 @@ select.input {
   border-radius: 50%; background: #fff; transition: transform var(--dur) var(--ease);
 }
 :root[data-theme="light"] .switch .track::after { box-shadow: 0 1px 2px rgba(20, 24, 40, 0.2); }
-.switch input:checked + .track { background: var(--accent); }
+.switch input:checked + .track { background: var(--fg); }
+.switch input:checked + .track::after { background: var(--bg); }
 .switch input:checked + .track::after { transform: translateX(16px); }
 .switch input:focus-visible + .track { box-shadow: var(--ring); }
 .switch input:disabled + .track { opacity: 0.45; cursor: not-allowed; }
@@ -982,15 +983,15 @@ select.input {
   transition: background-color var(--dur) var(--ease);
 }
 .choice:hover { background: var(--surface-3); }
-.choice.active { background: var(--accent-soft); }
+.choice.active { background: color-mix(in srgb, var(--fg) 9%, transparent); }
 .choice input { position: absolute; opacity: 0; }
 .choice .radio {
   width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid var(--fg-3);
   flex-shrink: 0; margin-top: var(--s2); display: grid; place-items: center;
   transition: border-color var(--dur) var(--ease);
 }
-.choice.active .radio { border-color: var(--accent); }
-.choice.active .radio::after { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.choice.active .radio { border-color: var(--fg); }
+.choice.active .radio::after { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--fg); }
 .choice .choice-body { flex: 1; }
 .choice .choice-title { font-weight: 500; font-size: var(--fs-sub); display: flex; align-items: center; gap: var(--s8); }
 .choice .choice-desc { color: var(--fg-2); font-size: var(--fs-meta); margin-top: var(--s2); }
@@ -1016,8 +1017,8 @@ select.input {
 .pick .pick-sub { display: block; color: var(--fg-3); font-size: var(--fs-meta); margin-top: 1px; }
 /* The API-key tiles toggle a form open instead of navigating away, so the
    pressed one has to stay visibly selected while that form is on screen. */
-.pick.active { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
-.pick.active .pick-title { color: var(--accent); }
+.pick.active { background: color-mix(in srgb, var(--fg) 9%, transparent); box-shadow: inset 0 0 0 1px var(--fg); }
+.pick.active .pick-title { color: var(--fg); }
 
 /* ── API-key connect form (Kimi / Grok) ─────────────────────────────────── */
 .keyform {
@@ -1026,7 +1027,7 @@ select.input {
   display: flex; flex-direction: column; gap: var(--s12);
 }
 .keyform .callout { margin: 0; }
-.keyform .callout a { color: var(--accent); word-break: break-all; }
+.keyform .callout a { color: var(--fg); text-decoration: underline; text-underline-offset: 2px; word-break: break-all; }
 .keyform-actions { display: flex; gap: var(--s8); }
 /* The pasted callback URL is the longest thing anyone types into this app, so
    it takes the whole row and its one action rides alongside instead of below. */
@@ -1060,7 +1061,7 @@ select.input {
    (and the 30px slot on the connect tiles) while the letter fallback keeps the
    font-size it always had. */
 .mark svg { width: 56%; height: 56%; }
-.is-on > .e-badge .mark, .acct.selling .mark { background: var(--accent-soft); }
+.is-on > .e-badge .mark, .acct.selling .mark { background: color-mix(in srgb, var(--fg) 9%, transparent); }
 
 /* ── List rows ──────────────────────────────────────────────────────────── */
 .list { display: flex; flex-direction: column; }
@@ -1087,7 +1088,7 @@ select.input {
   border: none; background: var(--surface-2);
   transition: background-color var(--dur-enter) var(--ease);
 }
-.entity.is-on { background: var(--accent-soft); }
+.entity.is-on { background: color-mix(in srgb, var(--fg) 9%, transparent); }
 .entity.is-off { opacity: 0.55; }
 .entity .e-badge { flex-shrink: 0; display: flex; }
 .entity .e-body { flex: 1; min-width: 150px; }
@@ -1136,7 +1137,7 @@ select.input {
   padding: var(--s16) var(--s20); display: flex; flex-direction: column; gap: var(--s16);
   transition: background-color var(--dur-enter) var(--ease);
 }
-.acct.selling { background: var(--accent-soft); }
+.acct.selling { background: color-mix(in srgb, var(--fg) 9%, transparent); }
 .acct.muted-row { opacity: 0.55; }
 .acct-head { display: flex; align-items: center; gap: var(--s12); }
 .acct-id { flex: 1; min-width: 0; }
@@ -1200,7 +1201,7 @@ select.input {
   transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 .lane-resume svg { width: 11px; height: 11px; }
-.lane-resume:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent); }
+.lane-resume:hover:not(:disabled) { background: var(--surface-2); color: var(--fg); }
 .lane-resume:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* ── Discount ranking ───────────────────────────────────────────────────────
@@ -1302,7 +1303,7 @@ select.input {
               border-color var(--dur) var(--ease);
 }
 .chip:hover { background: var(--surface-3); color: var(--fg); }
-.chip.on { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); }
+.chip.on { background: color-mix(in srgb, var(--fg) 9%, transparent); border-color: var(--line-2); color: var(--fg); }
 
 /* Narrow windows stack the row rather than dropping a column. The state stays:
    it is the half of the encoding that is not colour, so hiding it would leave
@@ -1452,7 +1453,7 @@ select.input {
   transition: background-color var(--dur) var(--ease);
 }
 .uprov-card:hover { background: var(--surface-3); }
-.uprov-card.active { background: var(--accent-soft); }
+.uprov-card.active { background: color-mix(in srgb, var(--fg) 9%, transparent); }
 .uprov-card .up-head { display: flex; align-items: center; gap: var(--s6); font-size: var(--fs-meta); color: var(--fg-2); margin-bottom: var(--s4); }
 .uprov-card .up-head svg { width: 13px; height: 13px; flex-shrink: 0; color: var(--fg-3); }
 .uprov-card .up-pct { font-size: var(--fs-lead); font-weight: 600; letter-spacing: -0.03em; color: var(--fg); font-variant-numeric: tabular-nums; }
@@ -1510,7 +1511,7 @@ select.input {
 .mark-row { display: flex; flex-wrap: wrap; gap: var(--s8); }
 .mark-chip { position: relative; display: inline-flex; }
 .mark-chip.is-off { opacity: 0.45; }
-.mark-chip.is-on .mark { background: var(--accent-soft); }
+.mark-chip.is-on .mark { background: color-mix(in srgb, var(--fg) 9%, transparent); }
 /* Punched out of the card surface so the dot reads on top of the mark. */
 .mark-chip .mc-dot { position: absolute; right: -2px; bottom: -2px; box-shadow: 0 0 0 2px var(--surface); }
 
@@ -1624,7 +1625,7 @@ code { background: var(--bg-2); padding: 1px var(--s4); border-radius: var(--r-2
   border: none; background: var(--surface-2); color: var(--fg-2);
 }
 .callout svg { width: 15px; height: 15px; flex-shrink: 0; margin-top: var(--s2); color: var(--fg-3); }
-.callout.info { background: var(--accent-soft); }
+.callout.info { background: var(--surface-2); }
 .callout.info svg { color: var(--accent); }
 .callout.warn { background: var(--warning-soft); }
 .callout.warn svg { color: var(--warning); }
@@ -2184,7 +2185,7 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .amt-chip:focus-visible { outline: none; box-shadow: var(--ring); }
 /* The lit chip carries the accent because it is the one figure the QR is for. */
 .amt-chip.active {
-  border-color: var(--accent); background: var(--accent-soft); color: var(--accent);
+  border-color: var(--fg); background: color-mix(in srgb, var(--fg) 9%, transparent); color: var(--fg);
 }
 .amt-chip-unit { font-size: var(--fs-micro); font-weight: 400; opacity: 0.75; }
 .amt-custom { display: flex; align-items: center; gap: var(--s6); min-width: 0; }
@@ -2217,7 +2218,7 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .flow-kind { display: inline-flex; align-items: center; gap: var(--s6); font-size: var(--fs-meta); font-weight: 500; white-space: nowrap; color: var(--fg-2); }
 .flow-kind svg { width: 13px; height: 13px; color: var(--fg-3); }
 .flow-kind.withdraw svg { transform: rotate(-45deg); }
-.amt-in { color: var(--accent); font-weight: 500; }
+.amt-in { color: var(--fg); font-weight: 500; }
 .amt-out { color: var(--fg); font-weight: 500; }
 
 /* ── Model chips (Buy page) ─────────────────────────────────────────────── */
@@ -2234,12 +2235,12 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .chip:hover:not(:disabled) { background: var(--surface-3); color: var(--fg); }
 /* Selected: accent text on an accent wash, plus a hairline so the chip still
    reads when the tile behind it is itself accent-tinted. */
-.chip.on { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); }
+.chip.on { background: color-mix(in srgb, var(--fg) 9%, transparent); border-color: var(--line-2); color: var(--fg); }
 .chip:disabled { opacity: 0.45; cursor: not-allowed; }
 .chip svg { width: 12px; height: 12px; }
 /* "Add model" affordance — dashed so it reads as an action, not a selection. */
 .chip.add { border-color: var(--line-2); border-style: dashed; color: var(--fg-2); background: transparent; }
-.chip.add:hover:not(:disabled) { border-color: var(--accent-line); color: var(--accent); background: transparent; }
+.chip.add:hover:not(:disabled) { border-color: var(--line-2); color: var(--fg); background: transparent; }
 .chip-x {
   display: inline-flex; align-items: center; justify-content: center;
   margin: -2px -4px -2px 1px; padding: var(--s2); border: none; border-radius: 50%;
@@ -2298,7 +2299,7 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
   display: flex; align-items: center; gap: var(--s6); margin: 0;
   font-size: var(--fs-meta); color: var(--fg-2); word-break: break-all;
 }
-.ss-notice.ok { color: var(--accent); }
+.ss-notice.ok { color: var(--success); }
 .ss-notice svg { width: 13px; height: 13px; flex-shrink: 0; }
 
 /* ── Earnings card preview ──────────────────────────────────────────────────
@@ -2390,7 +2391,7 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
   transition: background-color var(--dur) var(--ease);
 }
 .opt:hover { background: var(--surface-2); }
-.opt.on { background: var(--accent-soft); }
+.opt.on { background: color-mix(in srgb, var(--fg) 9%, transparent); }
 /* A superseded version, revealed by expanding its family: indented under the
    newest one and set a shade back, so the list still reads as one row per
    model with history tucked beneath it. */
@@ -2408,7 +2409,7 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
   transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease);
 }
 .opt-box.radio { border-radius: 50%; }
-.opt-box.on { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.opt-box.on { background: var(--fg); border-color: var(--fg); color: var(--bg); }
 .opt-box svg { width: 11px; height: 11px; }
 .opt-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 /* Name plus the family's fold, on one line: the fold belongs to the model it
@@ -2438,7 +2439,7 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
   line-height: 1; cursor: pointer;
   transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
 }
-.fold-toggle:hover { background: var(--accent-soft); color: var(--accent); }
+.fold-toggle:hover { background: var(--surface-2); color: var(--fg); }
 .fold-toggle svg { width: 10px; height: 10px; transition: transform var(--dur) var(--ease); }
 .fold-toggle.on svg { transform: rotate(180deg); }
 
@@ -2488,7 +2489,7 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 /* One highlight, driven by the keyboard — hover sets the same index, so the
    mouse and the arrow keys can never light up two different rows. */
 .cs-opt.active { background: var(--surface-2); }
-.cs-opt.on { color: var(--accent); }
+.cs-opt.on { color: var(--fg); }
 .cs-opt.on svg { width: 13px; height: 13px; flex-shrink: 0; color: var(--accent); }
 /* Flags are emoji, so pin the family: a system that has colour flags renders
    them, one that does not (Windows) falls back to the two boxed code letters. */
@@ -2716,7 +2717,7 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
   display: flex; flex-direction: column; gap: var(--s12);
 }
 .signin-body .callout { margin: 0; }
-.signin-body .callout a { color: var(--accent); word-break: break-all; }
+.signin-body .callout a { color: var(--fg); text-decoration: underline; text-underline-offset: 2px; word-break: break-all; }
 .signin-authurl { margin: 0; }
 
 .modal.verify-modal { width: min(760px, 100%); }
@@ -2859,7 +2860,7 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 .app-card-sub { color: var(--fg-2); font-size: var(--fs-meta); line-height: 1.6; flex: 1; }
 .app-card-go {
   display: inline-flex; align-items: center; gap: var(--s4);
-  color: var(--accent); font-size: var(--fs-meta);
+  color: var(--fg); font-size: var(--fs-meta);
 }
 
 /* An open application owns the window: the app's own top bar is hidden while
