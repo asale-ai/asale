@@ -41,6 +41,19 @@
 
 use crate::ids::{Provider, Vendor, Wire};
 
+/// Model retirements on Moonshot's metered API, not aggregator offerings.
+/// https://platform.kimi.com/docs/models
+pub fn retired_native_model(provider: Provider, model: &str) -> bool {
+    provider == Provider::KimiApi && matches!(model,
+        "kimi-k2-thinking" | "kimi-k2-thinking-turbo" | "kimi-k2.5" |
+        "kimi-k2-0905-preview" | "kimi-k2-0711-preview" | "kimi-k2-turbo-preview" |
+        "moonshot-v1-8k" | "moonshot-v1-32k" | "moonshot-v1-128k" |
+        "moonshot-v1-auto" | "moonshot-v1-8k-vision-preview" |
+        "moonshot-v1-32k-vision-preview" | "moonshot-v1-128k-vision-preview" |
+        "kimi-latest" | "kimi-thinking-preview")
+}
+
+
 /// How an account of this family authenticates, and what a person needs in
 /// order to connect one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -353,7 +366,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         window_cap: WindowCap::Fixed(500_000),
         quota: QuotaSource::Endpoint,
         model_prefix: Some("kimi"),
-        fallback_models: &["kimi-k2.7-code", "kimi-k2-thinking", "kimi-k3"],
+        fallback_models: &["kimi-k2.7-code", "kimi-k2.6", "kimi-k3"],
         native_models: None,
         offered_by_default: true,
     },
@@ -376,7 +389,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         window_cap: WindowCap::Fixed(500_000),
         quota: QuotaSource::None,
         model_prefix: Some("kimi"),
-        fallback_models: &["kimi-k2.7-code", "kimi-k2-thinking", "kimi-k3"],
+        fallback_models: &["kimi-k2.7-code", "kimi-k2.6", "kimi-k3"],
         native_models: None,
         offered_by_default: true,
     },

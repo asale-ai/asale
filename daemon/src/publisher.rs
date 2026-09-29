@@ -210,6 +210,11 @@ fn offerable(served: Vec<String>, chat_only: bool) -> Vec<String> {
 }
 
 fn sellable_models(catalog: &Option<SellableCatalog>, provider: &str, entitled: Option<&[String]>) -> Vec<String> {
+    // A metered Moonshot key's own listing is authoritative. A catalog or
+    // fallback list cannot establish access to a model on that deployment.
+    if provider == "kimi_api" && entitled.is_none() {
+        return Vec::new();
+    }
     let listed: Vec<String> = match catalog {
         // A custom endpoint is not tied to one vendor's credential family, so
         // the catalog has no column for it: what it *may* sell is everything the
@@ -241,6 +246,10 @@ fn sellable_models(catalog: &Option<SellableCatalog>, provider: &str, entitled: 
         Some(granted) => listed.into_iter().filter(|m| granted.contains(m)).collect(),
         None => listed,
     };
+    let listed: Vec<String> = listed.into_iter().filter(|m| {
+        !Provider::from_str_opt(provider)
+            .is_some_and(|p| asale_protocol::providers::retired_native_model(p, m))
+    }).collect();
     match native_models(provider) {
         Some(native) => listed.into_iter().filter(|m| native.contains(&m.as_str())).collect(),
         None => listed,
@@ -1693,6 +1702,7 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
             // Alibaba serves a different set from the one OpenRouter prices
             // under `qwen/*`, so its own `/models` decides — see
             // `vendor_endpoint_models` for what goes wrong without this.
+            "kimi_api" => Some(vendor_endpoint_models(store, tool, Provider::KimiApi).await),
             p if p == Provider::Qwen.as_str() => {
                 Some(vendor_endpoint_models(store, tool, Provider::Qwen).await)
             }
@@ -1716,6 +1726,7 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
             && !custom_has_responses(store, &tool.account_id).await;
         let entitled = match tool.provider.as_str() {
             "codex" => Some(codex_entitlement(store, tool).await),
+            "kimi_api" => Some(listing.as_ref().map(|l| l.market_ids()).unwrap_or_default()),
             // Same contract as Codex's entitlement: an empty answer means
             // advertise nothing, because a model the endpoint will refuse costs a
             // consumer a failed turn and this device its reputation.
@@ -2252,6 +2263,20 @@ fn now_secs() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn moonshot_api_requires_live_entitlements_and_drops_retired_models() {
+        let granted = vec!["kimi-k2.6".to_string(), "kimi-k2-thinking".to_string()];
+        let catalog = Some(SellableCatalog {
+            fetched_at: 1,
+            by_provider: std::collections::BTreeMap::from([("kimi_api".into(),
+                vec!["kimi-k2.6".into(), "kimi-k2-thinking".into(), "kimi-k3".into()])]),
+            ..Default::default()
+        });
+        assert!(sellable_models(&catalog, "kimi_api", None).is_empty());
+        assert_eq!(sellable_models(&catalog, "kimi_api", Some(&granted)), vec!["kimi-k2.6"]);
+        assert_eq!(sellable_models(&None, "kimi_api", Some(&granted)), vec!["kimi-k2.6"]);
+    }
+
     use super::*;
 
     /// A listing is the catalog intersected with an endpoint's models, so a
