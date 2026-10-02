@@ -232,6 +232,12 @@ pub struct ControlPayload {
 /// Usage reported back on `stream_end` / `http_response`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
+    /// Image tokens included in input_tokens, priced separately on image calls.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub image_input_tokens: i64,
+    /// Verified list-price input spend when the aggregator omits modality counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_input_cost_micros: Option<i64>,
     #[serde(default)]
     pub input_tokens: i64,
     #[serde(default)]
@@ -241,6 +247,8 @@ pub struct Usage {
     #[serde(default)]
     pub cache_write_tokens: i64,
 }
+
+fn is_zero(value: &i64) -> bool { *value == 0 }
 
 impl Usage {
     pub fn total(&self) -> i64 {
