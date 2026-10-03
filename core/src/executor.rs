@@ -779,6 +779,7 @@ pub async fn execute(
             Some((base, wire)) => custom_url(base, wire, &req.upstream.url),
             None => req.upstream.url.clone(),
         };
+        let gemini_subscription = provider == "gemini" && custom.is_none();
         let mut builder = http.request(method, &url);
         // A subscription request rebuilds Claude Code's own header identity below,
         // so the gateway's guesses at those names are dropped rather than sent
@@ -915,6 +916,31 @@ pub async fn execute(
                     return;
                 }
             }
+        }
+        if gemini_subscription {
+            let project = tokio::select! {
+                result = crate::gemini::resolve_project(http, &token) => result,
+                _ = &mut cancel => {
+                    finish_canceled(tokens, records, &provider, &lease.account_id, &model, &task_id, &Usage::default()).await;
+                    return;
+                }
+            };
+            let prepared = project.and_then(|p| crate::gemini::request(
+                &body, lease.upstream_model.as_deref().unwrap_or(&model), &p, &task_id));
+            match prepared {
+                Ok(wrapped) => body = wrapped,
+                Err(e) => {
+                    tokens.report(&provider, &lease.account_id, &model, TaskOutcome::ServerError);
+                    send_error(out, &task_id, protocol::codes::UPSTREAM_5XX, &format!("Gemini Code Assist setup: {e}"), true);
+                    return;
+                }
+            }
+            // OAuth subscription inference has its own endpoint and envelope.
+            // Do not relay API-key headers from the public Gemini request.
+            let stream = req.upstream.url.contains(":streamGenerateContent");
+            builder = http.post(crate::gemini::url(stream))
+                .bearer_auth(&token).header("content-type", "application/json")
+                .header("user-agent", crate::gemini::user_agent(lease.upstream_model.as_deref().unwrap_or(&model)));
         }
         // Fingerprint what we are about to send, before the body is moved into the
         // request. An upstream 4xx names the offending field ("System messages are
@@ -1227,6 +1253,16 @@ pub async fn execute(
                 }
             }
         } else { body.to_vec() };
+        let body = if gemini_subscription {
+            match crate::gemini::response(&body) {
+                Ok(body) => body,
+                Err(e) => {
+                    tokens.report(&provider, &lease.account_id, &model, TaskOutcome::ServerError);
+                    send_error(out, &task_id, protocol::codes::UPSTREAM_5XX, &e.to_string(), true);
+                    return;
+                }
+            }
+        } else { body };
         let usage = usage_from_body(&body);
         let _ = out.send(Envelope::with_id(
             &task_id,
@@ -1264,7 +1300,7 @@ pub async fn execute(
     // Stream body chunks; parse usage from SSE where possible. The scanner holds
     // a line that a chunk boundary cut in half — without it the Responses
     // dialect's usage frame is lost and the sale settles as zero tokens.
-    let mut stream = resp.bytes_stream();
+    let mut stream = crate::gemini::stream(resp, provider == "gemini" && lease.upstream_base.as_deref().is_none_or(|base| base.trim().is_empty()));
     let mut seq: u64 = 0;
     let mut scan = UsageScanner::new();
     let mut budget_hit = false;

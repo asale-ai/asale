@@ -12,6 +12,7 @@ pub mod config;
 pub mod device_flow;
 pub mod discovery;
 pub mod executor;
+pub mod gemini;
 pub mod http;
 pub mod pool;
 pub mod protocol;

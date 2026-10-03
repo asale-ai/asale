@@ -698,8 +698,8 @@ impl ToolAdapter for GeminiAdapter {
 
     fn upstream(&self) -> UpstreamSpec {
         UpstreamSpec {
-            base_url: "https://generativelanguage.googleapis.com".into(),
-            default_headers: vec![("user-agent".into(), "gemini-cli/1.0".into())],
+            base_url: crate::gemini::CODE_ASSIST.into(),
+            default_headers: vec![("user-agent".into(), crate::gemini::user_agent("gemini-2.5-pro"))],
         }
     }
 }

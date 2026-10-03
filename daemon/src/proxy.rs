@@ -261,7 +261,7 @@ fn direct_upstream(provider: &str, path: &str, path_and_query: &str) -> Option<(
         )),
         "gemini" => Some((
             format!("https://generativelanguage.googleapis.com{path_and_query}"),
-            vec![("user-agent", "gemini-cli/1.0".to_string())],
+            vec![("user-agent", asale_client_core::gemini::user_agent("gemini-2.5-pro"))],
         )),
         _ => None,
     }
@@ -451,7 +451,9 @@ async fn forward_direct(
     // Lane-aware pick: a model that just failed upstream is backed off for
     // local traffic too, while a *market* pause (breaker, sell switch) is not
     // allowed to lock the operator out of their own subscription.
-    let model = extract_model_from_bytes(&bytes);
+    let model = if provider == "gemini" {
+        path.split("/models/").nth(1).and_then(|tail| tail.split(':').next()).unwrap_or_default().to_string()
+    } else { extract_model_from_bytes(&bytes) };
     let picked = match st.pool.lock().ok().and_then(|mut p| p.pick_local(provider, &model, now_secs())) {
         Some(p) => p,
         None => {
@@ -475,11 +477,26 @@ async fn forward_direct(
         return (StatusCode::BAD_GATEWAY, "provider has no direct upstream").into_response();
     };
 
+    let gemini_subscription = provider == "gemini";
+    let prepared = if gemini_subscription {
+        let result = asale_client_core::gemini::resolve_project(&asale_client_core::http::upstream(), &token).await
+            .and_then(|project| asale_client_core::gemini::request(&bytes, &model, &project, &uuid::Uuid::new_v4().to_string()));
+        match result {
+            Ok(body) => Some((asale_client_core::gemini::url(path.contains(":streamGenerateContent")), body)),
+            Err(e) => {
+                if let Ok(mut pool) = st.pool.lock() {
+                    pool.on_error(provider, &picked.account_id, &model, UpstreamErrorKind::ServerError, "Code Assist setup failed", now_secs());
+                }
+                return (StatusCode::BAD_GATEWAY, format!("Gemini Code Assist setup: {e}")).into_response();
+            }
+        }
+    } else { None };
+    let url = prepared.as_ref().map(|(url, _)| url.as_str()).unwrap_or(&url);
     let reqwest_method = reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::POST);
     // Direct mode leaves asale entirely and hits the provider, so it needs the
     // proxy-aware client — `st.http` is for the (unproxied) asale gateway.
     let mut req = asale_client_core::http::upstream()
-        .request(reqwest_method, &url)
+        .request(reqwest_method, url)
         .header("authorization", format!("Bearer {token}"))
         .header("content-type", "application/json");
     for (k, v) in extra_headers {
@@ -490,7 +507,7 @@ async fn forward_direct(
     // refusal as a 429. Claude Code's own body already carries the preamble and
     // its own `metadata.user_id`, both of which are kept — what this adds there
     // is the billing header; any other Anthropic-dialect caller needs the lot.
-    let mut out_body = bytes.to_vec();
+    let mut out_body = prepared.map(|(_, body)| body).unwrap_or_else(|| bytes.to_vec());
     if asale_protocol::ids::is_claude_family(provider) {
         let session = crate::session::claude_session_for(&picked.account_id).unwrap_or_default();
         if let Some(patched) = asale_client_core::executor::with_claude_code_system(&out_body, &session) {
@@ -568,7 +585,7 @@ async fn forward_direct(
     // Only fold what nothing else already counts — see `usage_scan::scanner_covers`.
     let record = (meter && !crate::usage_scan::scanner_covers(tool)).then(|| model);
     let guard = crate::firewall::response_guard(&st.store, tool.unwrap_or("")).await;
-    let served = meter_response(resp, guard, move |usage, had_error| {
+    let served = meter_response(resp, guard, gemini_subscription, move |usage, had_error| {
         let tokens = (usage.input_tokens + usage.output_tokens).max(0) as u64;
         if let Ok(mut p) = pool.lock() {
             if had_error {
@@ -950,6 +967,7 @@ fn replay(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap, bod
 async fn meter_response<F, Fut>(
     resp: reqwest::Response,
     guard: Option<crate::firewall::ResponseGuard>,
+    gemini_subscription: bool,
     finish: F,
 ) -> Response
 where
@@ -962,9 +980,9 @@ where
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ct| ct.contains("event-stream"));
     if sse {
-        stream_with_metering(resp, guard, finish)
+        stream_with_metering(resp, guard, gemini_subscription, finish)
     } else {
-        buffered_with_metering(resp, guard, finish).await
+        buffered_with_metering(resp, guard, gemini_subscription, finish).await
     }
 }
 
@@ -973,6 +991,7 @@ where
 async fn buffered_with_metering<F, Fut>(
     resp: reqwest::Response,
     guard: Option<crate::firewall::ResponseGuard>,
+    gemini_subscription: bool,
     finish: F,
 ) -> Response
 where
@@ -997,6 +1016,15 @@ where
             return (StatusCode::BAD_GATEWAY, format!("upstream error: {e}")).into_response();
         }
     };
+    let body = if gemini_subscription {
+        match asale_client_core::gemini::response(&body) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                finish(Usage::default(), true).await;
+                return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+            }
+        }
+    } else { body.to_vec() };
     finish(asale_client_core::executor::usage_from_body(&body), false).await;
 
     // A buffered answer is the one case where the firewall still has a status
@@ -1018,6 +1046,7 @@ where
 fn stream_with_metering<F, Fut>(
     resp: reqwest::Response,
     guard: Option<crate::firewall::ResponseGuard>,
+    gemini_subscription: bool,
     finish: F,
 ) -> Response
 where
@@ -1041,7 +1070,7 @@ where
         let mut scan = UsageScanner::new();
         let mut guard = guard;
         let mut had_error = false;
-        let mut stream = resp.bytes_stream();
+        let mut stream = asale_client_core::gemini::stream(resp, gemini_subscription);
         while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(b) => {
@@ -1054,7 +1083,7 @@ where
                         let _ = tx.send(Err(std::io::Error::other(why)));
                         break;
                     }
-                    if tx.send(Ok(b)).is_err() {
+                    if tx.send(Ok(b.into())).is_err() {
                         break; // client went away; still finish metering below
                     }
                 }
