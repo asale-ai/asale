@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  invoke, inTauri, realTauri, fmtUsdt,
+  invoke, inTauri, realTauri, fmtUsdt, isSignedOut,
   type Wallet, type WalletHistory,
 } from "../lib";
 import { Card, Skeleton, PageHead, IconAction, Empty } from "../ui";
@@ -51,6 +51,7 @@ export function WalletPage() {
   const [loading, setLoading] = useState(inTauri);
   const [refreshing, setRefreshing] = useState(false);
   const [err, setErr] = useState("");
+  const [signInHint, setSignInHint] = useState(false);
 
   /* Which funding sheet is open; null = none. */
   const [pane, setPane] = useState<WalletMode | null>(null);
@@ -63,8 +64,8 @@ export function WalletPage() {
     if (!inTauri) return;
     if (manual) setRefreshing(true);
     Promise.allSettled([
-      invoke<Wallet>("wallet_overview").then((v) => { setW(v); setErr(""); })
-        .catch((e) => setErr(errText(e))),
+      invoke<Wallet>("wallet_overview").then((v) => { setW(v); setErr(""); setSignInHint(false); })
+        .catch((e) => { setErr(errText(e)); setSignInHint(isSignedOut(e)); }),
       // History is best-effort: an older server without the endpoint must not
       // take the balance view down with it.
       invoke<WalletHistory>("wallet_history").then(setHist).catch(() => {}),
@@ -103,6 +104,7 @@ export function WalletPage() {
     }
     setPanelBusy(mode);
     setErr("");
+    setSignInHint(false);
     try {
       const out = await invoke<{ url: string }>("wallet_paygate_panel", {
         withdraw: mode === "withdraw",
@@ -112,6 +114,7 @@ export function WalletPage() {
       setAwaitingPanel(true);
     } catch (e) {
       setErr(errText(e));
+      setSignInHint(isSignedOut(e));
     } finally {
       setPanelBusy(null);
     }
@@ -159,7 +162,7 @@ export function WalletPage() {
         }
       />
 
-      {err && <div className="callout danger card-lead"><IconWallet /><span>{err} — {t("wallet.signInFirst")}</span></div>}
+      {err && <div className="callout danger card-lead"><IconWallet /><span>{err}{signInHint && ` — ${t("wallet.signInFirst")}`}</span></div>}
 
       {/* ── Balance hero ── */}
       <div className="wallet-hero">
