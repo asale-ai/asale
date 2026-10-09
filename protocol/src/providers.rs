@@ -402,7 +402,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         wire: Wire::Responses,
         api_base: "https://cli-chat-proxy.grok.com/v1",
         chat_url: "https://cli-chat-proxy.grok.com/v1/responses",
-        user_agent: "xai-grok-workspace/0.2.93",
+        user_agent: "xai-grok-workspace/1.0.50",
         extra_headers: &[],
         verify_hosts: &[],
         verify_path: "/models",

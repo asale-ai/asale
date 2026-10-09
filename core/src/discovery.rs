@@ -744,7 +744,7 @@ impl DeviceFlowAdapter {
             token_url: token_url.unwrap_or_else(|| crate::device_flow::XAI_TOKEN_URL_FALLBACK.to_string()),
             client_id: crate::device_flow::XAI_CLIENT_ID,
             base_url: "https://cli-chat-proxy.grok.com/v1",
-            user_agent: "xai-grok-workspace/0.2.93",
+            user_agent: "xai-grok-workspace/1.0.50",
         }
     }
 
