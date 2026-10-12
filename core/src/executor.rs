@@ -930,8 +930,9 @@ pub async fn execute(
             match prepared {
                 Ok(wrapped) => body = wrapped,
                 Err(e) => {
-                    tokens.report(&provider, &lease.account_id, &model, TaskOutcome::ServerError);
-                    send_error(out, &task_id, protocol::codes::UPSTREAM_5XX, &format!("Gemini Code Assist setup: {e}"), true);
+                    let (outcome, code) = gemini_setup_failure(&e.to_string());
+                    tokens.report(&provider, &lease.account_id, &model, outcome);
+                    send_error(out, &task_id, code, &format!("Gemini Code Assist setup: {e}"), true);
                     return;
                 }
             }
@@ -970,6 +971,7 @@ pub async fn execute(
         let resp = match send {
             Ok(r) => r,
             Err(e) => {
+                tracing::warn!(task = %task_id, provider = %provider, kind = transport_error_kind(&e), error = ?e, "upstream transport failed");
                 // The upstream was never reached, so nothing has been streamed and
                 // another account on this device is free to try. Decided before
                 // the report: a handed-off failure steps the lane aside without
@@ -983,7 +985,7 @@ pub async fn execute(
                 );
                 let failure = HeldFailure {
                     code: "UPSTREAM_5XX",
-                    message: format!("upstream send: {e}"),
+                    message: format!("upstream send ({}): {e}", transport_error_kind(&e)),
                     detail: String::new(),
                     retriable: true,
                     record_status: "upstream_error".into(),
@@ -2266,6 +2268,23 @@ fn merge_usage(usage: &mut Usage, v: &serde_json::Value) {
     usage.cache_write_tokens = m.cache_write;
 }
 
+/// Unsupported subscription clients need lane withdrawal, not the 5xx ladder.
+fn gemini_setup_failure(message: &str) -> (TaskOutcome, &'static str) {
+    if message.starts_with("UNSUPPORTED_CLIENT:") {
+        (TaskOutcome::Unsupported, protocol::codes::LANE_UNUSABLE)
+    } else {
+        (TaskOutcome::ServerError, protocol::codes::UPSTREAM_5XX)
+    }
+}
+
+/// Safe categories for the remote ledger; detailed causes stay in local logs.
+fn transport_error_kind(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() { "timeout" }
+    else if error.is_connect() { "connection" }
+    else if error.is_body() || error.is_decode() { "response_body" }
+    else { "request" }
+}
+
 /// The category of an upstream error body — what the operator console needs
 /// to tell "out of credit" from "bad request" — and nothing else of it.
 ///
@@ -2368,6 +2387,25 @@ fn send_error_detail(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn a_refused_connection_has_an_actionable_transport_category() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let error = reqwest::Client::builder().no_proxy().build().unwrap()
+            .get(format!("http://{address}"))
+            .timeout(std::time::Duration::from_secs(2)).send().await.unwrap_err();
+        assert_eq!(super::transport_error_kind(&error), "connection");
+    }
+
+    #[test]
+    fn unsupported_gemini_client_withdraws_the_lane() {
+        assert_eq!(super::gemini_setup_failure("UNSUPPORTED_CLIENT: migrate"),
+            (super::TaskOutcome::Unsupported, asale_protocol::codes::LANE_UNUSABLE));
+        assert_eq!(super::gemini_setup_failure("control plane temporarily unavailable"),
+            (super::TaskOutcome::ServerError, asale_protocol::codes::UPSTREAM_5XX));
+    }
+
     /// C1: a task for a built-in provider goes to that vendor's host over TLS
     /// and nowhere else, whatever the gateway put in the frame.
     #[test]
