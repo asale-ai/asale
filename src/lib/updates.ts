@@ -16,16 +16,15 @@
 //
 // What counts as "newer" comes from asale.ai's release manifest — the same
 // document install.sh and install.ps1 read. Asking the same file is the point:
-// the only way to apply an update is to run that installer (see the shell's
-// `run_installer`), so the app and the installer must never disagree about
-// which release is current.
+// the native updater stages both the app and CLI from this release before
+// handing over to a helper. A protected install keeps the seller running.
 //
 // Desktop shell only. `realTauri`, not `inTauri` — the latter is always true;
 // a browser pointed at a remote daemon cannot install anything onto the machine
 // it is looking at, and the manifest sends no CORS header for it to read.
 
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { realTauri } from "../lib";
+import { invoke, realTauri } from "../lib";
 import { onUpdateProgress, shell } from "../shell";
 import { errText } from "../errors";
 
@@ -51,6 +50,7 @@ export interface UpdateState {
   error: string;
   /** `Date.now()` of the last completed check; 0 = never checked. */
   checkedAt: number;
+  autoUpdate: boolean;
 }
 
 /** How often the background loop asks. */
@@ -66,6 +66,7 @@ const EMPTY: UpdateState = {
   page: "",
   error: "",
   checkedAt: 0,
+  autoUpdate: true,
 };
 
 let state: UpdateState = EMPTY;
@@ -144,6 +145,8 @@ export function checkForUpdate(): Promise<void> {
   set({ phase: "checking", error: "" });
   inflight = (async () => {
     try {
+      const preference = await invoke<string | null>("get_setting", { key: "auto_update" });
+      set({ autoUpdate: preference !== "0" });
       const { getVersion } = await import("@tauri-apps/api/app");
       const [current, release] = await Promise.all([getVersion(), shell.latestRelease()]);
       const latest = release?.version ?? "";
@@ -157,6 +160,8 @@ export function checkForUpdate(): Promise<void> {
         checkedAt: Date.now(),
         error: "",
       });
+      const automaticError = await invoke<string | null>("get_setting", { key: "auto_update_error" });
+      if (automaticError) setInstall({ phase: "idle", error: automaticError });
     } catch (e) {
       // A failed check is not news — the machine may simply be offline. It is
       // recorded for the Settings page to show if the user is looking, and the
@@ -168,6 +173,20 @@ export function checkForUpdate(): Promise<void> {
     }
   })();
   return inflight;
+}
+
+export async function loadUpdatePreferences(): Promise<void> {
+  const [preference, error] = await Promise.all([
+    invoke<string | null>("get_setting", { key: "auto_update" }),
+    invoke<string | null>("get_setting", { key: "auto_update_error" }),
+  ]);
+  set({ autoUpdate: preference !== "0" });
+  if (error) setInstall({ phase: "idle", error });
+}
+
+export async function setAutoUpdate(enabled: boolean): Promise<void> {
+  await invoke("set_setting", { key: "auto_update", value: enabled ? "1" : "0" });
+  set({ autoUpdate: enabled });
 }
 
 function schedule() {
@@ -252,28 +271,7 @@ function getInstall(): InstallState {
   return install;
 }
 
-/**
- * The one way to apply an update: re-run the installer asale.ai publishes.
- *
- * There is deliberately no second, quieter path. The desktop app and the
- * `asale` / `asaled` command line are two halves of one release that land on
- * the machine separately, and only this installer replaces both — an update
- * that silently fixed the window while leaving the terminal on last month's
- * build is the failure mode worth a password prompt.
- *
- * Three steps, because it is not a small thing. `ask()` says what it costs;
- * `run()` downloads the release with the window still open and a bar the user
- * can watch; only when that has finished does the app close and hand over to the
- * installer, which reopens it when it is done.
- *
- * The download failing does *not* go on to the install. It is the one failure
- * the user can do something about, and quitting the app into an installer that
- * is about to fail for the same reason would take away the window that could
- * have said so.
- *
- * A hook rather than a component so the dialog and the Settings card can lay it
- * out however each of them needs to, without either owning the sequence.
- */
+/** Subscribe to the shared download and safe handover state. */
 export function useInstaller(): Installer {
   const [command, setCommand] = useState("");
   const state = useSyncExternalStore(

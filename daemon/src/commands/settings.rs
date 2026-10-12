@@ -60,6 +60,7 @@ pub fn daemon_info() -> Value {
     json!({
         "name": "asaled",
         "version": env!("CARGO_PKG_VERSION"),
+        "pid": std::process::id(),
         "data_dir": crate::state::data_dir(),
         // Null before the listener is up (the very first RPCs of a cold start
         // reach this through the desktop shell's in-process daemon).

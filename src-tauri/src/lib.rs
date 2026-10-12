@@ -20,6 +20,7 @@
 
 mod tray;
 mod updater;
+static EMBEDDED_DAEMON: AtomicBool = AtomicBool::new(false);
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -83,6 +84,7 @@ pub fn run() {
                 }
                 match asale_daemon::start(bind).await {
                     Ok(_started) => {
+                        EMBEDDED_DAEMON.store(true, Ordering::SeqCst);
                         // Keep the runtime (and every daemon task) alive.
                         std::future::pending::<()>().await;
                     }
@@ -155,6 +157,7 @@ pub fn run() {
                 notified: std::sync::Mutex::new(Default::default()),
             });
             app.manage(shell.clone());
+            updater::watch(app.handle().clone(), shell.clone());
 
             {
                 let cfg = app

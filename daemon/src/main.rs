@@ -13,10 +13,14 @@ fn main() -> anyhow::Result<()> {
     asale_daemon::logging::init();
 
     // Minimal arg parsing: --bind <addr>, --help.
+    let mut update_once = false;
+    let mut system_package = false;
     let mut bind_arg: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--update-once" => update_once = true,
+            "--system-package" => system_package = true,
             "--export-platform-channels" => {
                 let path=args.next().ok_or_else(||anyhow::anyhow!("output file required"))?;
                 let count=tokio::runtime::Runtime::new()?.block_on(asale_daemon::platform_export::export(&path))?;
@@ -35,7 +39,9 @@ fn main() -> anyhow::Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
+        if update_once { return asale_daemon::auto_update::update_once(bind, system_package).await; }
         let started = asale_daemon::start(bind).await?;
+        asale_daemon::auto_update::watch(started.state.clone(), started.addr);
         // The token is required on every request, loopback included, so the
         // browser needs it here — there is no untokenized URL that works.
         println!("asaled ready:");

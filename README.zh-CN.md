@@ -141,7 +141,14 @@ irm https://asale.ai/dl/install.ps1 | iex
 1. 下载 `.dmg`，打开后把 **Asale** 拖进「应用程序」。
 2. 没有第二步。发布包都用 Developer ID 证书签名并通过了 Apple 公证，macOS 不会拦。
 
-装好之后应用会在后台常驻（菜单栏图标），支持开机自启，新版本自动更新。
+装好之后应用会在后台常驻（菜单栏图标），支持开机自启。桌面自动更新默认开启，可在设置中关闭。
+原生后台每十分钟检查一次；先下载并准备应用和 CLI，再重启切换。权限不足时保留当前版本运行，
+不会先退出再等待管理员密码。macOS 建议安装在 `~/Applications`，CLI 安装在 `~/.local/bin`。
+Windows 桌面使用独立的静默更新可执行文件，独立 daemon 在后台自行检查更新。
+Linux `.deb` 安装时会注册系统更新定时任务。系统级安装需要首次安装时的管理员授权，之后升级不再弹密码框。
+已有的系统安装可一次性启用：`sudo asale autoupdate enable --system-package --data-dir "$HOME/.asale"`。
+Windows 系统安装在管理员终端运行 `asale autoupdate enable --desktop-target "C:\Program Files\Asale\asale.exe"`。
+`asale autoupdate status` 查看任务，`asale autoupdate disable` 停用。浏览器里的设置也可关闭自动更新。
 **关闭窗口不等于退出** —— Asale 会收进托盘继续出售。点托盘图标会弹出一个小面板，里面有实时
 数据、「在浏览器中打开」和真正的退出按钮；不喜欢这个行为可以在「设置 → 窗口与托盘」关掉。
 

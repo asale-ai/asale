@@ -355,7 +355,7 @@ jobs:
           mkdir -p artifacts
           find "${{ matrix.bundle }}" -type f \( \
               -name '*.dmg' -o -name '*.app.tar.gz' \
-              -o -name '*.msi' -o -name '*-setup.exe' -o -name '*.nsis.zip' \
+              -o -name '*.msi' -o -name '*-setup.exe' -o -name '*-portable.exe' -o -name '*.nsis.zip' \
               -o -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \
               -o -name '*.sig' \
               -o -name 'asale-cli-*.tar.gz' -o -name 'asale-cli-*.zip' \) \

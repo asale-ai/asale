@@ -4,7 +4,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { apiBase, daemonToken, invoke, realTauri } from "../lib";
 import { openExternal, shell } from "../shell";
-import { checkForUpdate, useInstaller, useUpdateState } from "../lib/updates";
+import { checkForUpdate, loadUpdatePreferences, setAutoUpdate, useInstaller, useUpdateState } from "../lib/updates";
 import { UpdateProgress } from "../components/UpdateProgress";
 import { Card, CopyChip, Err, Ok, PageHead, FactGrid } from "../ui";
 import { IconPower, IconDownload, IconRefresh, IconCheck, IconServer, IconGlobe, IconInfo, IconExternal, IconAlert } from "../icons";
@@ -66,15 +66,16 @@ export function Settings() {
   // Shared with the sidebar marker and with the ten-minute background check, so
   // opening this page shows what the loop already found instead of asking again
   // — and a download started here survives leaving the page.
-  const { phase, available, latest, page, error: updateErr } = useUpdateState();
+  const { phase, available, latest, page, autoUpdate, error: updateErr } = useUpdateState();
 
   // How an update is applied — the same two-step the upgrade banner uses.
   const installer = useInstaller();
 
   useEffect(() => {
+    void loadUpdatePreferences().catch(() => {});
     // Daemon self-description — real data in every mode (shell or browser).
     invoke<DaemonInfo>("daemon_info")
-      .then((d) => { setDaemon(d); setDaemonErr(""); })
+      .then((d) => { setDaemon(d); if (!realTauri) setVersion(d.version); setDaemonErr(""); })
       .catch((e) => setDaemonErr(errText(e)));
     invoke<ProxySettings>("proxy_settings").then(applyProxy).catch((e) => setProxyErr(errText(e)));
 
@@ -332,6 +333,14 @@ export function Settings() {
             desc={t("settings.updateDesc", { version: version || "…" })}
             right={available ? <span className="dot warn pulse" /> : null}
           >
+            <div className="switch-row">
+              <span className="switch-label">{t("settings.autoUpdateLabel")}</span>
+              <label className="switch">
+                <input type="checkbox" checked={autoUpdate} disabled={installer.running} onChange={(e) => void setAutoUpdate(e.target.checked).catch(() => {})} />
+                <span className="track" />
+              </label>
+            </div>
+            <div className="hint">{t("settings.autoUpdateDesc")}</div>
             {/* The same check the sidebar marker reads, and the same one the
                 background loop runs every ten minutes — pressing this only
                 brings the next one forward. */}
@@ -370,7 +379,6 @@ export function Settings() {
                 installer" on trust. */}
             <div className="card-foot">
               <div className="hint">{t("settings.reinstallDesc")}</div>
-              {installer.command && <pre className="codeblock notes">{installer.command}</pre>}
 
               {/* Three states, one sequence — the same one the forced-upgrade
                   dialog runs, from the same shared state, so an update started
@@ -416,10 +424,17 @@ export function Settings() {
           </Card>
         </>
       ) : (
-        <div className="callout">
-          <IconPower />
-          <span>{t("settings.shellOnlyNote")}</span>
-        </div>
+        <Card icon={<IconDownload />} title={t("settings.updateTitle")} desc={t("settings.updateDesc", { version: version || "…" })}>
+          <div className="switch-row">
+            <span className="switch-label">{t("settings.autoUpdateLabel")}</span>
+            <label className="switch">
+              <input type="checkbox" checked={autoUpdate} onChange={(e) => void setAutoUpdate(e.target.checked).catch(() => {})} />
+              <span className="track" />
+            </label>
+          </div>
+          <div className="hint">{t("settings.autoUpdateDesc")}</div>
+          {installer.error && <Err>{installer.error}</Err>}
+        </Card>
       )}
     </div>
   );

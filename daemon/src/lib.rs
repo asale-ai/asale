@@ -30,6 +30,8 @@ pub mod tool_config;
 pub mod usage_scan;
 pub mod version_gate;
 
+pub mod auto_update;
+
 use state::AppState;
 use std::net::SocketAddr;
 use std::sync::Arc;

@@ -18,6 +18,7 @@
 //! [`http`] is the loopback client both use, [`paths`] knows where things live.
 
 pub mod autostart;
+pub mod auto_update;
 pub mod http;
 pub mod paths;
 pub mod service;
@@ -86,6 +87,7 @@ fn run(args: &[String]) -> Result<u8> {
             with_action.extend_from_slice(&rest);
             cmd_autostart(&with_action)
         }
+        "autoupdate" => auto_update::configure(&rest),
         "update" | "upgrade" => cmd_update(),
         "uninstall" => cmd_uninstall(&rest),
         other => {
@@ -732,6 +734,9 @@ SYSTEM
   autostart enable     Start the service when the machine boots
   autostart disable    Undo that
   autostart status     What is registered right now
+  autoupdate enable    Authorize unattended system updates once
+  autoupdate disable   Disable the system update task
+  autoupdate status    Inspect the system update task
   update               Re-run the online installer to get the latest version
   uninstall [--purge]  Remove the service (--purge also deletes your data)
 

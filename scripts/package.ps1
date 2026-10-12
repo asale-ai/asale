@@ -289,6 +289,11 @@ Docs: https://asale.ai/   ·   asale help web
     # 归档里就是三个文件，没有目录前缀 —— 安装脚本按固定名字取。
     Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $archive
     Remove-Item -Recurse -Force $stage
+    if (-not $CliOnly) {
+        $portableDir = Join-Path $out "portable"
+        New-Item -ItemType Directory -Force $portableDir | Out-Null
+        Copy-Item (Join-Path $binDir "asale.exe") (Join-Path $portableDir "Asale_$version`_windows-x86_64-portable.exe")
+    }
     Write-Host "    $archive"
 }
 

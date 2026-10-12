@@ -1,56 +1,17 @@
-//! "Restart to update" — upgrade in place by re-running the published installer.
+//! Desktop updates prepared while the seller is still running.
 //!
-//! This is not a second copy of the in-app updater beside it. That one replaces
-//! the app bundle and nothing else; this runs the exact command the website
-//! hands out (`curl -fsSL https://asale.ai/dl/install.sh | sh`, or the
-//! PowerShell one on Windows), which also replaces the `asale`/`asaled` command
-//! line. Those two halves drift apart on a real machine — the app updates
-//! itself while the CLI never does — and the app has no way to fix that from
-//! the inside.
-//!
-//! It happens in two halves, and which half is which is the whole design.
-//!
-//! **Downloading** is done here, in the app, while the window is still up — see
-//! [`download`]. It is the slow part (up to ninety megabytes), it is the part
-//! that can fail in ways the user can act on (offline, a captive portal), and it
-//! is the only part that has anything to show. Doing it first means the progress
-//! bar is real, and the app does not close until the bytes are on disk.
-//!
-//! **Installing** cannot run inside the app, because the file being replaced is
-//! the one this process is executing: on Windows the copy is refused outright,
-//! and on macOS the bundle would be swapped underneath a live webview. So that
-//! half is handed to a small helper script that is written out, launched
-//! detached from this process, and left to it:
-//!
-//!   1. wait for this pid to disappear (the app quits itself right after),
-//!   2. run the installer, elevated — pointed at the already-downloaded files
-//!      through `ASALE_DL_CACHE`, so it copies rather than fetching them again,
-//!   3. open the app again — whether or not step 2 worked, because an update
-//!      the user cancelled must not leave them with no application.
-//!
-//! Step 3 is two things, not one. Starting the app is the helper's job and it
-//! is reliable. Putting it *in front of* the windows the user was left with
-//! while the installer ran is not: the helper is by then an orphan with no
-//! session of its own to activate from, and an app that came up behind a
-//! browser is indistinguishable from an update that reopened nothing. So the
-//! helper nudges (`activate`), and the build that comes up raises itself —
-//! see `take_relaunch_flag`, which `lib.rs` reads on startup.
-//!
-//! Elevation belongs to the helper, not to us: `/usr/local/bin` is root-owned
-//! and a piped installer has no terminal for `sudo` to prompt on. macOS gets
-//! the system authorization dialog (`osascript … with administrator
-//! privileges`), Linux the polkit one (`pkexec`), and Windows needs none from
-//! us — the command line goes under `%LOCALAPPDATA%` and the desktop installer
-//! raises its own UAC prompt.
-//!
-//! Everything the helper prints goes to `~/.asale/update.log`. By the time the
-//! installer is running there is no window left to report into, so that file is
-//! the only account of what happened.
+//! The native timer checks every ten minutes. User installs stage both binaries
+//! and the desktop app before handing over to an unprivileged supervisor.
+//! Windows uses the published portable executable; Linux system packages are
+//! installed by a preauthorized system task before the desktop restarts.
+//! A permission, download or preparation failure never exits the current app.
 
 use std::path::PathBuf;
 use std::process::Command;
 
 use tauri::AppHandle;
+#[cfg(target_os="linux")]
+use tauri::Manager;
 
 const INSTALL_SH: &str = "https://asale.ai/dl/install.sh";
 const INSTALL_PS1: &str = "https://asale.ai/dl/install.ps1";
@@ -191,8 +152,8 @@ fn wanted_ids() -> [&'static str; 2] {
     if cfg!(target_os = "macos") {
         ["cli-mac", "mac"]
     } else if cfg!(windows) {
-        ["cli-windows", "windows"]
-    } else if std::path::Path::new("/usr/bin/dpkg").exists() {
+        ["cli-windows", "windows-portable"]
+    } else if std::env::var_os("APPIMAGE").is_none() && std::path::Path::new("/usr/bin/dpkg").exists() {
         ["cli-linux", "linux-deb"]
     } else {
         ["cli-linux", "linux-appimage"]
@@ -221,6 +182,10 @@ fn cache_dir(version: &str) -> PathBuf {
 pub async fn download(app: &AppHandle) -> Result<PathBuf, String> {
     use tauri::Emitter;
     let (version, assets) = assets().await?;
+    for id in wanted_ids() {
+        let asset = assets.iter().find(|a| a.id == id).ok_or_else(|| format!("release is missing {id}"))?;
+        if asset.sha256.len() != 64 || !asset.sha256.bytes().all(|b| b.is_ascii_hexdigit()) { return Err(format!("release asset {id} is missing a valid SHA-256")); }
+    }
     let app = app.clone();
     fetch_release(&version, &assets, move |p| {
         let _ = app.emit(PROGRESS_EVENT, p);
@@ -246,7 +211,7 @@ async fn fetch_release(
         .iter()
         .filter_map(|id| assets.iter().find(|a| a.id == *id).cloned())
         .collect();
-    if wanted.is_empty() {
+    if wanted.len() != 2 {
         return Err(format!("release {version} publishes nothing for this platform"));
     }
 
@@ -416,8 +381,40 @@ pub fn install_command() -> String {
 
 /// Write the helper, start it, and quit.
 pub fn run(app: &AppHandle) -> Result<(), String> {
-    let script = write_helper()?;
-    spawn_detached(&script)?;
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("APPIMAGE").is_none() {
+        let output = Command::new("dpkg-query").args(["-W", "-f=${db:Status-Status}|${Version}", "asale"]).output().map_err(|e| e.to_string())?;
+        if output.status.success() {
+            let installed = String::from_utf8_lossy(&output.stdout);
+            if let Some((status, version)) = installed.trim().split_once('|') {
+                if status == "installed" && newer(version, env!("CARGO_PKG_VERSION")) {
+                    let target = tauri::process::current_binary(&app.env()).map_err(|e|e.to_string())?;
+                    let script = work_dir().join("package-restart.sh");
+                    let pid = std::process::id();
+                    std::fs::write(&script, format!("#!/bin/sh\nn=0\nwhile kill -0 {pid} 2>/dev/null; do\n [ \"$n\" -lt 120 ] || exit 1\n sleep 0.5; n=$((n+1))\ndone\n{} >/dev/null 2>&1 &\n",sq(&target.to_string_lossy()))).map_err(|e|e.to_string())?;
+                    spawn_detached(&script)?;
+                    let handle=app.clone();
+                    std::thread::spawn(move || { std::thread::sleep(std::time::Duration::from_millis(600)); handle.exit(0); });
+                    return Ok(());
+                }
+            }
+        }
+        return Err("Waiting for the authorized system package updater. Enable it once with: sudo asale autoupdate enable --system-package --data-dir <your Asale data directory>. Selling continues.".into());
+    }
+
+    static APPLYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if APPLYING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Err("An update is already being applied".into());
+    }
+    let prepared = prepare_safe_helper();
+    let script = match prepared {
+        Ok(script) => script,
+        Err(e) => { APPLYING.store(false, std::sync::atomic::Ordering::SeqCst); return Err(e); }
+    };
+    if let Err(e) = spawn_detached(&script) {
+        APPLYING.store(false, std::sync::atomic::Ordering::SeqCst);
+        return Err(e);
+    }
     mark_relaunch();
     tracing::info!("update helper started: {}", script.display());
 
@@ -430,6 +427,221 @@ pub fn run(app: &AppHandle) -> Result<(), String> {
         handle.exit(0);
     });
     Ok(())
+}
+
+/// Native timer keeps checking even when the webview is hidden in the tray.
+pub fn watch(app: AppHandle, shell: std::sync::Arc<crate::Shell>) {
+    if cfg!(debug_assertions) { return; }
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        loop {
+            let http = asale_client_core::http::plain();
+            let preference = http.post(format!("{}/rpc/get_setting", shell.daemon_base))
+                .header("X-Asale-Token", &shell.token)
+                .json(&serde_json::json!({"key":"auto_update"})).send().await;
+            // An unreadable preference is not authorization to restart.
+            if let Ok(response) = preference {
+                if let Ok(value) = response.json::<serde_json::Value>().await {
+                    if value.is_null() || value.as_str().is_some_and(|v| v != "0") {
+                        if let Ok(release) = latest_release().await {
+                            if newer(&release.version, env!("CARGO_PKG_VERSION")) {
+                                let result = match download(&app).await {
+                                    Ok(_) => run(&app),
+                                    Err(e) => Err(e),
+                                };
+                                let error = result.err().unwrap_or_default();
+                                let _ = http.post(format!("{}/rpc/set_setting", shell.daemon_base))
+                                    .header("X-Asale-Token", &shell.token)
+                                    .json(&serde_json::json!({"key":"auto_update_error","value":error})).send().await;
+                            }
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+        }
+    });
+}
+
+fn newer(latest: &str, current: &str) -> bool {
+    fn version(v: &str) -> Option<Vec<u64>> {
+        v.trim_start_matches('v').split('-').next()?.split('.').map(|n| n.parse().ok()).collect()
+    }
+    match (version(latest), version(current)) {
+        (Some(a), Some(b)) => a > b || (a == b && current.contains('-') && !latest.contains('-')),
+        _ => false,
+    }
+}
+
+/// Prepare the entire replacement while the seller is still running. No sudo,
+/// pkexec or UAC is allowed here. System-managed installations need a manual
+/// upgrade; returning an error must never stop the current seller.
+#[cfg(unix)]
+fn prepare_safe_helper() -> Result<PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let target = relaunch_target();
+    let parent = target.parent().ok_or("invalid application path")?;
+    if cfg!(target_os = "macos") && target.extension().and_then(|s| s.to_str()) != Some("app") {
+        return Err("Automatic updates require an installed .app bundle".into());
+    }
+    if !cfg!(target_os = "macos") && std::env::var_os("APPIMAGE").is_none() {
+        return Err("This package is managed by the system. Upgrade it with your package manager; selling continues.".into());
+    }
+    // Exercise the actual filesystem permissions, including ACLs, before exit.
+    let probe = parent.join(format!(".asale-update-probe-{}", std::process::id()));
+    let f = std::fs::OpenOptions::new().write(true).create_new(true).open(&probe)
+        .map_err(|_| "Update needs administrator permission. Install Asale in a user-owned directory for unattended updates; selling continues.".to_string())?;
+    drop(f);
+    std::fs::remove_file(probe).map_err(|e| e.to_string())?;
+    let cache = ready_cache().ok_or("Download the update first")?;
+    let attempt = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos();
+    let staged = parent.join(format!(".asale-update-{attempt}"));
+    std::fs::create_dir_all(&staged).map_err(|e| e.to_string())?;
+    let files: Vec<PathBuf> = std::fs::read_dir(cache).map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok().map(|e| e.path())).collect();
+    let prepared = staged.join(target.file_name().ok_or("invalid application name")?);
+    #[cfg(target_os = "macos")]
+    {
+        let dmg = files.iter().find(|p| p.extension().is_some_and(|e| e == "dmg")).ok_or("Missing desktop download")?;
+        let mount = staged.join("mount");
+        std::fs::create_dir_all(&mount).map_err(|e| e.to_string())?;
+        let mounted = Command::new("/usr/bin/hdiutil").args(["attach", "-nobrowse", "-quiet", "-mountpoint"]).arg(&mount).arg(dmg).status().map_err(|e| e.to_string())?;
+        if !mounted.success() { return Err("Could not mount downloaded update; selling continues".into()); }
+        let result = (|| {
+            let app = std::fs::read_dir(&mount).map_err(|e| e.to_string())?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .find(|p| p.extension().is_some_and(|e| e == "app")).ok_or("Missing app in download")?;
+            let status = Command::new("/usr/bin/ditto").arg(&app).arg(&prepared).status().map_err(|e| e.to_string())?;
+            if !status.success() { return Err("Could not stage app; selling continues".into()); }
+            let signed = Command::new("/usr/bin/codesign").args(["--verify", "--deep", "--strict"]).arg(&prepared).status().map_err(|e| e.to_string())?;
+            if !signed.success() { return Err("Update signature verification failed; selling continues".into()); }
+            Ok::<(), String>(())
+        })();
+        let _ = Command::new("/usr/bin/hdiutil").args(["detach", "-quiet"]).arg(&mount).status();
+        result?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let image = files.iter().find(|p| p.extension().is_some_and(|e| e == "AppImage")).ok_or("Missing AppImage download")?;
+        std::fs::copy(image, &prepared).map_err(|e| e.to_string())?;
+        std::fs::set_permissions(&prepared, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    }
+    // CLI binaries are staged on their destination filesystem as well. Never
+    // quit if this half of the release needs elevation.
+    let cli = Command::new("/bin/sh").args(["-c", "command -v asale"]).output().map_err(|e| e.to_string())?;
+    let cli_path = PathBuf::from(String::from_utf8_lossy(&cli.stdout).trim());
+    let cli_dir = if cli.status.success() { cli_path.parent().ok_or("invalid CLI path")?.to_path_buf() }
+        else { PathBuf::from(std::env::var("HOME").map_err(|e| e.to_string())?).join(".local/bin") };
+    std::fs::create_dir_all(&cli_dir).map_err(|_| "CLI update needs administrator permission; selling continues".to_string())?;
+    let cli_stage = cli_dir.join(format!(".asale-update-{attempt}"));
+    std::fs::create_dir(&cli_stage).map_err(|_| "CLI update needs administrator permission; selling continues".to_string())?;
+    let archive = files.iter().find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("asale-cli-") && n.to_string_lossy().ends_with(".tar.gz"))).ok_or("Missing CLI download")?;
+    let extracted = Command::new("tar").arg("-xzf").arg(archive).arg("-C").arg(&cli_stage).status().map_err(|e| e.to_string())?;
+    if !extracted.success() { return Err("Could not stage CLI update; selling continues".into()); }
+    for name in ["asale", "asaled"] {
+        if !cli_stage.join(name).is_file() { return Err(format!("Missing staged {name}; selling continues")); }
+    }
+    let cli_dir = sq(&cli_dir.to_string_lossy());
+    let cli_stage = sq(&cli_stage.to_string_lossy());
+    let target = sq(&target.to_string_lossy());
+    let prepared = sq(&prepared.to_string_lossy());
+    let backup = sq(&staged.join("previous").to_string_lossy());
+    let pid = std::process::id();
+    let launch = if cfg!(target_os = "macos") { format!("/usr/bin/open {target}") } else { format!("{target} >/dev/null 2>&1 &") };
+    let swap = swap_commands(&target, &prepared, &backup, &cli_dir, &cli_stage);
+    let body = format!("#!/bin/sh\nexec >>{} 2>&1\nn=0\nwhile kill -0 {pid} 2>/dev/null; do\n  [ \"$n\" -lt 120 ] || exit 1\n  sleep 0.5\n  n=$((n+1))\ndone\nmkdir {cli_dir}/.asale-update-in-progress 2>/dev/null || {{ {launch}; exit 1; }}\ncleanup() {{ rmdir {cli_dir}/.asale-update-in-progress; }}\ntrap cleanup EXIT\n{swap}
+{launch}\n", sq(&work_dir().join("update.log").to_string_lossy()));
+    let helper = work_dir().join("safe-update-helper.sh");
+    std::fs::write(&helper, body).map_err(|e| e.to_string())?;
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+    Ok(helper)
+}
+
+#[cfg(unix)]
+fn swap_commands(target: &str, prepared: &str, backup: &str, cli_dir: &str, cli_stage: &str) -> String {
+    format!(r#"rollback() {{
+  [ ! -e {backup} ] || {{ rm -rf {target}; mv {backup} {target}; }}
+  for name in asale asaled; do
+    [ ! -e {cli_stage}/$name.absent ] || rm -f {cli_dir}/$name
+    [ ! -e {cli_stage}/$name.previous ] || {{ rm -f {cli_dir}/$name; mv {cli_stage}/$name.previous {cli_dir}/$name; }}
+  done
+}}
+apply() {{
+  for name in asale asaled; do
+    if [ -e {cli_dir}/$name ]; then mv {cli_dir}/$name {cli_stage}/$name.previous || return 1; else touch {cli_stage}/$name.absent || return 1; fi
+    mv {cli_stage}/$name {cli_dir}/$name || return 1
+  done
+  mv {target} {backup} || return 1
+  mv {prepared} {target} || return 1
+}}
+apply || rollback
+"#)
+}
+
+#[cfg(windows)]
+fn prepare_safe_helper() -> Result<PathBuf, String> { prepare_windows_helper() }
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn prepare_windows_helper() -> Result<PathBuf, String> {
+    let target = relaunch_target();
+    let parent = target.parent().ok_or("invalid application path")?;
+    let attempt = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e|e.to_string())?.as_nanos();
+    let stage = parent.join(format!(".asale-update-{attempt}"));
+    if std::fs::create_dir(&stage).is_err() {
+        let task = Command::new("schtasks.exe").args(["/Run", "/TN", "AsaleAutomaticUpdate"]).status().map_err(|e|e.to_string())?;
+        return Err(if task.success() { "Update delegated to the authorized background task; selling continues" } else { "Enable the system update task once in an administrator terminal: asale autoupdate enable --desktop-target <installed Asale.exe>. Selling continues" }.into());
+    }
+    let cache = ready_cache().ok_or("Download the update first")?;
+    let expected_version = cache.file_name().and_then(|n|n.to_str()).ok_or("invalid release version")?.to_string();
+    let embedded = crate::EMBEDDED_DAEMON.load(std::sync::atomic::Ordering::SeqCst);
+    let port = asale_daemon::bound_addr().map(|a|a.port()).unwrap_or(9700);
+    let files: Vec<PathBuf> = std::fs::read_dir(cache).map_err(|e|e.to_string())?.filter_map(|e|e.ok().map(|e|e.path())).collect();
+    let app = files.iter().find(|p|p.file_name().is_some_and(|n|n.to_string_lossy().ends_with("-portable.exe"))).ok_or("Release is missing its silent Windows update executable")?;
+    let prepared = stage.join("Asale.exe");
+    std::fs::copy(app, &prepared).map_err(|e|e.to_string())?;
+    let cli_dir = PathBuf::from(std::env::var("LOCALAPPDATA").map_err(|e|e.to_string())?).join("Asale/bin");
+    std::fs::create_dir_all(&cli_dir).map_err(|e|e.to_string())?;
+    let cli_stage = cli_dir.join(format!(".asale-update-{attempt}"));
+    std::fs::create_dir(&cli_stage).map_err(|e|e.to_string())?;
+    let archive = files.iter().find(|p|p.file_name().is_some_and(|n|n.to_string_lossy().starts_with("asale-cli-") && n.to_string_lossy().ends_with(".zip"))).ok_or("Missing CLI download")?;
+    let result = Command::new("powershell.exe").args(["-NoProfile","-Command"]).arg(format!("$ErrorActionPreference='Stop'; Expand-Archive -LiteralPath {} -DestinationPath {}",pq(&archive.to_string_lossy()),pq(&cli_stage.to_string_lossy()))).status().map_err(|e|e.to_string())?;
+    if !result.success() || !cli_stage.join("asale.exe").is_file() || !cli_stage.join("asaled.exe").is_file() { return Err("Could not prepare CLI update; selling continues".into()); }
+    // An independently running daemon owns its own CLI update transaction.
+    // Replacing its locked executable from the GUI would fail on Windows.
+    let cli_names = if crate::EMBEDDED_DAEMON.load(std::sync::atomic::Ordering::SeqCst) { "@('asale.exe','asaled.exe')" } else { "@()" };
+    let body = format!(r#"$ErrorActionPreference='Stop'
+$oldPid={pid}; $target={target}; $prepared={prepared}; $backup={backup}
+$cli={cli}; $stage={stage}
+$lease=[IO.File]::Open((Join-Path $cli '.asale-update.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+try {{ Wait-Process -Id $oldPid -Timeout 60 -ErrorAction Stop }} catch {{ if(Get-Process -Id $oldPid -ErrorAction SilentlyContinue) {{ exit 1 }} }}
+try {{
+ foreach($n in {cli_names}) {{
+  $current=Join-Path $cli $n
+  if(Test-Path $current) {{ Move-Item $current (Join-Path $stage "$n.previous") -Force }}
+  Move-Item (Join-Path $stage $n) $current -Force
+ }}
+ Move-Item $target $backup -Force
+ Move-Item $prepared $target -Force
+ $started=Start-Process -FilePath $target -PassThru
+ if({embedded}) {{
+  $ready=$false
+  for($i=0;$i -lt 60;$i++) {{
+   Start-Sleep -Seconds 1
+   try {{ $health=Invoke-RestMethod 'http://127.0.0.1:{port}/healthz'; if($health.version -eq {expected_version}) {{ $ready=$true;break }} }} catch {{}}
+  }}
+  if(-not $ready) {{ throw 'updated desktop failed its health check' }}
+ }}
+}} catch {{
+ if(Get-Variable started -ErrorAction SilentlyContinue) {{ Stop-Process -Id $started.Id -Force -ErrorAction SilentlyContinue }}
+ if(Test-Path $backup) {{ Remove-Item $target -Force -ErrorAction SilentlyContinue; Move-Item $backup $target -Force }}
+ foreach($n in {cli_names}) {{
+  $old=Join-Path $stage "$n.previous"
+  if(Test-Path $old) {{ Remove-Item (Join-Path $cli $n) -Force -ErrorAction SilentlyContinue; Move-Item $old (Join-Path $cli $n) -Force }}
+ }}
+ Start-Process -FilePath $target
+}}
+"#,embedded=if embedded { "$true" } else { "$false" }, expected_version=pq(&expected_version),pid=std::process::id(),target=pq(&target.to_string_lossy()),prepared=pq(&prepared.to_string_lossy()),backup=pq(&stage.join("previous.exe").to_string_lossy()),cli=pq(&cli_dir.to_string_lossy()),stage=pq(&cli_stage.to_string_lossy()));
+    let helper = stage.join("supervisor.ps1"); std::fs::write(&helper,body).map_err(|e|e.to_string())?; Ok(helper)
 }
 
 /// The helper and its log live with the rest of asale's state, not in a temp
@@ -500,168 +712,6 @@ fn relaunch_target() -> PathBuf {
 
 // ── the helper itself ───────────────────────────────────────────────────────
 
-#[cfg(unix)]
-fn write_helper() -> Result<PathBuf, String> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let dir = work_dir();
-    let path = dir.join("update-helper.sh");
-    let log = sq(&dir.join("update.log").to_string_lossy());
-    let pid = std::process::id();
-    let target = sq(&relaunch_target().to_string_lossy());
-    let cache = ready_cache().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-    // The macOS install command is a shell string inside an AppleScript string
-    // inside a single-quoted shell argument, and a `'` anywhere in the path
-    // ends that outermost quoting early — turning the rest of the command into
-    // arguments to nothing. A home directory with an apostrophe in it is rare
-    // and real; when it happens, forgo the cache rather than the update.
-    #[cfg(target_os = "macos")]
-    let cache = if cache.contains('\'') {
-        tracing::warn!("not handing the installer a cache path containing a quote: {cache}");
-        String::new()
-    } else {
-        cache
-    };
-
-    // A minute of polling, not a fixed sleep: quitting is usually instant, but
-    // a window with an unsaved-state prompt or a wedged webview can take a
-    // while, and starting the installer early is the one thing that breaks it.
-    let wait = format!(
-        "n=0\nwhile kill -0 {pid} 2>/dev/null && [ \"$n\" -lt 120 ]; do\n\tsleep 0.5\n\tn=$((n + 1))\ndone\n"
-    );
-
-    // `ASALE_DL_CACHE` is how the download the window just showed reaches the
-    // installer: it copies from there instead of fetching the same bytes again,
-    // elevated, with nothing on screen. An installer that has never heard of it
-    // ignores it and downloads as before, so an app newer than the live script
-    // still updates.
-    //
-    // Quoted for the shell it lands in, and on macOS for the AppleScript string
-    // it is embedded in as well — see `aq`.
-    #[cfg(target_os = "macos")]
-    let cache_env = if cache.is_empty() { String::new() } else { format!("ASALE_DL_CACHE={} ", aq(&cache)) };
-    #[cfg(not(target_os = "macos"))]
-    let cache_env = if cache.is_empty() { String::new() } else { format!("ASALE_DL_CACHE={} ", sq(&cache)) };
-
-    #[cfg(target_os = "macos")]
-    let install = format!(
-        // One authorization for the whole install, raised by macOS itself. The
-        // `with prompt` text is the only context the dialog gets: it appears
-        // after the app has quit, so nothing else on screen explains it.
-        "/usr/bin/osascript \
-         -e 'do shell script \"/usr/bin/curl -fsSL {INSTALL_SH} | {cache_env}/bin/sh\" \
-         with administrator privileges \
-         with prompt \"Asale needs your administrator password to install the update.\"' \
-         || echo 'the installer was cancelled or failed'\n"
-    );
-    #[cfg(target_os = "macos")]
-    // By path first, by name second: the installer replaces the bundle where it
-    // stands, so the path this build was launched from is still right — and it
-    // is the only thing that tells a dev build apart from the release beside it.
-    //
-    // Then `activate`, because `open` from here only hands a launch request to
-    // LaunchServices: the app starts, but nothing promises it starts *in front*
-    // of whatever the user turned to while the installer ran. The sleep is for
-    // the webview — activating a bundle that has not finished launching does
-    // nothing — and AppleScript's `activate` launches the app itself if `open`
-    // somehow did not, so this doubles as the last fallback.
-    let relaunch = format!(
-        "/usr/bin/open {target} || /usr/bin/open -a Asale || echo 'could not reopen Asale'\n\
-         sleep 3\n\
-         /usr/bin/osascript -e 'tell application \"Asale\" to activate' >/dev/null 2>&1 \
-         || echo 'reopened, but could not bring the window to the front'\n"
-    );
-
-    #[cfg(not(target_os = "macos"))]
-    let install = format!(
-        // polkit is the desktop's own way to ask for a password. Where there is
-        // none there is also no terminal for sudo to prompt on, so the fallback
-        // installs into the user's own prefix rather than failing on
-        // /usr/local/bin — a working update in $HOME beats a clean failure.
-        //
-        // `env HOME=…` because pkexec hands root a root environment, and the
-        // installer reads $HOME to find an existing AppImage install.
-        "if command -v pkexec >/dev/null 2>&1; then\n\
-         \tpkexec /usr/bin/env HOME=\"$HOME\" {cache_env}/bin/sh -c 'curl -fsSL {INSTALL_SH} | sh' \
-         || echo 'the installer was cancelled or failed'\n\
-         else\n\
-         \techo 'no pkexec — installing into $HOME/.local/bin instead'\n\
-         \tcurl -fsSL {INSTALL_SH} | {cache_env}sh -s -- --prefix \"$HOME/.local/bin\" \
-         || echo 'the installer failed'\n\
-         fi\n"
-    );
-    #[cfg(not(target_os = "macos"))]
-    let relaunch = format!("{target} >/dev/null 2>&1 &\n");
-
-    let body = format!(
-        "#!/bin/sh\n\
-         # Written by the Asale desktop app when \"restart to update\" was pressed.\n\
-         # Safe to delete. It is rewritten on every update.\n\
-         exec >>{log} 2>&1\n\
-         echo \"--- asale update $(date) ---\"\n\
-         \n\
-         # The installer replaces the very binary this app runs from, so it\n\
-         # cannot start until the app is gone.\n\
-         {wait}\
-         \n\
-         {install}\
-         \n\
-         # Reopened either way: an update the user cancelled must not leave them\n\
-         # with no application.\n\
-         {relaunch}"
-    );
-
-    std::fs::write(&path, body).map_err(|e| format!("could not write the update helper: {e}"))?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
-        .map_err(|e| format!("could not make the update helper executable: {e}"))?;
-    Ok(path)
-}
-
-#[cfg(windows)]
-fn write_helper() -> Result<PathBuf, String> {
-    let dir = work_dir();
-    let path = dir.join("update-helper.ps1");
-    let log = pq(&dir.join("update.log").to_string_lossy());
-    let pid = std::process::id();
-    let target = pq(&relaunch_target().to_string_lossy());
-    // See the unix helper: this is how the download the window already showed
-    // reaches the installer instead of being fetched a second time.
-    let cache_env = match ready_cache() {
-        Some(p) => format!("$env:ASALE_DL_CACHE = {}\r\n", pq(&p.to_string_lossy())),
-        None => String::new(),
-    };
-
-    // Windows PowerShell 5.1 still negotiates SSL3/TLS1.0 by default, which
-    // asale.ai refuses — without this the download fails as a protocol error
-    // before the installer is ever fetched.
-    let body = format!(
-        "# Written by the Asale desktop app when \"restart to update\" was pressed.\r\n\
-         # Safe to delete. It is rewritten on every update.\r\n\
-         $ErrorActionPreference = 'Continue'\r\n\
-         try {{ Start-Transcript -Path {log} -Append | Out-Null }} catch {{}}\r\n\
-         \r\n\
-         # Windows will not overwrite a running .exe at all, so nothing can\r\n\
-         # start until the app is gone.\r\n\
-         try {{ Wait-Process -Id {pid} -Timeout 60 -ErrorAction SilentlyContinue }} catch {{}}\r\n\
-         \r\n\
-         try {{ [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }} catch {{}}\r\n\
-         {cache_env}\
-         try {{\r\n\
-         \t& ([scriptblock]::Create((Invoke-RestMethod -UseBasicParsing '{INSTALL_PS1}')))\r\n\
-         }} catch {{\r\n\
-         \tWrite-Host \"the installer failed: $($_.Exception.Message)\"\r\n\
-         }}\r\n\
-         \r\n\
-         # Reopened either way: an update that failed must not leave the user\r\n\
-         # with no application.\r\n\
-         Start-Process -FilePath {target} -ErrorAction SilentlyContinue\r\n\
-         try {{ Stop-Transcript | Out-Null }} catch {{}}\r\n"
-    );
-
-    std::fs::write(&path, body).map_err(|e| format!("could not write the update helper: {e}"))?;
-    Ok(path)
-}
-
 // ── starting it, properly detached ──────────────────────────────────────────
 
 #[cfg(unix)]
@@ -709,24 +759,46 @@ fn sq(s: &str) -> String {
 /// string literal the `do shell script` command is written as, and the shell
 /// that then runs that command.
 ///
-/// The backslashes look wrong and are not. `\\\"` is a Rust literal for `\"`,
-/// which reaches osascript as an escaped quote inside its own string and comes
-/// out the other side as a plain `"` around the value — which is what the shell
-/// needs to survive a space in the user's home directory.
-#[cfg(target_os = "macos")]
-fn aq(s: &str) -> String {
-    format!("\\\"{}\\\"", s.replace('\\', "\\\\\\\\").replace('"', "\\\\\\\""))
-}
-
 /// The PowerShell spelling of the same thing: inside single quotes only the
 /// quote itself is special, and it is escaped by doubling.
-#[cfg(windows)]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn pq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[test]
+    fn release_order_does_not_downgrade_or_accept_invalid_versions() {
+        assert!(super::newer("1.2.0", "1.1.9"));
+        assert!(!super::newer("1.1.6", "1.1.6"));
+        assert!(!super::newer("1.1.6", "1.2.0"));
+        assert!(!super::newer("invalid", "1.1.6"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_app_swap_restores_both_cli_binaries_and_application() {
+        let dir = std::env::temp_dir().join(format!("asale-rollback-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cli = dir.join("cli");
+        let stage = dir.join("stage");
+        std::fs::create_dir_all(&cli).unwrap();
+        std::fs::create_dir_all(&stage).unwrap();
+        let app = dir.join("Asale.app");
+        std::fs::write(&app, "old app").unwrap();
+        for name in ["asale", "asaled"] {
+            std::fs::write(cli.join(name), "old cli").unwrap();
+            std::fs::write(stage.join(name), "new cli").unwrap();
+        }
+        let q = |p: &std::path::Path| super::sq(&p.to_string_lossy());
+        let script = super::swap_commands(&q(&app), &q(&dir.join("missing")), &q(&dir.join("backup")), &q(&cli), &q(&stage));
+        assert!(std::process::Command::new("/bin/sh").args(["-c", &script]).status().unwrap().success());
+        assert_eq!(std::fs::read_to_string(&app).unwrap(), "old app");
+        for name in ["asale", "asaled"] { assert_eq!(std::fs::read_to_string(cli.join(name)).unwrap(), "old cli"); }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     use super::*;
 
     /// S6: a cached file that does not hash to what the manifest says is
@@ -763,65 +835,6 @@ mod tests {
     /// process, so the tests that repoint it take this lock rather than deleting
     /// each other's scratch directory mid-run.
     static DATA_DIR: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// One test, not two: both halves point `ASALE_DATA_DIR` at a scratch
-    /// directory, and cargo runs tests in threads of a single process.
-    ///
-    /// The helper is a shell script assembled from format strings, and it runs
-    /// in the one place with no window left to report a syntax error into — so
-    /// hand it to `sh -n` here instead, and check that the part the user
-    /// actually notices (the app coming back) is in it.
-    #[test]
-    fn the_helper_reopens_the_app_and_says_so_to_the_next_launch() {
-        let _lock = DATA_DIR.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join("asale-updater-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::env::set_var("ASALE_DATA_DIR", &dir);
-
-        let path = write_helper().expect("helper written");
-        let body = std::fs::read_to_string(&path).expect("helper readable");
-
-        let out = Command::new("/bin/sh").arg("-n").arg(&path).output().expect("sh -n ran");
-        assert!(out.status.success(), "helper is not valid sh: {}", String::from_utf8_lossy(&out.stderr));
-
-        // The relaunch must come after the installer, unconditionally: an
-        // update the user cancelled must still leave them with an app.
-        let install = body.find("install.sh").expect("the helper runs the installer");
-        let reopen = if cfg!(target_os = "macos") {
-            body.find("/usr/bin/open").expect("the helper reopens the app")
-        } else {
-            body.rfind(&relaunch_target().to_string_lossy().to_string())
-                .expect("the helper reopens the app")
-        };
-        assert!(reopen > install, "the app is reopened before the installer runs");
-
-        // Nothing downloaded yet, so the helper must not mention a cache at
-        // all: an installer pointed at an empty directory would find nothing
-        // there and fetch everything anyway, having said it would not.
-        assert!(!body.contains("ASALE_DL_CACHE"), "no download, no cache: {body}");
-
-        // With a release sitting in the cache it has to be handed over — that
-        // is the whole point of downloading before quitting.
-        let cached = dir.join("updates").join("9.9.9");
-        std::fs::create_dir_all(&cached).unwrap();
-        std::fs::write(cached.join("Asale_9.9.9_universal.dmg"), b"not really a dmg").unwrap();
-        let path = write_helper().expect("helper written");
-        let body = std::fs::read_to_string(&path).expect("helper readable");
-        assert!(body.contains("ASALE_DL_CACHE"), "the installer is told where the files are: {body}");
-        assert!(body.contains(&cached.to_string_lossy().to_string()), "and it is the right directory");
-        let out = Command::new("/bin/sh").arg("-n").arg(&path).output().expect("sh -n ran");
-        assert!(out.status.success(), "helper is not valid sh: {}", String::from_utf8_lossy(&out.stderr));
-
-        // Read once, then gone: a flag stranded by a crash mid-install would
-        // otherwise pull the window to the front on every launch from then on.
-        assert!(!take_relaunch_flag(), "no update has run, so nothing to raise");
-        mark_relaunch();
-        assert!(take_relaunch_flag(), "the launch after an update raises the window");
-        assert!(!take_relaunch_flag(), "and only that one launch does");
-
-        std::env::remove_var("ASALE_DATA_DIR");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     /// The download half, against a stand-in for asale.ai.
     ///
@@ -888,7 +901,7 @@ mod tests {
 
         // A file that arrives short is a truncated or intercepted download, and
         // must never be handed to an installer as if it were the release.
-        let short = vec![Asset { size: 999, ..assets[1].clone() }];
+        let short = vec![assets[0].clone(), Asset { size: 999, ..assets[1].clone() }];
         let err = fetch_release("9.9.9", &short, |_| {}).await.expect_err("refused");
         assert!(err.contains("app.bin"), "says which file: {err}");
         assert!(!cache_dir("9.9.9").join("app.bin").exists(), "and does not leave it behind");
@@ -918,28 +931,4 @@ mod tests {
         (addr, hits)
     }
 
-    /// The macOS install command is a shell string inside an AppleScript string
-    /// inside a single-quoted shell argument. Three layers of quoting is not
-    /// something to reason about and hope: run the real interpreter and see what
-    /// comes out the other end.
-    ///
-    /// The path deliberately has a space in it — `/Users/first last/…` is an
-    /// ordinary Mac, and it is exactly what a missing pair of quotes breaks.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn the_cache_path_survives_applescript_and_the_shell_below_it() {
-        let path = "/tmp/asale cache/updates/9.9.9";
-        let script = format!(
-            "do shell script \"ASALE_DL_CACHE={} /bin/sh -c 'printf %s \\\"$ASALE_DL_CACHE\\\"'\"",
-            aq(path)
-        );
-        let out = Command::new("/usr/bin/osascript").arg("-e").arg(&script).output().expect("osascript ran");
-        assert!(
-            out.status.success(),
-            "osascript rejected {script}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), path);
-    }
 }
-

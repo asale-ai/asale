@@ -133,6 +133,23 @@ echo "    ASALE_GATEWAY_API=$ASALE_GATEWAY_API"
 echo "    ASALE_GATEWAY_WS=$ASALE_GATEWAY_WS"
 echo "    ASALE_QUOTA_PUBKEY=${ASALE_QUOTA_PUBKEY:0:16}…"
 
+if [[ $BUILD_APP == 1 && "$(uname -s)" == Linux ]]; then
+  # The Debian package includes a protected updater worker. Build it before
+  # bundling so its postinst can register a timer under the existing dpkg grant.
+  pnpm build
+  update_args=(build -p asale-cli -p asale-daemon --bin asale-cli --bin asaled)
+  update_profile=release
+  if [[ "$PROFILE" == --debug ]]; then update_args+=(--profile dev); update_profile=debug; else update_args+=(--release); fi
+  if [[ -n "$TARGET" ]]; then update_args+=(--target "$TARGET"); fi
+  cargo "${update_args[@]}"
+  update_bin="$PWD/target"
+  if [[ -n "$TARGET" ]]; then update_bin="$update_bin/$TARGET"; fi
+  update_bin="$update_bin/$update_profile"
+  mkdir -p "$PWD/target/update-support"
+  cp "$update_bin/asale-cli" "$PWD/target/update-support/asale"
+  cp "$update_bin/asaled" "$PWD/target/update-support/asaled"
+fi
+
 if [[ $BUILD_APP == 1 ]]; then
   args=(tauri build)
   if [[ $SIGN == 0 ]]; then args+=(--no-sign); fi
