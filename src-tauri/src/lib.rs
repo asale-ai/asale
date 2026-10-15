@@ -453,8 +453,8 @@ async fn download_update(app: AppHandle) -> Result<String, String> {
 /// Quits this process as a side effect — see `updater` for why none of the work
 /// can happen inside it.
 #[tauri::command]
-fn run_installer(app: AppHandle) -> Result<(), String> {
-    updater::run(&app)
+async fn run_installer(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || updater::run(&app)).await.map_err(|e| e.to_string())?
 }
 
 /// A boxed error carrying just a message, for `setup`'s `Box<dyn Error>`.

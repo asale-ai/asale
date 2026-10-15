@@ -1,7 +1,8 @@
 //! Desktop updates prepared while the seller is still running.
 //!
 //! The native timer checks every ten minutes. User installs stage both binaries
-//! and the desktop app before handing over to an unprivileged supervisor.
+//! and the desktop app before handing over to a supervisor. Protected macOS
+//! installations request system authorization only after a user clicks install.
 //! Windows uses the published portable executable; Linux system packages are
 //! installed by a preauthorized system task before the desktop restarts.
 //! A permission, download or preparation failure never exits the current app.
@@ -379,8 +380,64 @@ pub fn install_command() -> String {
     }
 }
 
+/// Persist the handover before exiting. An old build reopened by rollback must
+/// not automatically attempt the same release again, even after another launch.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct UpdateAttempt {
+    version: String,
+    error: String,
+}
+
+fn attempt_path() -> PathBuf { work_dir().join("desktop-update-attempt.json") }
+
+fn save_attempt(version: &str, error: &str) -> Result<(), String> {
+    let bytes = serde_json::to_vec(&UpdateAttempt { version: version.into(), error: error.into() }).map_err(|e| e.to_string())?;
+    let path = attempt_path();
+    let temporary = path.with_extension("tmp");
+    std::fs::write(&temporary, bytes).map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    if path.exists() { std::fs::remove_file(&path).map_err(|e| e.to_string())?; }
+    std::fs::rename(temporary, path).map_err(|e| e.to_string())
+}
+
+fn read_attempt() -> Result<Option<UpdateAttempt>, String> {
+    match std::fs::read(attempt_path()) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|e| format!("Could not read the previous update result: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("Could not read the previous update result: {e}")),
+    }
+}
+
+fn reconcile_attempt(current: &str) -> Result<String, String> {
+    let Some(attempt) = read_attempt()? else { return Ok(String::new()); };
+    if !newer(&attempt.version, current) {
+        std::fs::remove_file(attempt_path()).map_err(|e| e.to_string())?;
+        return Ok(String::new());
+    }
+    let error = if attempt.error.is_empty() {
+        format!("Update to {} did not complete; still running {current}. Automatic retries for this release are paused. Click Install update to retry.", attempt.version)
+    } else { attempt.error };
+    save_attempt(&attempt.version, &error)?;
+    Ok(error)
+}
+
+fn automatic_attempt_allowed(version: &str) -> Result<bool, String> {
+    Ok(read_attempt()?.is_none_or(|attempt| attempt.version != version))
+}
+
+struct PreparedUpdate {
+    script: PathBuf,
+    version: String,
+    // A fixed, quoted transaction, never a path to a user-writable root script.
+    authorization: Option<String>,
+}
+
 /// Write the helper, start it, and quit.
 pub fn run(app: &AppHandle) -> Result<(), String> {
+    run_with_mode(app, false)
+}
+
+fn run_with_mode(app: &AppHandle, automatic: bool) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     if std::env::var_os("APPIMAGE").is_none() {
         let output = Command::new("dpkg-query").args(["-W", "-f=${db:Status-Status}|${Version}", "asale"]).output().map_err(|e| e.to_string())?;
@@ -406,17 +463,31 @@ pub fn run(app: &AppHandle) -> Result<(), String> {
     if APPLYING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return Err("An update is already being applied".into());
     }
-    let prepared = prepare_safe_helper();
-    let script = match prepared {
-        Ok(script) => script,
+    let prepared = prepare_safe_helper(automatic);
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
         Err(e) => { APPLYING.store(false, std::sync::atomic::Ordering::SeqCst); return Err(e); }
     };
-    if let Err(e) = spawn_detached(&script) {
+    let version = &prepared.version;
+    if let Err(e) = save_attempt(version, "") {
+        APPLYING.store(false, std::sync::atomic::Ordering::SeqCst);
+        return Err(e);
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(command) = prepared.authorization.as_deref() {
+        if let Err(e) = authorize_macos(command) {
+            let _ = save_attempt(version, &e);
+            APPLYING.store(false, std::sync::atomic::Ordering::SeqCst);
+            return Err(e);
+        }
+    }
+    if let Err(e) = spawn_detached(&prepared.script) {
+        let _ = save_attempt(version, &e);
         APPLYING.store(false, std::sync::atomic::Ordering::SeqCst);
         return Err(e);
     }
     mark_relaunch();
-    tracing::info!("update helper started: {}", script.display());
+    tracing::info!("update helper started: {}", prepared.script.display());
 
     // Quit on a delay rather than here: the command has to return first, or the
     // webview never gets a frame to replace the button with "updating…" — and
@@ -433,6 +504,12 @@ pub fn run(app: &AppHandle) -> Result<(), String> {
 pub fn watch(app: AppHandle, shell: std::sync::Arc<crate::Shell>) {
     if cfg!(debug_assertions) { return; }
     tauri::async_runtime::spawn(async move {
+        let recovered = reconcile_attempt(env!("CARGO_PKG_VERSION"));
+        let http = asale_client_core::http::plain();
+        let error = recovered.unwrap_or_else(|e| e);
+        let _ = http.post(format!("{}/rpc/set_setting", shell.daemon_base))
+            .header("X-Asale-Token", &shell.token)
+            .json(&serde_json::json!({"key":"auto_update_error","value":error})).send().await;
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         loop {
             let http = asale_client_core::http::plain();
@@ -444,9 +521,19 @@ pub fn watch(app: AppHandle, shell: std::sync::Arc<crate::Shell>) {
                 if let Ok(value) = response.json::<serde_json::Value>().await {
                     if value.is_null() || value.as_str().is_some_and(|v| v != "0") {
                         if let Ok(release) = latest_release().await {
-                            if newer(&release.version, env!("CARGO_PKG_VERSION")) {
+                            if newer(&release.version, env!("CARGO_PKG_VERSION")) && automatic_attempt_allowed(&release.version).unwrap_or(false) {
                                 let result = match download(&app).await {
-                                    Ok(_) => run(&app),
+                                    Ok(_) => {
+                                        let handle = app.clone();
+                                        let result = tauri::async_runtime::spawn_blocking(move || run_with_mode(&handle, true)).await
+                                            .unwrap_or_else(|e| Err(e.to_string()));
+                                        if let Err(error) = &result {
+                                            if let Err(e) = save_attempt(&release.version, error) {
+                                                tracing::error!("could not persist failed update: {e}");
+                                            }
+                                        }
+                                        result
+                                    },
                                     Err(e) => Err(e),
                                 };
                                 let error = result.err().unwrap_or_default();
@@ -473,11 +560,11 @@ fn newer(latest: &str, current: &str) -> bool {
     }
 }
 
-/// Prepare the entire replacement while the seller is still running. No sudo,
-/// pkexec or UAC is allowed here. System-managed installations need a manual
-/// upgrade; returning an error must never stop the current seller.
+/// Prepare the entire replacement while the seller is still running. Background
+/// checks never request authorization; an explicit macOS install may use the
+/// system authorization dialog after preparation succeeds.
 #[cfg(unix)]
-fn prepare_safe_helper() -> Result<PathBuf, String> {
+fn prepare_safe_helper(automatic: bool) -> Result<PreparedUpdate, String> {
     use std::os::unix::fs::PermissionsExt;
     let target = relaunch_target();
     let parent = target.parent().ok_or("invalid application path")?;
@@ -487,16 +574,28 @@ fn prepare_safe_helper() -> Result<PathBuf, String> {
     if !cfg!(target_os = "macos") && std::env::var_os("APPIMAGE").is_none() {
         return Err("This package is managed by the system. Upgrade it with your package manager; selling continues.".into());
     }
-    // Exercise the actual filesystem permissions, including ACLs, before exit.
-    let probe = parent.join(format!(".asale-update-probe-{}", std::process::id()));
-    let f = std::fs::OpenOptions::new().write(true).create_new(true).open(&probe)
-        .map_err(|_| "Update needs administrator permission. Install Asale in a user-owned directory for unattended updates; selling continues.".to_string())?;
-    drop(f);
-    std::fs::remove_file(probe).map_err(|e| e.to_string())?;
     let cache = ready_cache().ok_or("Download the update first")?;
+    let expected_version = cache.file_name().and_then(|n| n.to_str()).ok_or("invalid release version")?.to_string();
+    let cli = Command::new("/bin/sh").args(["-c", "command -v asale"]).output().map_err(|e| e.to_string())?;
+    let home = PathBuf::from(std::env::var("HOME").map_err(|e| e.to_string())?);
+    let cli_path = PathBuf::from(String::from_utf8_lossy(&cli.stdout).trim());
+    // Finder launches have a minimal PATH; don't leave an existing /usr/local
+    // CLI on an old release merely because command -v cannot see it.
+    let cli_dir = if cli.status.success() { cli_path.parent().ok_or("invalid CLI path")?.to_path_buf() }
+        else { [home.join(".local/bin"), PathBuf::from("/usr/local/bin")].into_iter()
+            .find(|dir| dir.join("asale").is_file()).unwrap_or_else(|| home.join(".local/bin")) };
+    let needs_authorization = !writable(&target) || !writable(parent)
+        || (cli_dir.exists() && !writable(&cli_dir))
+        || ["asale", "asaled"].iter().any(|name| { let p = cli_dir.join(name); p.exists() && !writable(&p) });
+    if needs_authorization && (automatic || !cfg!(target_os = "macos")) {
+        return Err("This update needs system authorization. Automatic retries for this release are paused; click Install update in Settings. The current client keeps running.".into());
+    }
     let attempt = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos();
-    let staged = parent.join(format!(".asale-update-{attempt}"));
-    std::fs::create_dir_all(&staged).map_err(|e| e.to_string())?;
+    // Protected installs are staged in the user's data directory. Authorization
+    // is requested only once everything is downloaded, verified and prepared.
+    let staged = if needs_authorization { work_dir().join(format!(".asale-update-{attempt}")) }
+        else { parent.join(format!(".asale-update-{attempt}")) };
+    std::fs::create_dir(&staged).map_err(|e| e.to_string())?;
     let files: Vec<PathBuf> = std::fs::read_dir(cache).map_err(|e| e.to_string())?
         .filter_map(|e| e.ok().map(|e| e.path())).collect();
     let prepared = staged.join(target.file_name().ok_or("invalid application name")?);
@@ -515,6 +614,11 @@ fn prepare_safe_helper() -> Result<PathBuf, String> {
             if !status.success() { return Err("Could not stage app; selling continues".into()); }
             let signed = Command::new("/usr/bin/codesign").args(["--verify", "--deep", "--strict"]).arg(&prepared).status().map_err(|e| e.to_string())?;
             if !signed.success() { return Err("Update signature verification failed; selling continues".into()); }
+            let plist = Command::new("/usr/libexec/PlistBuddy").args(["-c", "Print :CFBundleShortVersionString"])
+                .arg(prepared.join("Contents/Info.plist")).output().map_err(|e| e.to_string())?;
+            if !plist.status.success() || String::from_utf8_lossy(&plist.stdout).trim() != expected_version {
+                return Err("The downloaded app does not match the requested release; the current client keeps running".into());
+            }
             Ok::<(), String>(())
         })();
         let _ = Command::new("/usr/bin/hdiutil").args(["detach", "-quiet"]).arg(&mount).status();
@@ -526,15 +630,11 @@ fn prepare_safe_helper() -> Result<PathBuf, String> {
         std::fs::copy(image, &prepared).map_err(|e| e.to_string())?;
         std::fs::set_permissions(&prepared, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
     }
-    // CLI binaries are staged on their destination filesystem as well. Never
-    // quit if this half of the release needs elevation.
-    let cli = Command::new("/bin/sh").args(["-c", "command -v asale"]).output().map_err(|e| e.to_string())?;
-    let cli_path = PathBuf::from(String::from_utf8_lossy(&cli.stdout).trim());
-    let cli_dir = if cli.status.success() { cli_path.parent().ok_or("invalid CLI path")?.to_path_buf() }
-        else { PathBuf::from(std::env::var("HOME").map_err(|e| e.to_string())?).join(".local/bin") };
-    std::fs::create_dir_all(&cli_dir).map_err(|_| "CLI update needs administrator permission; selling continues".to_string())?;
-    let cli_stage = cli_dir.join(format!(".asale-update-{attempt}"));
-    std::fs::create_dir(&cli_stage).map_err(|_| "CLI update needs administrator permission; selling continues".to_string())?;
+    let cli_stage = if needs_authorization { staged.join("cli") } else {
+        std::fs::create_dir_all(&cli_dir).map_err(|e| e.to_string())?;
+        cli_dir.join(format!(".asale-update-{attempt}"))
+    };
+    std::fs::create_dir(&cli_stage).map_err(|e| e.to_string())?;
     let archive = files.iter().find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("asale-cli-") && n.to_string_lossy().ends_with(".tar.gz"))).ok_or("Missing CLI download")?;
     let extracted = Command::new("tar").arg("-xzf").arg(archive).arg("-C").arg(&cli_stage).status().map_err(|e| e.to_string())?;
     if !extracted.success() { return Err("Could not stage CLI update; selling continues".into()); }
@@ -549,12 +649,43 @@ fn prepare_safe_helper() -> Result<PathBuf, String> {
     let pid = std::process::id();
     let launch = if cfg!(target_os = "macos") { format!("/usr/bin/open {target}") } else { format!("{target} >/dev/null 2>&1 &") };
     let swap = swap_commands(&target, &prepared, &backup, &cli_dir, &cli_stage);
-    let body = format!("#!/bin/sh\nexec >>{} 2>&1\nn=0\nwhile kill -0 {pid} 2>/dev/null; do\n  [ \"$n\" -lt 120 ] || exit 1\n  sleep 0.5\n  n=$((n+1))\ndone\nmkdir {cli_dir}/.asale-update-in-progress 2>/dev/null || {{ {launch}; exit 1; }}\ncleanup() {{ rmdir {cli_dir}/.asale-update-in-progress; }}\ntrap cleanup EXIT\n{swap}
-{launch}\n", sq(&work_dir().join("update.log").to_string_lossy()));
+    let lease = format!("mkdir {cli_dir}/.asale-update-in-progress 2>/dev/null || exit 1\ncleanup() {{ rmdir {cli_dir}/.asale-update-in-progress; }}\ntrap cleanup EXIT\n");
+    let authorization = needs_authorization.then(|| format!("PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH\nmkdir -p {cli_dir} || exit 1\n{lease}{swap}"));
+    // For protected installs the authorized transaction completes before exit;
+    // this helper only waits and reopens the app as the ordinary user.
+    let transaction = if needs_authorization { ":".into() } else {
+        format!("{lease}(\n{swap}\n)")
+    };
+    let body = unix_helper_body(pid, &transaction, &launch, &work_dir().join("update.log"));
     let helper = work_dir().join("safe-update-helper.sh");
     std::fs::write(&helper, body).map_err(|e| e.to_string())?;
     std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
-    Ok(helper)
+    Ok(PreparedUpdate { script: helper, version: expected_version, authorization })
+}
+
+#[cfg(unix)]
+fn unix_helper_body(pid: u32, transaction: &str, launch: &str, log: &std::path::Path) -> String {
+    format!("#!/bin/sh\nexec >>{} 2>&1\nn=0\nwhile kill -0 {pid} 2>/dev/null; do\n  [ \"$n\" -lt 120 ] || exit 1\n  sleep 0.5\n  n=$((n+1))\ndone\n(\n{transaction}\n)\n{launch}\n", sq(&log.to_string_lossy()))
+}
+
+#[cfg(unix)]
+fn writable(path: &std::path::Path) -> bool {
+    Command::new("/bin/test").arg("-w").arg(path).status().is_ok_and(|s| s.success())
+}
+
+#[cfg(target_os = "macos")]
+fn authorize_macos(command: &str) -> Result<(), String> {
+    let script = format!("do shell script {} with administrator privileges", applescript_string(command));
+    let output = Command::new("/usr/bin/osascript").args(["-e", &script]).output().map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(format!("Update authorization or installation did not complete. The current client keeps running. {}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn applescript_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('\"', "\\\"").replace('\n', "\\n").replace('\r', "\\r"))
 }
 
 #[cfg(unix)]
@@ -574,12 +705,19 @@ apply() {{
   mv {target} {backup} || return 1
   mv {prepared} {target} || return 1
 }}
-apply || rollback
+if ! apply; then
+  rollback
+  exit 1
+fi
 "#)
 }
 
 #[cfg(windows)]
-fn prepare_safe_helper() -> Result<PathBuf, String> { prepare_windows_helper() }
+fn prepare_safe_helper(_automatic: bool) -> Result<PreparedUpdate, String> {
+    let cache = ready_cache().ok_or("Download the update first")?;
+    let version = cache.file_name().and_then(|n| n.to_str()).ok_or("invalid release version")?.to_string();
+    prepare_windows_helper().map(|script| PreparedUpdate { script, version, authorization: None })
+}
 
 #[cfg_attr(not(windows), allow(dead_code))]
 fn prepare_windows_helper() -> Result<PathBuf, String> {
@@ -768,6 +906,119 @@ fn pq(s: &str) -> String {
 
 #[cfg(all(test, unix))]
 mod tests {
+    struct TestDataDir {
+        path: PathBuf,
+        previous: Option<std::ffi::OsString>,
+    }
+    impl TestDataDir {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("asale-{label}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            let previous = std::env::var_os("ASALE_DATA_DIR");
+            std::env::set_var("ASALE_DATA_DIR", &path);
+            Self { path, previous }
+        }
+    }
+    impl Drop for TestDataDir {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var("ASALE_DATA_DIR", value),
+                None => std::env::remove_var("ASALE_DATA_DIR"),
+            }
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn failed_or_interrupted_update_does_not_repeat_after_relaunch() {
+        let _lock = DATA_DIR.lock().unwrap_or_else(|e| e.into_inner());
+        let _dir = TestDataDir::new("update-recovery");
+        save_attempt("1.2.0", "").unwrap();
+        let error = reconcile_attempt("1.1.9").unwrap();
+        assert!(error.contains("did not complete"));
+        assert!(!automatic_attempt_allowed("1.2.0").unwrap());
+        // Another launch of the rolled-back client retains both the error and
+        // the block. A later release and an explicit retry remain possible.
+        assert_eq!(reconcile_attempt("1.1.9").unwrap(), error);
+        assert!(automatic_attempt_allowed("1.2.1").unwrap());
+        save_attempt("1.2.0", "Authorization cancelled").unwrap();
+        assert_eq!(reconcile_attempt("1.1.9").unwrap(), "Authorization cancelled");
+        assert!(!automatic_attempt_allowed("1.2.0").unwrap());
+        assert_eq!(reconcile_attempt("1.2.0").unwrap(), "");
+        assert!(!attempt_path().exists());
+        assert!(automatic_attempt_allowed("1.2.1").unwrap());
+    }
+
+    #[test]
+    fn unreadable_update_state_prevents_another_automatic_handover() {
+        let _lock = DATA_DIR.lock().unwrap_or_else(|e| e.into_inner());
+        let _dir = TestDataDir::new("update-corrupt-state");
+        std::fs::write(attempt_path(), b"interrupted write").unwrap();
+        assert!(automatic_attempt_allowed("1.2.0").is_err());
+        assert!(reconcile_attempt("1.1.9").is_err());
+        // A user-initiated retry can replace the bad record.
+        save_attempt("1.2.0", "").unwrap();
+        assert!(!automatic_attempt_allowed("1.2.0").unwrap());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn authorization_command_survives_applescript_without_interpolation() {
+        let command = "printf '%s' \"a path with 'quotes' and \\backslashes\"\n# $HOME; $(touch /do-not-run)\r";
+        // Returning a string exercises the AppleScript parser without running
+        // the transaction or requesting administrator permission.
+        let output = Command::new("/usr/bin/osascript").args(["-e", &format!("return {}", applescript_string(command))]).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim_end_matches('\n'), command);
+    }
+
+    #[test]
+    fn swap_success_and_cli_failure_are_transactional_with_quoted_paths() {
+        for fail_cli in [false, true] {
+            let dir = std::env::temp_dir().join(format!("asale-swap-'quoted'-{}-{fail_cli}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let cli = dir.join("cli");
+            let stage = dir.join("stage");
+            std::fs::create_dir_all(&cli).unwrap();
+            std::fs::create_dir_all(&stage).unwrap();
+            let app = dir.join("Asale.app");
+            let prepared = dir.join("prepared.app");
+            std::fs::write(&app, "old app").unwrap();
+            std::fs::write(&prepared, "new app").unwrap();
+            for name in ["asale", "asaled"] {
+                std::fs::write(cli.join(name), "old cli").unwrap();
+                if !(fail_cli && name == "asaled") { std::fs::write(stage.join(name), "new cli").unwrap(); }
+            }
+            let q = |p: &std::path::Path| sq(&p.to_string_lossy());
+            let script = swap_commands(&q(&app), &q(&prepared), &q(&dir.join("backup")), &q(&cli), &q(&stage));
+            let result = Command::new("/bin/sh").args(["-c", &script]).output().unwrap();
+            assert_eq!(result.status.success(), !fail_cli);
+            assert_eq!(std::fs::read_to_string(&app).unwrap(), if fail_cli { "old app" } else { "new app" });
+            for name in ["asale", "asaled"] {
+                assert_eq!(std::fs::read_to_string(cli.join(name)).unwrap(), if fail_cli { "old cli" } else { "new cli" });
+            }
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn helper_reopens_client_after_failed_swap_and_authorized_install() {
+        let dir = std::env::temp_dir().join(format!("asale-helper-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let launched = dir.join("launched");
+        let launch = format!("printf '%s' reopened > {}", sq(&launched.to_string_lossy()));
+        for transaction in ["exit 1", ":"] {
+            let body = unix_helper_body(u32::MAX - 1, transaction, &launch, &dir.join("update.log"));
+            let script = dir.join("helper.sh");
+            std::fs::write(&script, body).unwrap();
+            assert!(Command::new("/bin/sh").arg(&script).status().unwrap().success());
+            assert_eq!(std::fs::read_to_string(&launched).unwrap(), "reopened");
+            std::fs::remove_file(&launched).unwrap();
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn release_order_does_not_downgrade_or_accept_invalid_versions() {
         assert!(super::newer("1.2.0", "1.1.9"));
@@ -793,7 +1044,7 @@ mod tests {
         }
         let q = |p: &std::path::Path| super::sq(&p.to_string_lossy());
         let script = super::swap_commands(&q(&app), &q(&dir.join("missing")), &q(&dir.join("backup")), &q(&cli), &q(&stage));
-        assert!(std::process::Command::new("/bin/sh").args(["-c", &script]).status().unwrap().success());
+        assert!(!std::process::Command::new("/bin/sh").args(["-c", &script]).status().unwrap().success());
         assert_eq!(std::fs::read_to_string(&app).unwrap(), "old app");
         for name in ["asale", "asaled"] { assert_eq!(std::fs::read_to_string(cli.join(name)).unwrap(), "old cli"); }
         std::fs::remove_dir_all(dir).unwrap();

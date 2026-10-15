@@ -161,7 +161,7 @@ export function checkForUpdate(): Promise<void> {
         error: "",
       });
       const automaticError = await invoke<string | null>("get_setting", { key: "auto_update_error" });
-      if (automaticError) setInstall({ phase: "idle", error: automaticError });
+      if (install.phase === "idle") setInstall({ error: automaticError ?? "" });
     } catch (e) {
       // A failed check is not news — the machine may simply be offline. It is
       // recorded for the Settings page to show if the user is looking, and the

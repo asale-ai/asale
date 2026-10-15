@@ -1079,15 +1079,15 @@
     "trayCloseLabel": "关闭窗口时最小化到托盘",
     "trayCloseHides": "关闭窗口后 Asale 继续运行并出售，要退出请用托盘面板。",
     "trayCloseQuits": "关闭窗口即退出 Asale，出售也随之停止。",
-    "reinstallDesc": "应用和 CLI 准备完成后才重启。系统安装由首次授权的后台任务更新，准备失败时继续卖出。",
+    "reinstallDesc": "应用和 CLI 验证完成后才重启。macOS 受保护的安装会在点击更新后请求系统授权；取消或准备失败时，当前客户端继续运行。",
     "reinstallButton": "安装更新",
-    "reinstallConfirm": "新版准备完成后，客户端会短暂重启。权限检查失败时保持当前客户端运行。",
+    "reinstallConfirm": "更新可能需要系统授权。安装准备完成后，客户端会短暂重启；取消授权会保持当前客户端运行。",
     "reinstallGo": "安装更新",
     "reinstallCancel": "取消",
     "reinstallRunning": "正在更新…",
     "reinstallError": "无法启动安装程序：{{msg}}",
     "autoUpdateLabel": "自动更新",
-    "autoUpdateDesc": "默认开启。桌面和独立服务都会自动检查；系统安装通过首次安装时授权的后台任务更新。准备或权限检查失败时，当前卖出继续运行。"
+    "autoUpdateDesc": "自动检查并安装可直接替换的更新。需要授权或安装失败时保留当前客户端，暂停该版本的自动重试，并提示你点击安装更新。"
   },
   "common": {
     "copy": "复制",

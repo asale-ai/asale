@@ -1079,15 +1079,15 @@
     "trayCloseLabel": "關閉視窗時縮到系統列",
     "trayCloseHides": "關閉視窗後 Asale 繼續執行並出售，要結束請用系統列面板。",
     "trayCloseQuits": "關閉視窗即結束 Asale，出售也隨之停止。",
-    "reinstallDesc": "應用和 CLI 準備完成後才重新啟動。系統安裝由首次授權的背景工作更新，準備失敗時繼續賣出。",
+    "reinstallDesc": "應用和 CLI 驗證完成後才重新啟動。macOS 受保護的安裝會在點選更新後請求系統授權；取消或準備失敗時，目前的客戶端繼續執行。",
     "reinstallButton": "安裝更新",
-    "reinstallConfirm": "新版準備完成後，客戶端會短暫重新啟動。權限檢查失敗時保持目前的客戶端執行。",
+    "reinstallConfirm": "更新可能需要系統授權。準備完成後，客戶端會短暫重新啟動；取消授權會保持目前的客戶端執行。",
     "reinstallGo": "安裝更新",
     "reinstallCancel": "取消",
     "reinstallRunning": "更新中…",
     "reinstallError": "無法啟動安裝程式：{{msg}}",
     "autoUpdateLabel": "自動更新",
-    "autoUpdateDesc": "預設開啟。桌面和獨立服務都會自動檢查；系統安裝透過首次安裝時授權的背景工作更新。準備或權限檢查失敗時，目前的賣出繼續執行。"
+    "autoUpdateDesc": "自動檢查並安裝可直接替換的更新。需要授權或安裝失敗時保留目前的客戶端，暫停該版本的自動重試；請點選安裝更新以重試。"
   },
   "common": {
     "copy": "複製",

@@ -1079,15 +1079,15 @@
     "trayCloseLabel": "Closing the window hides Asale to the tray",
     "trayCloseHides": "Closing the window keeps Asale running and selling. Quit it from the tray panel.",
     "trayCloseQuits": "Closing the window quits Asale, which also stops selling.",
-    "reinstallDesc": "Prepares the app and CLI before restarting. Protected installations use the background task authorized during setup. Preparation failures keep selling running.",
+    "reinstallDesc": "The app and CLI are verified before restarting. Protected macOS installations request system authorization after you click install. Cancellation or preparation failure keeps the current client running.",
     "reinstallButton": "Apply update",
-    "reinstallConfirm": "Asale will restart briefly after the update is ready. Permission failures leave the current client running.",
+    "reinstallConfirm": "The system may ask you to authorize this update. Asale restarts briefly when ready; cancelling authorization keeps the current client running.",
     "reinstallGo": "Apply update",
     "reinstallCancel": "Cancel",
     "reinstallRunning": "Updating…",
     "reinstallError": "Could not start the installer: {{msg}}",
     "autoUpdateLabel": "Automatic updates",
-    "autoUpdateDesc": "Enabled by default. The desktop app and standalone service check automatically. Protected system installations use a background task authorized once during setup. Preparation or permission failures leave selling running."
+    "autoUpdateDesc": "Automatically checks and installs updates that can be applied directly. If authorization is needed or installation fails, the current client stays available and automatic retries for that release pause. Click Install update to retry."
   },
   "common": {
     "copy": "Copy",
