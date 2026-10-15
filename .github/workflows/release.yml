@@ -195,6 +195,9 @@ jobs:
           PROXY_PORT: ${{ vars.ASALE_PROXY_PORT }}
           GEMINI_ID: ${{ secrets.ASALE_OAUTH_CLIENT_ID_GEMINI }}
           GEMINI_SECRET: ${{ secrets.ASALE_OAUTH_CLIENT_SECRET_GEMINI }}
+          ANTIGRAVITY_ID: ${{ secrets.ASALE_OAUTH_CLIENT_ID_ANTIGRAVITY }}
+          ANTIGRAVITY_SECRET: ${{ secrets.ASALE_OAUTH_CLIENT_SECRET_ANTIGRAVITY }}
+          ANTIGRAVITY_VERSION: ${{ vars.ASALE_ANTIGRAVITY_VERSION }}
           # Code signing / notarization certificates. Deliberately defined only in this step
           # and forwarded selectively below (see the note in run:) — they must not go into
           # job-level env.
@@ -231,6 +234,11 @@ jobs:
             exit 1
           fi
 
+          if [[ -z "$ANTIGRAVITY_SECRET" ]]; then
+            echo "::error::secret ASALE_OAUTH_CLIENT_SECRET_ANTIGRAVITY is empty; Antigravity selling cannot be authorized"
+            exit 1
+          fi
+
           {
             echo "ASALE_QUOTA_PUBKEY=$QUOTA_PUBKEY"
             echo "ASALE_SERVER_API=${SERVER_API:-https://api.asale.ai}"
@@ -246,6 +254,13 @@ jobs:
             fi
             if [[ -n "$GEMINI_SECRET" ]]; then
               echo "ASALE_OAUTH_CLIENT_SECRET_GEMINI=$GEMINI_SECRET"
+            fi
+            if [[ -n "$ANTIGRAVITY_ID" ]]; then
+              echo "ASALE_OAUTH_CLIENT_ID_ANTIGRAVITY=$ANTIGRAVITY_ID"
+            fi
+            echo "ASALE_OAUTH_CLIENT_SECRET_ANTIGRAVITY=$ANTIGRAVITY_SECRET"
+            if [[ -n "$ANTIGRAVITY_VERSION" ]]; then
+              echo "ASALE_ANTIGRAVITY_VERSION=$ANTIGRAVITY_VERSION"
             fi
           } > .env.package
 

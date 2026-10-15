@@ -391,7 +391,9 @@ export function Consume() {
                       <IconRefresh />
                       <div className="callout-body">
                         <span>
-                          {tool.id === "claude-desktop"
+                          {tool.id === "antigravity"
+                            ? t("consume.antigravityRestartNeeded")
+                            : tool.id === "claude-desktop"
                             ? t("consume.desktopRestartNeeded")
                             : t("consume.restartNeeded", { tool: tool.label })}
                         </span>

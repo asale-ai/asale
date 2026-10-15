@@ -729,6 +729,7 @@ export type BuyToolId =
   | "claude-desktop"
   | "codex"
   | "gemini"
+  | "antigravity"
   | "openclaw"
   | "hermes"
   | "opencode"

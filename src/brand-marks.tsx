@@ -154,7 +154,7 @@ const MARK_OF: Record<string, string> = {
   // OpenAI — Codex ships under the OpenAI mark.
   codex: "openai", openai: "openai",
   // Google
-  gemini: "gemini", google: "google",
+  gemini: "gemini", antigravity: "google", google: "google",
   // Moonshot AI — the Kimi Code subscription and the metered Moonshot API are
   // separate products, and the company ships a separate mark for each.
   kimi: "kimi", kimi_api: "moonshot", moonshotai: "moonshot", moonshot: "moonshot",

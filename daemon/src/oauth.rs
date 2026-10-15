@@ -62,6 +62,14 @@ pub fn gemini_client_secret() -> String {
     env_or("ASALE_OAUTH_CLIENT_SECRET_GEMINI", GEMINI_CLIENT_SECRET)
 }
 
+/// Use separate configuration from the retired Gemini CLI OAuth application.
+pub fn antigravity_client_id() -> String {
+    env_or("ASALE_OAUTH_CLIENT_ID_ANTIGRAVITY", option_env!("ASALE_OAUTH_CLIENT_ID_ANTIGRAVITY").unwrap_or("1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"))
+}
+pub fn antigravity_client_secret() -> String {
+    env_or("ASALE_OAUTH_CLIENT_SECRET_ANTIGRAVITY", option_env!("ASALE_OAUTH_CLIENT_SECRET_ANTIGRAVITY").unwrap_or(""))
+}
+
 /// A provider asale knows, whose client credentials this build was not given.
 ///
 /// [`provider`] answers `None` for this and for a name it has never heard of,
@@ -71,7 +79,11 @@ pub fn gemini_client_secret() -> String {
 /// picked off a button. Kept beside the guard in [`provider`] so the two cannot
 /// drift apart.
 pub fn provider_unconfigured(name: &str) -> bool {
-    name == "gemini" && (gemini_client_id().is_empty() || gemini_client_secret().is_empty())
+    match name {
+        "gemini" => gemini_client_id().is_empty() || gemini_client_secret().is_empty(),
+        "antigravity" => antigravity_client_id().is_empty() || antigravity_client_secret().is_empty(),
+        _ => false,
+    }
 }
 
 /// Provider OAuth endpoints/client (spec §3.2 constants).
@@ -141,6 +153,19 @@ pub fn provider(name: &str) -> Option<OAuthProvider> {
             // redirect_uri.
             redirect_port: Some(1455),
             redirect_path: "/auth/callback",
+        },
+        "antigravity" if provider_unconfigured(name) => return None,
+        "antigravity" => OAuthProvider {
+            name: name.to_string(),
+            authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
+            token_url: "https://oauth2.googleapis.com/token",
+            client_id: antigravity_client_id(),
+            client_secret: Some(antigravity_client_secret()),
+            scope: "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/cclog https://www.googleapis.com/auth/experimentsandconfigs",
+            extra_authorize_params: &[("access_type", "offline"), ("prompt", "consent")],
+            anthropic_style: false,
+            redirect_port: Some(51121),
+            redirect_path: "/oauth-callback",
         },
         // Unconfigured Gemini credentials would only fail later at token exchange
         // with an opaque Google error — refuse the provider up front instead.
@@ -678,6 +703,23 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn antigravity_authorization_requests_a_refresh_token() {
+        let _lock = crate::codex_catalog::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let before = std::env::var("ASALE_OAUTH_CLIENT_SECRET_ANTIGRAVITY").ok();
+        std::env::set_var("ASALE_OAUTH_CLIENT_SECRET_ANTIGRAVITY", "test-only");
+        let mut p = provider("antigravity").unwrap();
+        match before { Some(v) => std::env::set_var("ASALE_OAUTH_CLIENT_SECRET_ANTIGRAVITY", v), None => std::env::remove_var("ASALE_OAUTH_CLIENT_SECRET_ANTIGRAVITY") }
+        assert_eq!(p.redirect_port, Some(51121));
+        assert_eq!(p.redirect_path, "/oauth-callback");
+        // Use an ephemeral port so this test can coexist with a running CLI.
+        p.redirect_port = None;
+        let (url, _pending) = begin(&p).await.unwrap();
+        assert!(url.contains("&access_type=offline"));
+        assert!(url.contains("&prompt=consent"));
+        assert!(url.contains("code_challenge_method=S256"));
+    }
 
     /// The two halves of "why can this flow not start" must not drift: whenever
     /// `provider_unconfigured` claims a name is merely missing credentials,

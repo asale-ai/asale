@@ -259,6 +259,7 @@
       "quarantined": "paused by the platform",
       "untradable": "not shared here",
       "unsupported": "upstream has no such model",
+      "client_unsupported": "OAuth client no longer supported; migrate this account",
       "price": "held on price"
     },
     "limitEdit": "Edit limit",
@@ -360,6 +361,7 @@
     "dshNeedsModel": "A custom Harness route serves the models it lists and nothing else, so with nothing selected the route is installed with no model to pick. Choose one or more and they are written to $DSH_HOME/settings.yaml under the asale provider; select one in the Harness model picker to use it.",
     "desktopNeedsModel": "The Claude desktop app refuses any model id it does not recognise as one of its own, so it is offered four role slots (Sonnet / Opus / Haiku / Fable) standing in for what you bought — and with nothing selected its model menu is empty. Pick one to four models; the proxy maps the slot back to the real model before the request leaves this machine.",
     "desktopRoleSlots": "The newest Sonnet, Opus, Haiku, and Fable models in the catalog are selected automatically. Manual selections, including clearing the list, are preserved. Published to the app as {{n}} versionless role slots (Sonnet / Opus / Haiku / Fable), labelled with the real model name — the app rejects other vendors’ model IDs. Only the first four selections fit; the proxy maps a slot back to the real model before the request leaves this machine.",
+    "antigravityRestartNeeded": "Open a new terminal before running agy (also inside the IDE). Requires an Antigravity CLI version with API-key mode. This switch configures the CLI; the IDE’s built-in chat has no verified custom endpoint setting.",
     "desktopRestartNeeded": "Quit the Claude desktop app completely and open it again. It reads this profile at startup only, and it starts in its third-party mode, which keeps its own window and sessions — your Claude.ai login stays untouched in the normal one.",
     "claudeDesktopShadow": "The Claude desktop app is installed on this machine. This switch rewrites ~/.claude/settings.json, which the desktop app ignores: it composes its own environment for its Code sessions and forces its own ANTHROPIC_BASE_URL, so the app keeps talking to Anthropic on your own subscription. Buying reaches the `claude` CLI in a terminal only. The desktop app can be pointed at asale, but through its own third-party profile — a separate switch that does not exist yet.",
     "toolsTitle": "Installed AI tools",

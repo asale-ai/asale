@@ -61,6 +61,7 @@ pub fn router(state: ProxyState) -> Router {
         // never metered/settled (it is not a billable completion).
         .route("/v1/messages/count_tokens", post(forward))
         .route("/v1/models", get(forward))
+        .route("/v1beta/models", get(forward))
         .route("/v1beta/models/*rest", post(forward))
         // Per-tool addressing. A tool whose dialect cannot identify it is
         // pointed at `<proxy>/{tool}` instead of the bare origin, and the
@@ -73,6 +74,7 @@ pub fn router(state: ProxyState) -> Router {
         .route("/:tool/v1/completions", post(forward))
         .route("/:tool/v1/responses", post(forward))
         .route("/:tool/v1/models", get(forward))
+        .route("/:tool/v1beta/models", get(forward))
         .route("/:tool/v1beta/models/*rest", post(forward))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state)
@@ -356,7 +358,7 @@ async fn forward(
     if tool.is_none() && !head.starts_with("v1") {
         return (StatusCode::NOT_FOUND, format!("unknown tool prefix `/{head}`")).into_response();
     }
-    let path = crate::tool_config::strip_tool_prefix(raw_path).to_string();
+    let mut path = crate::tool_config::strip_tool_prefix(raw_path).to_string();
 
     // The desktop app discovers its model menu from the gateway it was pointed
     // at, and the market catalog is exactly what it must not be shown: it drops
@@ -370,7 +372,7 @@ async fn forward(
         return claude_desktop_models(&st).await;
     }
 
-    let path_and_query = uri
+    let mut path_and_query = uri
         .path_and_query()
         .map(|pq| crate::tool_config::strip_tool_prefix(pq.as_str()).to_string())
         .unwrap_or_else(|| "/".into());
@@ -382,17 +384,27 @@ async fn forward(
 
     // Only meter billable model-call POSTs — not /v1/models listings, and not
     // the count_tokens preflight (which has no usage to settle).
-    let is_count_tokens = path.ends_with("/count_tokens");
+    let is_count_tokens = path.ends_with("/count_tokens") || path.ends_with(":countTokens");
     let meter = method == axum::http::Method::POST && !is_count_tokens;
 
     // Enforce the originating tool's buy switch + model selection. count_tokens
     // is a preflight Claude Code issues before the real call; gating it too
     // would surface the refusal at a confusing point, and it costs nothing.
     if !is_count_tokens {
-        match buy_gate(&st, tool, &extract_model_from_bytes(&bytes)).await {
+        let model = path.strip_prefix("/v1beta/models/").and_then(|s| s.split_once(':')).map(|(m, _)| m.to_string())
+            .unwrap_or_else(|| extract_model_from_bytes(&bytes));
+        match buy_gate(&st, tool, &model).await {
             BuyDecision::Pass => {}
             BuyDecision::Refuse(refusal) => return refusal,
-            BuyDecision::Substitute(model) => bytes = relabel_model(&bytes, &model),
+            BuyDecision::Substitute(model) => {
+                bytes = relabel_model(&bytes, &model);
+                if let Some((_, action)) = path.strip_prefix("/v1beta/models/").and_then(|s| s.split_once(':')) {
+                    let next = format!("/v1beta/models/{model}:{action}");
+                    let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
+                    path = next;
+                    path_and_query = format!("{path}{query}");
+                }
+            },
         }
     }
 
@@ -1669,6 +1681,25 @@ mod tests {
             .send()
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn antigravity_buy_gate_rewrites_the_model_in_the_gemini_url() {
+        let (addr, rx) = capturing_gateway().await;
+        let mut st = state(Some("sk-x")).await;
+        st.server_api_base = format!("http://{addr}");
+        st.store.set_buy_tool("antigravity", Some(true), Some(&["gemini-3.5-flash".into()]), None, None).await.unwrap();
+        let port = serve(st).await;
+        let resp = asale_client_core::http::plain()
+            .post(format!("http://127.0.0.1:{port}/antigravity/v1beta/models/gemini-other:streamGenerateContent?alt=sse"))
+            .header("x-goog-api-key", "sk-x")
+            .json(&serde_json::json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}]}))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let raw = rx.await.unwrap();
+        let captured = String::from_utf8_lossy(&raw).to_ascii_lowercase();
+        assert!(captured.starts_with("post /v1beta/models/gemini-3.5-flash:streamgeneratecontent?alt=sse "));
+        assert!(captured.contains("antigravity"), "the gateway must know which tool bought");
     }
 
     #[tokio::test]

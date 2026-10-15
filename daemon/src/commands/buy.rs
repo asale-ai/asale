@@ -55,7 +55,7 @@ fn latest_desktop_models(ids: &[String]) -> Vec<String> {
 fn default_platform(tool: &str) -> &'static str {
     match tool {
         "claude" | "claude-desktop" => "anthropic",
-        "gemini" => "google",
+        "gemini" | "antigravity" => "google",
         "dsh" => "deepseek",
         _ => "openai",
     }

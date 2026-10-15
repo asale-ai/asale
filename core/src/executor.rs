@@ -310,6 +310,8 @@ pub enum TaskOutcome {
     Blocked,
     /// The upstream has never heard of this model id. See [`unsupported_model`].
     Unsupported,
+    /// The OAuth client is rejected for the entire account.
+    ClientUnsupported,
     /// The account's extra-usage allowance is spent. Cooled exactly like a 429,
     /// because that is what it is; kept separate so the seller is told to top
     /// up rather than to wait out a window that will never reset on its own.
@@ -779,7 +781,8 @@ pub async fn execute(
             Some((base, wire)) => custom_url(base, wire, &req.upstream.url),
             None => req.upstream.url.clone(),
         };
-        let gemini_subscription = provider == "gemini" && custom.is_none();
+        let antigravity_subscription = provider == "antigravity" && custom.is_none();
+        let gemini_subscription = matches!(provider.as_str(), "gemini" | "antigravity") && custom.is_none();
         let mut builder = http.request(method, &url);
         // A subscription request rebuilds Claude Code's own header identity below,
         // so the gateway's guesses at those names are dropped rather than sent
@@ -919,29 +922,37 @@ pub async fn execute(
         }
         if gemini_subscription {
             let project = tokio::select! {
-                result = crate::gemini::resolve_project(http, &token) => result,
+                result = async {
+                    if antigravity_subscription { crate::antigravity::resolve_project(http, &token).await }
+                    else { crate::gemini::resolve_project(http, &token).await }
+                } => result,
                 _ = &mut cancel => {
                     finish_canceled(tokens, records, &provider, &lease.account_id, &model, &task_id, &Usage::default()).await;
                     return;
                 }
             };
-            let prepared = project.and_then(|p| crate::gemini::request(
-                &body, lease.upstream_model.as_deref().unwrap_or(&model), &p, &task_id));
+            let project_failed = project.is_err();
+            let prepared = project.and_then(|p| {
+                let request = if antigravity_subscription { crate::antigravity::request } else { crate::gemini::request };
+                request(&body, lease.upstream_model.as_deref().unwrap_or(&model), &p, &task_id)
+            });
             match prepared {
                 Ok(wrapped) => body = wrapped,
                 Err(e) => {
-                    let (outcome, code) = gemini_setup_failure(&e.to_string());
+                    let (outcome, code) = if project_failed { subscription_setup_failure(&e) }
+                        else { (TaskOutcome::Success { tokens_used: 0 }, protocol::codes::UPSTREAM_4XX) };
                     tokens.report(&provider, &lease.account_id, &model, outcome);
-                    send_error(out, &task_id, code, &format!("Gemini Code Assist setup: {e}"), true);
+                    let name = if antigravity_subscription { "Antigravity" } else { "Gemini Code Assist" };
+                    send_error(out, &task_id, code, &format!("{name} setup: {e}"), project_failed);
                     return;
                 }
             }
             // OAuth subscription inference has its own endpoint and envelope.
             // Do not relay API-key headers from the public Gemini request.
             let stream = req.upstream.url.contains(":streamGenerateContent");
-            builder = http.post(crate::gemini::url(stream))
+            builder = http.post(if antigravity_subscription { crate::antigravity::url(stream) } else { crate::gemini::url(stream) })
                 .bearer_auth(&token).header("content-type", "application/json")
-                .header("user-agent", crate::gemini::user_agent(lease.upstream_model.as_deref().unwrap_or(&model)));
+                .header("user-agent", if antigravity_subscription { crate::antigravity::user_agent() } else { crate::gemini::user_agent(lease.upstream_model.as_deref().unwrap_or(&model)) });
         }
         // Fingerprint what we are about to send, before the body is moved into the
         // request. An upstream 4xx names the offending field ("System messages are
@@ -1030,6 +1041,7 @@ pub async fn execute(
             // Pool feedback: 429 cools the account (honoring Retry-After), 5xx
             // applies the transient cooldown, 401/403 flags the token (spec §4).
             let outcome = match status {
+                _ if gemini_subscription && detail.contains("UNSUPPORTED_CLIENT") => TaskOutcome::ClientUnsupported,
                 // Ahead of *everything*: a model the upstream will not serve this
                 // account is the one refusal that says something about the lane
                 // rather than about the request, and it takes the lane off the
@@ -1091,7 +1103,7 @@ pub async fn execute(
                     (protocol::codes::UPSTREAM_RATE_LIMIT, true)
                 }
                 TaskOutcome::AuthFailed => (protocol::codes::TOKEN_EXPIRED, true),
-                TaskOutcome::Unsupported | TaskOutcome::Blocked => (protocol::codes::LANE_UNUSABLE, true),
+                TaskOutcome::Unsupported | TaskOutcome::ClientUnsupported | TaskOutcome::Blocked => (protocol::codes::LANE_UNUSABLE, true),
                 TaskOutcome::ServerError | TaskOutcome::HandedOff => (protocol::codes::UPSTREAM_5XX, true),
                 // The catch-all arm of the classification above: a 4xx nothing
                 // recognised. It is the one shape that fails identically at
@@ -1302,7 +1314,7 @@ pub async fn execute(
     // Stream body chunks; parse usage from SSE where possible. The scanner holds
     // a line that a chunk boundary cut in half — without it the Responses
     // dialect's usage frame is lost and the sale settles as zero tokens.
-    let mut stream = crate::gemini::stream(resp, provider == "gemini" && lease.upstream_base.as_deref().is_none_or(|base| base.trim().is_empty()));
+    let mut stream = crate::gemini::stream(resp, matches!(provider.as_str(), "gemini" | "antigravity") && lease.upstream_base.as_deref().is_none_or(|base| base.trim().is_empty()));
     let mut seq: u64 = 0;
     let mut scan = UsageScanner::new();
     let mut budget_hit = false;
@@ -2270,10 +2282,21 @@ fn merge_usage(usage: &mut Usage, v: &serde_json::Value) {
 
 /// Unsupported subscription clients need lane withdrawal, not the 5xx ladder.
 fn gemini_setup_failure(message: &str) -> (TaskOutcome, &'static str) {
-    if message.starts_with("UNSUPPORTED_CLIENT:") {
-        (TaskOutcome::Unsupported, protocol::codes::LANE_UNUSABLE)
+    if message.contains("UNSUPPORTED_CLIENT") {
+        (TaskOutcome::ClientUnsupported, protocol::codes::LANE_UNUSABLE)
     } else {
         (TaskOutcome::ServerError, protocol::codes::UPSTREAM_5XX)
+    }
+}
+
+fn subscription_setup_failure(error: &anyhow::Error) -> (TaskOutcome, &'static str) {
+    let fallback = gemini_setup_failure(&error.to_string());
+    if fallback.0 == TaskOutcome::ClientUnsupported { return fallback; }
+    match error.downcast_ref::<crate::antigravity::ApiError>() {
+        Some(e) if e.status == 401 => (TaskOutcome::AuthFailed, protocol::codes::TOKEN_EXPIRED),
+        Some(e) if e.status == 403 => (refusal_outcome(e.status, &e.detail), protocol::codes::LANE_UNUSABLE),
+        Some(e) if e.status == 429 => (TaskOutcome::RateLimited { reset_at: None }, protocol::codes::UPSTREAM_RATE_LIMIT),
+        _ => fallback,
     }
 }
 
@@ -2399,9 +2422,24 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_setup_preserves_auth_quota_and_client_failure_categories() {
+        for (status, detail, want) in [
+            (401, "expired token", super::TaskOutcome::AuthFailed),
+            (429, "slow down", super::TaskOutcome::RateLimited { reset_at: None }),
+            (403, "UNSUPPORTED_CLIENT", super::TaskOutcome::ClientUnsupported),
+            (503, "temporarily unavailable", super::TaskOutcome::ServerError),
+        ] {
+            let error: anyhow::Error = crate::antigravity::ApiError { status, detail: detail.into() }.into();
+            assert_eq!(super::subscription_setup_failure(&error).0, want);
+        }
+    }
+
+    #[test]
     fn unsupported_gemini_client_withdraws_the_lane() {
         assert_eq!(super::gemini_setup_failure("UNSUPPORTED_CLIENT: migrate"),
-            (super::TaskOutcome::Unsupported, asale_protocol::codes::LANE_UNUSABLE));
+            (super::TaskOutcome::ClientUnsupported, asale_protocol::codes::LANE_UNUSABLE));
+        assert_eq!(super::gemini_setup_failure(r#"Antigravity loadCodeAssist returned 403: {"error":{"reason":"UNSUPPORTED_CLIENT"}}"#),
+            (super::TaskOutcome::ClientUnsupported, asale_protocol::codes::LANE_UNUSABLE));
         assert_eq!(super::gemini_setup_failure("control plane temporarily unavailable"),
             (super::TaskOutcome::ServerError, asale_protocol::codes::UPSTREAM_5XX));
     }

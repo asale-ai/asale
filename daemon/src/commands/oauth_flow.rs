@@ -145,7 +145,19 @@ pub(crate) async fn finish_provider_oauth(
         .await
         .map_err(|_| "authorization timed out".to_string())?
         .map_err(err)?;
-    let tokens = oauth::exchange(p, &code).await.map_err(err)?;
+    let mut tokens = oauth::exchange(p, &code).await.map_err(err)?;
+    if provider == "antigravity" {
+        let access = tokens["access_token"].as_str().filter(|s| !s.is_empty())
+            .ok_or_else(|| missing_access_token_error(provider, &tokens))?;
+        let info: Value = asale_client_core::http::upstream()
+            .get("https://www.googleapis.com/oauth2/v2/userinfo")
+            .bearer_auth(access).timeout(std::time::Duration::from_secs(15))
+            .send().await.map_err(err)?.error_for_status().map_err(err)?
+            .json().await.map_err(err)?;
+        let email = info["email"].as_str().filter(|s| !s.is_empty())
+            .ok_or_else(|| err("Antigravity userinfo returned no email"))?;
+        tokens["email"] = json!(email);
+    }
     let access = tokens["access_token"].as_str().unwrap_or_default();
     if access.is_empty() {
         // Provider token responses may still contain a refresh token or an ID
@@ -197,6 +209,12 @@ pub(crate) async fn finish_provider_oauth(
         );
     }
 
+    // OAuth alone does not establish Code Assist eligibility. Do this before
+    // saving any credentials so a rejected client cannot appear as connected.
+    let antigravity = if provider == "antigravity" {
+        Some(asale_client_core::antigravity::discover(&asale_client_core::http::upstream(), access).await.map_err(err)?)
+    } else { None };
+
     // Persist tokens in the secret store; the store only holds references (§3.4).
     keychain::set(&keychain::token_ref(provider, &account_id), access).map_err(err)?;
     if let Some(refresh) = tokens["refresh_token"].as_str() {
@@ -213,6 +231,15 @@ pub(crate) async fn finish_provider_oauth(
         .upsert_tool(provider, &account_id, &keychain::token_ref(provider, &account_id), &["oauth"], "oauth")
         .await
         .map_err(err)?;
+    if let Some(account) = antigravity {
+        publisher::save_antigravity_listing(&state.store, &account_id, &account).await.map_err(err)?;
+        // Only a successful eligibility check, not a token refresh, repairs a
+        // client-wide rejection.
+        let cleared = state.store.clear_lane_pause_reason(provider, &account_id, "client_unsupported").await.map_err(err)?;
+        if let Ok(mut pool) = state.pool.lock() {
+            for model in cleared { pool.resume_lane(provider, &account_id, &model); }
+        }
+    }
     if let Some(plan) = &plan {
         let _ = state.store.set_setting(&format!("plan:{provider}:{account_id}"), plan).await;
     }

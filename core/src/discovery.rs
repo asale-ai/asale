@@ -100,7 +100,7 @@ pub fn plan_window_cap(provider: Provider, plan: Option<&str>) -> u64 {
                 200_000
             }
         }
-        Provider::Gemini => {
+        Provider::Gemini | Provider::Antigravity => {
             if p.contains("ultra") {
                 3_000_000
             } else if p.contains("pro") || p.contains("advanced") {
@@ -700,6 +700,25 @@ impl ToolAdapter for GeminiAdapter {
         UpstreamSpec {
             base_url: crate::gemini::CODE_ASSIST.into(),
             default_headers: vec![("user-agent".into(), crate::gemini::user_agent("gemini-2.5-pro"))],
+        }
+    }
+}
+
+/// Antigravity uses its own OAuth client while sharing Google's refresh protocol.
+pub struct AntigravityAdapter(pub GeminiAdapter);
+
+#[async_trait]
+impl ToolAdapter for AntigravityAdapter {
+    fn provider(&self) -> Provider { Provider::Antigravity }
+
+    async fn refresh(&self, refresh_token: &str) -> anyhow::Result<RefreshedToken> {
+        self.0.refresh(refresh_token).await
+    }
+
+    fn upstream(&self) -> UpstreamSpec {
+        UpstreamSpec {
+            base_url: crate::antigravity::INFERENCE.into(),
+            default_headers: vec![("user-agent".into(), crate::antigravity::user_agent())],
         }
     }
 }

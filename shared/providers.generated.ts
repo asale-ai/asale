@@ -32,6 +32,7 @@ export const PROVIDERS: ProviderInfo[] = [
   { id: "claude_extra", label: "Claude Extra Usage", credential: "oauth", keyUrl: "", vendor: "anthropic", offeredByDefault: true },
   { id: "codex", label: "Codex / OpenAI", credential: "oauth", keyUrl: "", vendor: "openai", offeredByDefault: true },
   { id: "gemini", label: "Gemini", credential: "oauth", keyUrl: "", vendor: "google", offeredByDefault: true },
+  { id: "antigravity", label: "Antigravity", credential: "oauth", keyUrl: "", vendor: "google", offeredByDefault: true },
   { id: "kimi", label: "Kimi Code", credential: "device_flow", keyUrl: "", vendor: "moonshotai", offeredByDefault: true },
   { id: "kimi_api", label: "Moonshot API", credential: "api_key", keyUrl: "https://platform.moonshot.cn/console/api-keys", vendor: "moonshotai", offeredByDefault: true },
   { id: "xai", label: "Grok CLI", credential: "device_flow", keyUrl: "", vendor: "x-ai", offeredByDefault: true },

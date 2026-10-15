@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 
 /// The tools a buy switch can be turned on for.
 pub const TOOLS: &[&str] =
-    &["claude", "claude-desktop", "codex", "gemini", "openclaw", "hermes", "opencode", "dsh"];
+    &["claude", "claude-desktop", "codex", "gemini", "antigravity", "openclaw", "hermes", "opencode", "dsh"];
 
 /// Display name for a tool id. Lowercase where the tool's own name is — asale
 /// is not the one who decides how somebody else's product is spelled.
@@ -51,6 +51,7 @@ pub fn label(tool: &str) -> &'static str {
         "claude-desktop" => "Claude Desktop",
         "codex" => "Codex",
         "gemini" => "Gemini CLI",
+        "antigravity" => "Antigravity CLI",
         "openclaw" => "OpenClaw",
         "hermes" => "Hermes",
         "opencode" => "opencode",
@@ -292,6 +293,7 @@ pub fn tool_dir(tool: &str) -> PathBuf {
         "claude-desktop" => claude_desktop_dirs().1,
         "codex" => home().join(".codex"),
         "gemini" => home().join(".gemini"),
+        "antigravity" => home().join(".gemini/antigravity-cli"),
         "openclaw" => home().join(".openclaw"),
         "hermes" => hermes_home(),
         "opencode" => opencode_config_dir(),
@@ -436,6 +438,7 @@ pub fn config_paths(tool: &str) -> Vec<PathBuf> {
         // `.env` carries the endpoint and key; `settings.json` carries the one
         // thing the CLI will not start without — see `apply_gemini`.
         "gemini" => vec![d.join(".env"), d.join("settings.json")],
+        "antigravity" => antigravity_config_paths(),
         "openclaw" => vec![d.join("openclaw.json")],
         "hermes" => vec![d.join("config.yaml")],
         "opencode" => vec![opencode_config_file()],
@@ -460,6 +463,11 @@ pub fn installed(tool: &str) -> bool {
     if tool == "claude-desktop" {
         return claude_desktop_installed();
     }
+    if tool == "antigravity" {
+        // Shell startup files exist even when the CLI has never been installed.
+        return binary_on_path("agy") || home().join(".local/bin/agy").is_file()
+            || home().join("AppData/Local/agy/bin/agy.exe").is_file();
+    }
     if tool_dir(tool).is_dir() || config_paths(tool).iter().any(|p| p.exists()) {
         return true;
     }
@@ -467,6 +475,7 @@ pub fn installed(tool: &str) -> bool {
         "claude" => "claude",
         "codex" => "codex",
         "gemini" => "gemini",
+        "antigravity" => "agy",
         "openclaw" => "openclaw",
         "hermes" => "hermes",
         "opencode" => "opencode",
@@ -531,6 +540,10 @@ pub fn current_base_url(tool: &str) -> Option<String> {
         "dsh" => {
             let raw = read_raw(&primary_config_path(tool))?;
             yaml_path_get(&raw, &[DSH_SECTION, "providers", DSH_ROUTE], "baseURL")
+        }
+        "antigravity" => {
+            let raw = read_raw(&tool_dir(tool).join("asale-buy.json"))?;
+            serde_json::from_str::<Value>(&raw).ok()?.get("base_url")?.as_str().map(str::to_owned)
         }
         "gemini" => dotenv_get(&read_raw(&primary_config_path(tool)).unwrap_or_default(), GEMINI_BASE_URL),
         "codex" => {
@@ -629,7 +642,7 @@ pub fn proxy_base_for(tool: &str) -> String {
         "openclaw" | "hermes" | "opencode" | "dsh" => format!("{base}/{tool}/v1"),
         // The app appends `/v1/models` and `/v1/messages` to the gateway base
         // URL itself, so this one stops at the tool prefix.
-        "claude-desktop" => format!("{base}/{tool}"),
+        "claude-desktop" | "antigravity" => format!("{base}/{tool}"),
         _ => base,
     }
 }
@@ -663,6 +676,13 @@ pub fn points_at_proxy(tool: &str) -> bool {
         let applied = read_json(&paths[2]).get("appliedId").and_then(Value::as_str)
             == Some(CD_PROFILE_ID);
         return endpoint_is_ours && in_3p && applied;
+    }
+    if tool == "antigravity" {
+        let paths = antigravity_config_paths();
+        return endpoint_is_ours
+            && read_json(&paths[1]).get("modelProvider").and_then(Value::as_str) == Some("gemini")
+            && (cfg!(windows) || paths[2].is_file())
+            && paths[if cfg!(windows) { 2 } else { 3 }..].iter().all(|p| read_raw(p).is_some_and(|raw| raw.contains(AGY_BLOCK_START)));
     }
     endpoint_is_ours
 }
@@ -831,7 +851,7 @@ pub fn apply(tool: &str, base_url: &str, token: &str, models: &[String]) -> Resu
             let backups = tool_dir(tool).join("backups");
             if std::fs::create_dir_all(&backups).is_ok() {
                 let name = Path::new(&f.path).file_name().and_then(|n| n.to_str()).unwrap_or("config");
-                let _ = std::fs::write(backups.join(format!("{name}.asale-pre-buy")), raw);
+                let _ = write_atomic(&backups.join(format!("{name}.asale-pre-buy")), raw);
             }
         }
     }
@@ -841,6 +861,17 @@ pub fn apply(tool: &str, base_url: &str, token: &str, models: &[String]) -> Resu
         "claude-desktop" => apply_claude_desktop(token, models)?,
         "codex" => apply_codex(base_url, token, models)?,
         "gemini" => apply_gemini(base_url, token, models)?,
+        "antigravity" => {
+            if let Err(error) = apply_antigravity(token, models) {
+                // A failed profile write must not leave API-key mode half enabled.
+                for f in &backup.files {
+                    let path = Path::new(&f.path);
+                    if let Some(raw) = &f.raw { let _ = write_atomic(path, raw); }
+                    else { let _ = std::fs::remove_file(path); }
+                }
+                return Err(error);
+            }
+        },
         "openclaw" => apply_openclaw(token, models)?,
         "hermes" => apply_hermes(token, models)?,
         "opencode" => apply_opencode(token, models)?,
@@ -860,6 +891,11 @@ pub fn restore(tool: &str, backup: &Backup) -> Result<()> {
     anyhow::ensure!(known(tool), "unknown tool: {tool}");
     for f in &backup.files {
         let path = PathBuf::from(&f.path);
+        if tool == "antigravity" && path != tool_dir(tool).join("asale-buy.json")
+            && path != tool_dir(tool).join("asale-env.sh") {
+            restore_antigravity_user_file(&path, f.raw.as_deref())?;
+            continue;
+        }
         match &f.raw {
             Some(raw) => write_atomic(&path, raw)?,
             None => strip_ours(tool, &path)?,
@@ -1942,6 +1978,124 @@ fn yaml_unescape(v: &str) -> String {
 /// "in effect" against a CLI that could not make a single call.
 const GEMINI_AUTH_TYPE: &str = "gemini-api-key";
 
+// Antigravity CLI reads only exported environment variables, never .env files.
+// https://antigravity.google/docs/cli/install/
+const AGY_BLOCK_START: &str = "# >>> asale Antigravity >>>";
+const AGY_BLOCK_END: &str = "# <<< asale Antigravity <<<";
+
+fn antigravity_config_paths() -> Vec<PathBuf> {
+    let d = tool_dir("antigravity");
+    let mut paths = vec![d.join("asale-buy.json"), d.join("settings.json")];
+    if cfg!(windows) {
+        paths.extend([
+            home().join("Documents/PowerShell/Microsoft.PowerShell_profile.ps1"),
+            home().join("Documents/WindowsPowerShell/Microsoft.PowerShell_profile.ps1"),
+        ]);
+    } else {
+        paths.push(d.join("asale-env.sh"));
+        // Creating .bash_profile would suppress an existing .profile at login.
+        let login = [".bash_profile", ".bash_login", ".profile"].into_iter()
+            .map(|f| home().join(f)).find(|p| p.exists()).unwrap_or_else(|| home().join(".profile"));
+        paths.extend([home().join(".zshrc"), home().join(".bashrc"), login, home().join(".config/fish/config.fish")]);
+    }
+    paths
+}
+
+fn strip_agy_block(raw: &str) -> String {
+    let mut out = raw.to_owned();
+    while let Some(start) = out.find(AGY_BLOCK_START) {
+        let Some(end) = out[start..].find(AGY_BLOCK_END) else { break };
+        let mut end = start + end + AGY_BLOCK_END.len();
+        if out.as_bytes().get(end) == Some(&b'\n') { end += 1; }
+        out.replace_range(start..end, "");
+    }
+    out
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+// Restore only owned settings so terminal changes made while buying survive.
+fn restore_antigravity_user_file(path: &Path, original: Option<&str>) -> Result<()> {
+    let Some(raw) = read_raw(path) else { return Ok(()) };
+    let restored = if path == tool_dir("antigravity").join("settings.json") {
+        let Ok(mut current) = serde_json::from_str::<Value>(&raw) else { return Ok(()) };
+        if current["modelProvider"] != "gemini" { return Ok(()) }
+        let before = original.and_then(|s| serde_json::from_str::<Value>(s).ok());
+        if let Some(obj) = current.as_object_mut() {
+            match before.as_ref().and_then(|v| v.get("modelProvider")) {
+                Some(value) => { obj.insert("modelProvider".into(), value.clone()); }
+                None => { obj.remove("modelProvider"); }
+            }
+        }
+        if current.as_object().is_some_and(|o| o.is_empty()) && original.is_none() { None }
+        else { Some(serde_json::to_string_pretty(&current)?) }
+    } else {
+        let stripped = strip_agy_block(&raw);
+        // Preserve an originally empty file, but remove one we created.
+        if stripped.is_empty() && original.is_none() { None } else { Some(stripped) }
+    };
+    match restored {
+        Some(value) => write_atomic(path, &value),
+        None => { std::fs::remove_file(path)?; Ok(()) }
+    }
+}
+
+fn apply_antigravity(token: &str, models: &[String]) -> Result<()> {
+    let paths = antigravity_config_paths();
+    let config = json!({"base_url":proxy_base_for("antigravity"), "api_key":token, "model":models.first()});
+    write_atomic(&paths[0], &serde_json::to_string_pretty(&config)?)?;
+    anyhow::ensure!(json_is_editable(&paths[1]), "Antigravity settings.json is invalid; repair it before enabling buying");
+    let mut settings = read_json(&paths[1]);
+    settings["modelProvider"] = json!("gemini");
+    write_atomic(&paths[1], &serde_json::to_string_pretty(&settings)?)?;
+    let config_path = paths[0].to_string_lossy();
+    if !cfg!(windows) {
+        let env = format!("export GEMINI_API_KEY={}\nexport GOOGLE_GEMINI_BASE_URL={}\nASALE_AGY_MODEL={}\n",
+            shell_quote(token), shell_quote(&proxy_base_for("antigravity")), shell_quote(models.first().map(String::as_str).unwrap_or("")));
+        write_atomic(&paths[2], &env)?;
+    }
+    for path in &paths[if cfg!(windows) { 2 } else { 3 }..] {
+        let raw = read_raw(path).unwrap_or_default();
+        let original = strip_agy_block(&raw);
+        let body = if cfg!(windows) {
+            // Read the key at invocation, so rotation does not require another shell restart.
+            format!(r#"function global:agy {{
+    $asaleConfigPath = '{}'
+    if (!(Test-Path -LiteralPath $asaleConfigPath)) {{ & (Get-Command agy -CommandType Application).Source @args; return }}
+    $asaleConfig = Get-Content -Raw -LiteralPath $asaleConfigPath | ConvertFrom-Json
+    $asaleOldKey = $env:GEMINI_API_KEY
+    $asaleOldBase = $env:GOOGLE_GEMINI_BASE_URL
+    try {{
+        $env:GEMINI_API_KEY = $asaleConfig.api_key
+        $env:GOOGLE_GEMINI_BASE_URL = $asaleConfig.base_url
+        $asaleModelArgs = @()
+        if ($asaleConfig.model) {{ $asaleModelArgs = @('--model', $asaleConfig.model) }}
+        & (Get-Command agy -CommandType Application).Source @asaleModelArgs @args
+    }} finally {{
+        $env:GEMINI_API_KEY = $asaleOldKey
+        $env:GOOGLE_GEMINI_BASE_URL = $asaleOldBase
+    }}
+}}
+"#, config_path.replace('\'', "''"))
+        } else {
+            let env_path = shell_quote(&paths[2].to_string_lossy());
+            let invocation = format!("if [ -f {env_path} ]; then . {env_path}; fi; if [ -n \"${{ASALE_AGY_MODEL:-}}\" ]; then exec agy --model \"$ASALE_AGY_MODEL\" \"$@\"; else exec agy \"$@\"; fi");
+            if path.extension().is_some_and(|e| e == "fish") {
+                format!("function agy\n    sh -c {} sh $argv\nend\n", shell_quote(&invocation))
+            } else {
+                // A child shell scopes environment changes to this CLI. No key
+                // leaks into unrelated Gemini tools in the parent terminal.
+                format!("agy() {{ sh -c {} sh \"$@\"; }}\n", shell_quote(&invocation))
+            }
+        };
+        let sep = if original.is_empty() || original.ends_with('\n') { "" } else { "\n" };
+        write_atomic(path, &format!("{original}{sep}{AGY_BLOCK_START}\n{body}{AGY_BLOCK_END}\n"))?;
+    }
+    Ok(())
+}
+
 fn apply_gemini(base_url: &str, token: &str, models: &[String]) -> Result<()> {
     let paths = config_paths("gemini");
     let env_path = &paths[0];
@@ -2040,6 +2194,12 @@ fn strip_ours(tool: &str, path: &Path) -> Result<()> {
         ("opencode", _) => strip_opencode(&raw),
         ("dsh", ".credentials.yaml") => strip_dsh_credentials(&raw),
         ("dsh", _) => strip_dsh_settings(&raw),
+        ("antigravity", "settings.json") => strip_json_keys(&raw, &["modelProvider"]),
+        ("antigravity", "asale-buy.json" | "asale-env.sh") => None,
+        ("antigravity", _) => {
+            let stripped = strip_agy_block(&raw);
+            (!stripped.trim().is_empty()).then_some(stripped)
+        }
         ("gemini", "settings.json") => strip_gemini_settings(&raw),
         ("gemini", _) => strip_dotenv(&raw, &[GEMINI_BASE_URL, GEMINI_API_KEY, GEMINI_MODEL]),
         _ => Some(raw),
@@ -2170,6 +2330,85 @@ fn dotenv_set(raw: &str, pairs: &[(&str, &str)]) -> String {
 mod tests {
     use super::*;
     use crate::codex_catalog::HOME_LOCK;
+
+    #[test]
+    fn antigravity_restore_keeps_later_user_edits_and_bash_login_profile() {
+        with_temp_home(|| {
+            let settings = tool_dir("antigravity").join("settings.json");
+            write_atomic(&settings, r#"{"modelProvider":"original","theme":"dark"}"#).unwrap();
+            write_atomic(&home().join(".profile"), "export USER_SETTING=original\n").unwrap();
+            let backup = apply("antigravity", "unused", "key", &[]).unwrap();
+            assert!(!home().join(".bash_profile").exists());
+            let profile = home().join(".profile");
+            write_atomic(&profile, &format!("{}export LATER_EDIT=kept\n", read_raw(&profile).unwrap())).unwrap();
+            let mut current = read_json(&settings);
+            current["theme"] = json!("light");
+            write_atomic(&settings, &current.to_string()).unwrap();
+            restore("antigravity", &backup).unwrap();
+            assert_eq!(read_raw(&profile).unwrap(), "export USER_SETTING=original\nexport LATER_EDIT=kept\n");
+            assert_eq!(read_json(&settings)["modelProvider"], "original");
+            assert_eq!(read_json(&settings)["theme"], "light");
+        });
+    }
+
+    #[test]
+    fn antigravity_bad_settings_roll_back_partial_configuration() {
+        with_temp_home(|| {
+            let settings = tool_dir("antigravity").join("settings.json");
+            write_atomic(&settings, "{invalid").unwrap();
+            assert!(apply("antigravity", "unused", "key", &[]).is_err());
+            assert_eq!(read_raw(&settings).unwrap(), "{invalid");
+            assert!(!tool_dir("antigravity").join("asale-buy.json").exists());
+            assert!(!home().join(".zshrc").exists());
+        });
+    }
+
+    #[test]
+    fn antigravity_buy_config_is_scoped_and_restores_the_users_settings() {
+        with_temp_home(|| {
+            let paths = antigravity_config_paths();
+            write_atomic(&paths[1], r#"{"modelProvider":"original","theme":"dark"}"#).unwrap();
+            let profile = &paths[if cfg!(windows) { 2 } else { 3 }];
+            write_atomic(profile, "# user profile\n").unwrap();
+            let backup = apply("antigravity", "unused", "test-key", &["gemini-3.5-flash".into()]).unwrap();
+            assert_eq!(read_json(&paths[1])["modelProvider"], "gemini");
+            assert_eq!(read_json(&paths[1])["theme"], "dark");
+            assert!(points_at_proxy("antigravity"));
+            assert_eq!(for_request_path("/antigravity/v1beta/models/m:generateContent"), Some("antigravity"));
+            assert_eq!(strip_tool_prefix("/antigravity/v1beta/models/m:generateContent"), "/v1beta/models/m:generateContent");
+            apply("antigravity", "unused", "rotated", &[]).unwrap();
+            assert_eq!(read_raw(profile).unwrap().matches(AGY_BLOCK_START).count(), 1);
+            assert!(read_json(&paths[0])["model"].is_null());
+            restore("antigravity", &backup).unwrap();
+            assert_eq!(read_raw(profile).unwrap(), "# user profile\n");
+            assert_eq!(read_json(&paths[1])["modelProvider"], "original");
+            assert!(!paths[0].exists());
+            assert!(!points_at_proxy("antigravity"));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_shell_wrapper_exports_credentials_only_to_the_cli() {
+        with_temp_home(|| {
+            use std::os::unix::fs::PermissionsExt;
+            let bin_dir = home().join("bin");
+            let stub = bin_dir.join("agy");
+            write_atomic(&stub, "#!/bin/sh\nprintf '%s\\n' \"$GEMINI_API_KEY\" \"$GOOGLE_GEMINI_BASE_URL\" \"$@\"\n").unwrap();
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let key = "test'key $(must-not-execute)";
+            apply("antigravity", "unused", key, &["gemini-3.5-flash".into()]).unwrap();
+            let profile = home().join(".bashrc");
+            let output = std::process::Command::new("sh")
+                .args(["-c", ". \"$1\"; agy --print \"hello world\"; printf 'parent:%s\\n' \"${GEMINI_API_KEY-unset}\"", "sh"])
+                .arg(profile).env_remove("GEMINI_API_KEY")
+                .env("PATH", format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap_or_default()))
+                .output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            assert_eq!(stdout.lines().collect::<Vec<_>>(), vec![key, &proxy_base_for("antigravity"), "--model", "gemini-3.5-flash", "--print", "hello world", "parent:unset"]);
+        });
+    }
 
     fn with_temp_home<T>(f: impl FnOnce() -> T) -> T {
         let _g = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());

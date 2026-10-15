@@ -212,7 +212,7 @@ fn offerable(served: Vec<String>, chat_only: bool) -> Vec<String> {
 fn sellable_models(catalog: &Option<SellableCatalog>, provider: &str, entitled: Option<&[String]>) -> Vec<String> {
     // A metered Moonshot key's own listing is authoritative. A catalog or
     // fallback list cannot establish access to a model on that deployment.
-    if provider == "kimi_api" && entitled.is_none() {
+    if matches!(provider, "kimi_api" | "antigravity") && entitled.is_none() {
         return Vec::new();
     }
     let listed: Vec<String> = match catalog {
@@ -230,7 +230,7 @@ fn sellable_models(catalog: &Option<SellableCatalog>, provider: &str, entitled: 
         // credential family is `qwen`. What stops this widening into models the
         // key cannot serve is the same thing that stops it for a custom
         // endpoint: `entitled` is the vendor's own `/models`.
-        Some(c) if Provider::from_str_opt(provider).is_some_and(asale_protocol::providers::resells_other_vendors) => {
+        Some(c) if provider != "antigravity" && Provider::from_str_opt(provider).is_some_and(asale_protocol::providers::resells_other_vendors) => {
             let mut all: Vec<String> = c.by_provider.values().flatten().cloned().collect();
             all.sort();
             all.dedup();
@@ -373,6 +373,58 @@ async fn refresh_codex_entitlement(store: &LocalStore, tool: &asale_client_core:
         // suppresses the next attempt for a minute, exactly as before.
         Err(e) => tracing::warn!(account = %tool.account_id, "codex entitlement lookup failed: {e}"),
     }
+}
+
+/// Raw entitlement cache: index against the current market on each publication.
+/// This keeps newly priced models available without another vendor round trip.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AntigravityListing {
+    fetched_at: i64,
+    account: asale_client_core::antigravity::Account,
+}
+
+pub async fn save_antigravity_listing(store: &LocalStore, account_id: &str, account: &asale_client_core::antigravity::Account) -> anyhow::Result<()> {
+    let listing = AntigravityListing { fetched_at: now_secs(), account: account.clone() };
+    store.set_setting(&format!("antigravity_models:{account_id}"), &serde_json::to_string(&listing)?).await?;
+    Ok(())
+}
+
+async fn record_antigravity_refresh(store: &LocalStore, account_id: &str, result: anyhow::Result<asale_client_core::antigravity::Account>) {
+    match result {
+        Ok(account) => { let _ = save_antigravity_listing(store, account_id, &account).await; }
+        Err(error) => {
+            // Transient outages can retain the last known catalog; an explicit
+            // client rejection cannot. Otherwise old supply stays advertised.
+            if error.to_string().contains("UNSUPPORTED_CLIENT") {
+                let empty = asale_client_core::antigravity::Account { project: String::new(), models: Vec::new() };
+                let _ = save_antigravity_listing(store, account_id, &empty).await;
+            }
+            tracing::warn!(account = %account_id, "Antigravity entitlement refresh failed: {error}");
+        }
+    }
+}
+
+async fn antigravity_listing(store: &LocalStore, tool: &asale_client_core::store::ToolRow) -> CustomListing {
+    let cached: Option<AntigravityListing> = store.get_setting(&format!("antigravity_models:{}", tool.account_id)).await.ok().flatten()
+        .and_then(|s| serde_json::from_str(&s).ok());
+    let now = now_secs();
+    let retry_key = format!("antigravity_models_retry:{}", tool.account_id);
+    let retry = store.get_setting(&retry_key).await.ok().flatten().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+    if cached.as_ref().is_none_or(|c| now - c.fetched_at >= 3600) && now >= retry {
+        // A marker is persisted before spawning to keep reloads from flooding Google.
+        let _ = store.set_setting(&retry_key, &(now + 60).to_string()).await;
+        let bg = store.clone();
+        let row = tool.clone();
+        tokio::spawn(async move {
+            let Some(token) = keychain::get(&row.keychain_ref).ok().flatten() else { return };
+            let result = asale_client_core::antigravity::discover(&asale_client_core::http::upstream(), &token).await;
+            record_antigravity_refresh(&bg, &row.account_id, result).await;
+        });
+    }
+    let Some(cached) = cached else { return CustomListing::default() };
+    let catalog = load_catalog(store).await;
+    let tradable: Vec<String> = catalog.as_ref().map(|c| c.by_provider.get("antigravity").cloned().unwrap_or_default()).unwrap_or_default();
+    CustomListing { fetched_at: cached.fetched_at, aliases: index_custom_models(&cached.account.models, &tradable) }
 }
 
 /// The provider id a custom endpoint account is stored under.
@@ -973,6 +1025,9 @@ pub fn adapter_for(provider: &str) -> Option<Box<dyn ToolAdapter>> {
             crate::oauth::claude_client_id(),
         ))),
         "codex" => Some(Box::new(discovery::CodexAdapter::new(crate::oauth::codex_client_id()))),
+        "antigravity" => Some(Box::new(discovery::AntigravityAdapter(discovery::GeminiAdapter::new(
+            crate::oauth::antigravity_client_id(), crate::oauth::antigravity_client_secret(),
+        )))),
         "gemini" => Some(Box::new(discovery::GeminiAdapter::new(
             crate::oauth::gemini_client_id(),
             crate::oauth::gemini_client_secret(),
@@ -1509,6 +1564,10 @@ impl TokenProvider for PoolTokens {
                     let d = "authentication failed (401/403)";
                     (pool.on_error(provider, account_id, model, UpstreamErrorKind::AuthFailed, d, now), d.to_string())
                 }
+                TaskOutcome::ClientUnsupported => {
+                    let d = "UNSUPPORTED_CLIENT: upstream no longer supports this OAuth client; migrate the account";
+                    (pool.on_error(provider, account_id, model, UpstreamErrorKind::ClientUnsupported, d, now), d.to_string())
+                }
                 TaskOutcome::Unsupported => {
                     let d = "upstream does not serve this model";
                     (pool.on_error(provider, account_id, model, UpstreamErrorKind::Unsupported, d, now), d.to_string())
@@ -1536,7 +1595,7 @@ impl TokenProvider for PoolTokens {
             // Read back rather than returned from `on_error`: `Blocked` widens
             // the same way once its ladder runs out, and asking the pool what is
             // actually paused now covers both without either arm knowing.
-            if matches!(out.0, Some(PauseReason::Auth | PauseReason::Blocked)) {
+            if matches!(out.0, Some(PauseReason::Auth | PauseReason::Blocked | PauseReason::ClientUnsupported)) {
                 let reason = out.0.map(|r| r.as_str());
                 touched.extend(
                     pool.lane_views(now)
@@ -1698,6 +1757,7 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
         // account has one; the aliases ride onto the account below so the
         // executor can put the endpoint's own spelling back into the body.
         let listing = match tool.provider.as_str() {
+            "antigravity" => Some(antigravity_listing(store, tool).await),
             CUSTOM_PROVIDER => Some(custom_endpoint_models(store, tool).await),
             // Alibaba serves a different set from the one OpenRouter prices
             // under `qwen/*`, so its own `/models` decides — see
@@ -2250,6 +2310,8 @@ pub fn account_setting_keys(provider: &str, account_id: &str) -> Vec<String> {
         upstream_acct_key(provider, account_id),
         crate::commands::usage::quota_snapshot_key(provider, account_id),
         crate::session::session_key(account_id),
+        format!("antigravity_models:{account_id}"),
+        format!("antigravity_models_retry:{account_id}"),
         codex_entitlement_key(account_id),
         codex_entitlement_retry_key(account_id),
         custom_models_key(provider, account_id),
@@ -2263,6 +2325,35 @@ fn now_secs() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn antigravity_rejection_withdraws_cached_supply_but_timeout_does_not() {
+        let store = LocalStore::open_memory().await.unwrap();
+        let account = asale_client_core::antigravity::Account { project: "p".into(), models: vec!["gemini-3.5-flash".into()] };
+        save_antigravity_listing(&store, "test", &account).await.unwrap();
+        record_antigravity_refresh(&store, "test", Err(anyhow::anyhow!("connection timed out"))).await;
+        let raw = store.get_setting("antigravity_models:test").await.unwrap().unwrap();
+        assert_eq!(serde_json::from_str::<AntigravityListing>(&raw).unwrap().account.models.len(), 1);
+        record_antigravity_refresh(&store, "test", Err(anyhow::anyhow!("UNSUPPORTED_CLIENT: migrate"))).await;
+        let raw = store.get_setting("antigravity_models:test").await.unwrap().unwrap();
+        assert!(serde_json::from_str::<AntigravityListing>(&raw).unwrap().account.models.is_empty());
+    }
+
+    #[test]
+    fn antigravity_offers_only_discovered_and_priced_text_models() {
+        let catalog = Some(SellableCatalog {
+            fetched_at: 1,
+            by_provider: std::collections::BTreeMap::from([
+                ("antigravity".into(), vec!["gemini-3.5-flash".into(), "claude-sonnet-4-5".into()]),
+                ("openrouter".into(), vec!["unrelated-image-model".into()]),
+            ]),
+            ..Default::default()
+        });
+        assert!(sellable_models(&catalog, "antigravity", None).is_empty());
+        assert!(sellable_models(&catalog, "antigravity", Some(&[])).is_empty());
+        let discovered = vec!["gemini-3.5-flash".into(), "unrelated-image-model".into()];
+        assert_eq!(sellable_models(&catalog, "antigravity", Some(&discovered)), vec!["gemini-3.5-flash"]);
+    }
+
     #[test]
     fn moonshot_api_requires_live_entitlements_and_drops_retired_models() {
         let granted = vec!["kimi-k2.6".to_string(), "kimi-k2-thinking".to_string()];
@@ -2572,9 +2663,9 @@ mod tests {
                 .filter(|p| *p != Provider::Openrouter)
                 .collect()
         };
-        assert_eq!(own("anthropic"), [Provider::Claude, Provider::ClaudeWork, Provider::ClaudeExtra]);
+        assert_eq!(own("anthropic"), [Provider::Claude, Provider::ClaudeWork, Provider::ClaudeExtra, Provider::Antigravity]);
         assert_eq!(own("openai"), [Provider::Codex]);
-        assert_eq!(own("google"), [Provider::Gemini]);
+        assert_eq!(own("google"), [Provider::Gemini, Provider::Antigravity]);
         // Both flavours of a vendor serve its catalog rows — the subscription
         // and the metered platform key differ only in which host they reach.
         assert_eq!(own("moonshotai"), [Provider::Kimi, Provider::KimiApi]);

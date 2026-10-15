@@ -60,6 +60,8 @@ pub enum Provider {
     ClaudeExtra,
     Codex,
     Gemini,
+    /// Antigravity OAuth, isolated from legacy Gemini CLI credentials.
+    Antigravity,
     Kimi,
     KimiApi,
     Xai,
@@ -132,12 +134,13 @@ impl Provider {
         self.upstream_family() == Provider::Claude
     }
 
-    pub const ALL: [Provider; 13] = [
+    pub const ALL: [Provider; 14] = [
         Provider::Claude,
         Provider::ClaudeWork,
         Provider::ClaudeExtra,
         Provider::Codex,
         Provider::Gemini,
+        Provider::Antigravity,
         Provider::Kimi,
         Provider::KimiApi,
         Provider::Xai,
@@ -602,10 +605,11 @@ impl Vendor {
                 Provider::Claude,
                 Provider::ClaudeWork,
                 Provider::ClaudeExtra,
+                Provider::Antigravity,
                 Provider::Openrouter,
             ],
             Vendor::Openai => &[Provider::Codex, Provider::Openrouter],
-            Vendor::Google => &[Provider::Gemini, Provider::Openrouter],
+            Vendor::Google => &[Provider::Gemini, Provider::Antigravity, Provider::Openrouter],
             Vendor::Moonshotai => &[Provider::Kimi, Provider::KimiApi, Provider::Openrouter],
             Vendor::Qwen => &[Provider::Qwen, Provider::Openrouter],
             Vendor::Deepseek => &[Provider::Deepseek, Provider::Openrouter],
@@ -875,11 +879,12 @@ mod tests {
                 Provider::Claude,
                 Provider::ClaudeWork,
                 Provider::ClaudeExtra,
+                Provider::Antigravity,
                 Provider::Openrouter
             ]
         );
         assert_eq!(Vendor::Openai.providers(), &[Provider::Codex, Provider::Openrouter]);
-        assert_eq!(Vendor::Google.providers(), &[Provider::Gemini, Provider::Openrouter]);
+        assert_eq!(Vendor::Google.providers(), &[Provider::Gemini, Provider::Antigravity, Provider::Openrouter]);
         // Both credential kinds serve the same catalog rows; they differ in
         // which host the gateway sends the request to, not in what they can do.
         assert_eq!(

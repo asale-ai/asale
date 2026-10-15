@@ -145,6 +145,8 @@ pub enum PauseReason {
     /// One retry a day costs one failed request and is the only thing that would
     /// ever find out.
     Unsupported,
+    /// The whole OAuth client is rejected; token refresh cannot repair it.
+    ClientUnsupported,
 }
 
 impl PauseReason {
@@ -158,6 +160,7 @@ impl PauseReason {
             PauseReason::Manual => "manual",
             PauseReason::Untradable => "untradable",
             PauseReason::Unsupported => "unsupported",
+            PauseReason::ClientUnsupported => "client_unsupported",
         }
     }
 
@@ -171,6 +174,7 @@ impl PauseReason {
             "manual" => PauseReason::Manual,
             "untradable" => PauseReason::Untradable,
             "unsupported" => PauseReason::Unsupported,
+            "client_unsupported" => PauseReason::ClientUnsupported,
             _ => return None,
         })
     }
@@ -181,7 +185,7 @@ impl PauseReason {
     pub fn requires_user(self) -> bool {
         matches!(
             self,
-            PauseReason::Auth | PauseReason::Blocked | PauseReason::Breaker | PauseReason::Manual
+            PauseReason::Auth | PauseReason::Blocked | PauseReason::Breaker | PauseReason::Manual | PauseReason::ClientUnsupported
         )
     }
 }
@@ -347,6 +351,8 @@ pub enum UpstreamErrorKind {
     /// failure of the lane so much as proof it should never have been offered:
     /// see [`PauseReason::Unsupported`].
     Unsupported,
+    /// The whole OAuth client is rejected; token refresh cannot repair it.
+    ClientUnsupported,
 }
 
 /// Selection strategy (spec §4).
@@ -551,7 +557,7 @@ impl AccountRuntime {
 
     /// UI/state label: available | cooldown | expired | exhausted.
     pub fn status(&self, now: i64) -> &'static str {
-        if self.auth_failed || self.expires_at.is_some_and(|e| e <= now) {
+        if self.auth_failed || self.lanes.values().any(|l| l.paused == Some(PauseReason::ClientUnsupported)) || self.expires_at.is_some_and(|e| e <= now) {
             "expired"
         } else if self.cooldown_until.is_some_and(|c| c > now) {
             "cooldown"
@@ -1106,6 +1112,15 @@ impl AccountPool {
                 // other models are unaffected and must keep selling.
                 Some(PauseReason::Unsupported)
             }
+            UpstreamErrorKind::ClientUnsupported => {
+                a.lanes.entry(model.to_string()).or_default();
+                for lane in a.lanes.values_mut() {
+                    lane.paused = Some(PauseReason::ClientUnsupported);
+                    lane.resume_at = 0;
+                    lane.last_error = detail.to_string();
+                }
+                Some(PauseReason::ClientUnsupported)
+            }
             UpstreamErrorKind::AuthFailed => {
                 a.auth_failed = true;
                 // Credentials are the account's, so every lane of it is out.
@@ -1164,7 +1179,7 @@ impl AccountPool {
             .lanes
             .get(model)
             .and_then(|l| l.paused)
-            .filter(|r| matches!(r, PauseReason::Auth | PauseReason::Blocked));
+            .filter(|r| matches!(r, PauseReason::Auth | PauseReason::Blocked | PauseReason::ClientUnsupported));
         a.cooldown_until = None;
         let mut cleared = Vec::new();
         if let Some(wide) = wide {
@@ -2172,6 +2187,25 @@ mod tests {
         assert!(!view.requires_user);
         // The daemon schedules its wake-up from this.
         assert_eq!(p.next_auto_resume(now), Some(reset));
+    }
+
+    #[test]
+    fn unsupported_client_pauses_the_account_until_explicit_recovery() {
+        let now = 1000;
+        let mut a = sellable("a");
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        p.set_accounts(vec![a.clone()]);
+        p.on_error("claude", "a", OPUS, UpstreamErrorKind::ClientUnsupported, "UNSUPPORTED_CLIENT", now);
+        assert!(p.pick_for_sale("claude", HAIKU, None, now + 90000).is_none());
+        assert!(p.next_auto_resume(now).is_none());
+        assert!(p.lane_views(now).iter().all(|v| v.paused_reason.as_deref() == Some("client_unsupported")));
+        // Refreshing an access token proves no change to client eligibility.
+        p.clear_auth_failure("claude", "a");
+        a.expires_at = Some(now + 200000);
+        p.set_accounts(vec![a]);
+        assert!(p.pick_for_sale("claude", HAIKU, None, now).is_none());
+        p.resume_lane("claude", "a", OPUS);
+        assert!(p.pick_for_sale("claude", HAIKU, None, now).is_some());
     }
 
     #[test]

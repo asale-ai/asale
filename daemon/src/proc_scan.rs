@@ -83,6 +83,7 @@ const SPECS: &[Spec] = &[
     },
     Spec { tool: "codex", bin: "codex", markers: &["@openai/codex"] },
     Spec { tool: "gemini", bin: "gemini", markers: &["@google/gemini-cli"] },
+    Spec { tool: "antigravity", bin: "agy", markers: &[] },
     // No markers for these two: their names are ordinary words (React Native
     // ships a `hermes` engine binary), so only an executable actually *called*
     // `openclaw`/`hermes` counts. A missed instance costs a line on screen; a

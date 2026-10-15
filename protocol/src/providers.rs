@@ -348,6 +348,28 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         offered_by_default: true,
     },
     ProviderSpec {
+        provider: Provider::Antigravity,
+        id: "antigravity",
+        label: "Antigravity",
+        vendor: Some(Vendor::Google),
+        credential: Credential::OAuth,
+        wire: Wire::Gemini,
+        api_base: "https://daily-cloudcode-pa.googleapis.com",
+        // The publisher wraps the native Gemini body with its account's project.
+        chat_url: "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent",
+        user_agent: "antigravity/hub/2.23.0 darwin/arm64",
+        extra_headers: &[],
+        verify_hosts: &[],
+        verify_path: "/models",
+        window_cap: WindowCap::Plan,
+        quota: QuotaSource::None,
+        model_prefix: None,
+        // Entitlement discovery is required before any of these can be sold.
+        fallback_models: &["gemini-2.5-pro", "gemini-2.5-flash"],
+        native_models: None,
+        offered_by_default: true,
+    },
+    ProviderSpec {
         provider: Provider::Kimi,
         id: "kimi",
         label: "Kimi Code",
@@ -609,7 +631,7 @@ pub fn spec(p: Provider) -> &'static ProviderSpec {
 /// the endpoint's own `/models`, so a model the key cannot serve is never put
 /// on the market.
 pub fn resells_other_vendors(p: Provider) -> bool {
-    matches!(p, Provider::Qwen | Provider::Custom | Provider::Openrouter)
+    matches!(p, Provider::Qwen | Provider::Custom | Provider::Openrouter | Provider::Antigravity)
 }
 
 /// Credential families that must not serve a buyer arriving from this tool.
@@ -667,6 +689,7 @@ pub const NO_EMBEDDINGS_ROUTE: &[Provider] = &[
     Provider::ClaudeExtra,
     Provider::Codex,
     Provider::Gemini,
+    Provider::Antigravity,
     Provider::Kimi,
     Provider::KimiApi,
     Provider::Xai,
