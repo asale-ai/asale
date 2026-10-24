@@ -362,20 +362,28 @@ export function ModelChecklist({
  *  verification is and what it costs; a panel that repeated it in three callouts
  *  turned a two-line explanation into a wall nobody reads. */
 export function BatchVerifyPanel({
-  provider, models, verdicts,
+  provider, models, verdicts, lanes,
 }: {
   provider: string;
   models: string[];
+  lanes: import("../lib").Lane[];
   /** Standings already on record, shown before anything is run. */
   verdicts: LaneVerdict[];
 }) {
   const { t } = useTranslation();
   const { rows, running, err, start } = useBatchVerification(provider);
-  const [picked, setPicked] = useState<string[]>(models);
+  const eligible = models.filter((model) => lanes.some((l) =>
+    l.model === model && l.sell_enabled && l.quota_remaining > 0
+    && (l.status === "selling" || (l.status === "paused" && l.paused_reason === "unverified"))
+    && l.resume_at <= Date.now() / 1000,
+  ));
+  const selectedModels = new Set(eligible);
+  const [picked, setPicked] = useState<string[]>(eligible);
+  const selected = picked.filter((m) => selectedModels.has(m));
 
   // Follow the model list: an account whose lanes arrive a moment after the
   // dialog opens should still start out fully ticked.
-  useEffect(() => { setPicked(models); }, [models.join("--")]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setPicked(eligible); }, [eligible.join("--")]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const done = Object.values(rows).filter((r) => r.state === "done" || r.state === "failed").length;
   const total = Object.keys(rows).length;
@@ -388,6 +396,10 @@ export function BatchVerifyPanel({
   );
 
   const standing = (model: string): React.ReactNode => {
+    if (!selectedModels.has(model)) {
+      const lane = lanes.find((l) => l.model === model);
+      return <span className="faint">{lane ? t(`publish.laneStatus.${lane.status}`, { defaultValue: lane.status }) : t("publish.verify.rowUnreachable")}</span>;
+    }
     const r = rows[model];
     if (r?.state === "running") return <span className="faint">{r.step ? t(`publish.verify.step.${r.step}`, { defaultValue: r.step }) : t("publish.verify.rowRunning")}</span>;
     if (r?.state === "pending") return <span className="faint">{t("publish.verify.rowPending")}</span>;
@@ -422,6 +434,7 @@ export function BatchVerifyPanel({
         onChange={setPicked}
         disabled={running}
         label={t("publish.verify.pickModels")}
+        unavailable={(m) => !selectedModels.has(m)}
         note={standing}
         expandable={hasEvidence}
         // Keyed on the model so switching rows remounts rather than showing
@@ -432,12 +445,12 @@ export function BatchVerifyPanel({
       <div className="btn-row" style={{ marginTop: "var(--s16)" }}>
         <button
           className="btn"
-          onClick={() => void start(picked)}
-          disabled={running || picked.length === 0}
+          onClick={() => { if (selected.length > 0) void start(selected); }}
+          disabled={running || selected.length === 0}
         >
           {running
             ? t("publish.verify.runningN", { done, total })
-            : t("publish.verify.runN", { n: picked.length })}
+            : t("publish.verify.runN", { n: selected.length })}
         </button>
       </div>
 

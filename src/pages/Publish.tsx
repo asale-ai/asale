@@ -599,7 +599,10 @@ function TestDialog({
 
   const models = useMemo(() => options.map((l) => l.model), [options]);
   /** The models this button may actually spend money on. */
-  const testable = useMemo(() => models.filter((m) => !blocked(m)), [models, blocked]);
+  const unavailable = useCallback((model: string) =>
+    blocked(model) || options.find((l) => l.model === model)?.status !== "selling",
+  [blocked, options]);
+  const testable = useMemo(() => models.filter((m) => !unavailable(m)), [models, unavailable]);
   const [picked, setPicked] = useState<string[]>(testable);
   const [wire, setWire] = useState(TEST_WIRES[0].id);
   const [running, setRunning] = useState(false);
@@ -612,8 +615,9 @@ function TestDialog({
   // just cleared into the selection.
   useEffect(() => { setPicked(testable); }, [testable.join(" ")]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const notSelling = picked.filter((m) => options.find((l) => l.model === m)?.status !== "selling").length;
-  const blockedCount = models.filter(blocked).length;
+  const selected = picked.filter((m) => !unavailable(m));
+  const notSelling = options.filter((l) => l.status !== "selling").length;
+  const blockedCount = options.filter((l) => l.status === "selling" && blocked(l.model)).length;
 
   /** Buy from each picked lane in turn.
    *
@@ -622,6 +626,7 @@ function TestDialog({
    *  several at once against one subscription measures the queue as much as the
    *  lane. A handful of seconds each is a wait people will sit through. */
   async function run() {
+    if (selected.length === 0) return;
     setRunning(true);
     setErr("");
     setResults({});
@@ -629,7 +634,7 @@ function TestDialog({
       // Re-filtered rather than trusted: `picked` is state, and a verdict
       // arriving between the click and this loop could have moved a lane into
       // the gate's hands since it was ticked.
-      for (const model of picked.filter((m) => !blocked(m))) {
+      for (const model of selected) {
         setResults((r) => ({ ...r, [model]: "running" }));
         try {
           const out = await invoke<SupplyTest>("test_supply", {
@@ -705,11 +710,12 @@ function TestDialog({
                 onChange={setPicked}
                 disabled={running}
                 label={t("publish.test.pickModels")}
-                unavailable={blocked}
+                unavailable={unavailable}
                 note={(m) => {
-                  // The gate outranks every other annotation: a lane it is
-                  // holding cannot be tested at all, so what its own switch or
-                  // its last result says about it is beside the point.
+                  const lane = options.find((l) => l.model === m);
+                  if (lane && lane.status !== "selling") {
+                    return <span className="faint">{t(`publish.laneStatus.${lane.status}`, { defaultValue: lane.status })}</span>;
+                  }
                   if (blocked(m)) return <span className="warn">{t("publish.test.needsVerify")}</span>;
                   const r = results[m];
                   if (r === "running") return <span className="faint">{t("publish.test.running")}</span>;
@@ -734,9 +740,7 @@ function TestDialog({
                 </select>
               </div>
 
-              {/* A model that is not on the market will fail, and it will fail
-                  for a reason this page already shows above. Saying so first is
-                  cheaper than letting them buy the answer. */}
+              {/* Withheld lanes stay visible with their reason, but cannot be selected. */}
               {notSelling > 0 && (
                 <div className="hint">{t("publish.test.someNotSelling", { n: notSelling })}</div>
               )}
@@ -761,13 +765,13 @@ function TestDialog({
               )}
 
               <div className="btn-row" style={{ marginTop: "var(--s16)" }}>
-                <button className="btn" onClick={run} disabled={running || picked.length === 0}>
+                <button className="btn" onClick={run} disabled={running || selected.length === 0}>
                   {running
                     ? t("publish.test.runningN", {
                         done: Object.values(results).filter((r) => r !== "running").length,
-                        total: picked.length,
+                        total: selected.length,
                       })
-                    : t("publish.test.runN", { n: picked.length })}
+                    : t("publish.test.runN", { n: selected.length })}
                 </button>
                 <button className="btn subtle" onClick={onClose} disabled={running}>
                   {t("common.close")}
@@ -789,6 +793,7 @@ function TestDialog({
               provider={account.provider}
               models={models}
               verdicts={verdicts}
+              lanes={lanes}
             />
           )}
         </div>
@@ -870,6 +875,7 @@ function VerifyGateDialog({
             provider={account.provider}
             models={models}
             verdicts={verdicts}
+            lanes={lanes}
           />
         </div>
       </div>

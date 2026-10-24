@@ -389,6 +389,15 @@ pub async fn test_supply(
         ));
     }
 
+    if lane.status != "selling" {
+        let reason = lane.paused_reason.as_deref().unwrap_or(&lane.status);
+        return Err(crate::cmd_err!(
+            "errors.verify.lanePaused",
+            format!("this device is holding this model back ({reason}), so there is nothing to buy from"),
+            reason = reason.to_string()
+        ));
+    }
+
     // The switch and this button are one gesture; the declaration behind them
     // is not instant. Waited out here rather than reported, for the reasons on
     // `DECLARE_WAIT` — and before the clock below starts, so the round trip

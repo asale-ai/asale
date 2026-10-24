@@ -220,7 +220,7 @@
       "pickModels": "Models to test",
       "runN": "Test {{n}} model(s)",
       "runningN": "Testing… {{done}}/{{total}}",
-      "someNotSelling": "{{n}} of the picked models are not on the market right now and will fail for that reason.",
+      "someNotSelling": "{{n}} model(s) are currently off sale and cannot be selected or tested. Resume selling to test them.",
       "needsVerify": "not verified",
       "someUnverified": "{{n}} of this account's models have not passed verification yet. The market holds them out of every buyer's reach — including this test — until they do.",
       "goVerify": "Verify them"

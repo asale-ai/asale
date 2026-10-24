@@ -220,7 +220,7 @@
       "pickModels": "要測試的模型",
       "runN": "開始測試（{{n}} 個）",
       "runningN": "測試中… {{done}}/{{total}}",
-      "someNotSelling": "所選模型中有 {{n}} 個目前不在市場上，會因此失敗。",
+      "someNotSelling": "有 {{n}} 個模型目前停售，無法選取或測試。恢復在售後可測試。",
       "needsVerify": "待驗證",
       "someUnverified": "該帳號有 {{n}} 個模型還沒通過驗證。在通過之前，市場不會把任何買家的請求路由過去——這個測試也一樣。",
       "goVerify": "去驗證"

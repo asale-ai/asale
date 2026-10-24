@@ -1,8 +1,8 @@
 //! Model verification, from the seller's side.
 //!
-//! # This file decides nothing
+//! # Verification decisions belong to the server
 //!
-//! Every command here forwards to the server and returns what it says. That is
+//! Commands forward to the server after checking local availability. That is
 //! not laziness — it is the only arrangement that works. The thing being
 //! verified is *this program*: whether the lane it publishes really reaches the
 //! model it claims. A check the daemon performed, or a verdict the daemon was
@@ -36,6 +36,26 @@ pub async fn start_lane_verification(
     provider: String,
     model: String,
 ) -> R<Value> {
+    // A locally withheld lane cannot answer the market's probes. Refuse before
+    // forwarding so a stale server mirror cannot start a doomed verification.
+    crate::publisher::rebuild_pool(&state.store, &state.pool).await;
+    let blocked_reason = {
+        let pool = state.pool.lock().map_err(|_| "pool lock poisoned".to_string())?;
+        let lanes: Vec<_> = pool.lane_views(super::now_secs()).into_iter()
+            .filter(|l| l.provider == provider && l.model == model).collect();
+        if lanes.iter().any(|l| l.sell_enabled && l.status == "selling") {
+            None
+        } else {
+            lanes.first().map(|l| l.paused_reason.clone().unwrap_or_else(|| l.status.clone()))
+        }
+    };
+    if let Some(reason) = blocked_reason {
+        return Err(crate::cmd_err!(
+            "errors.verify.lanePaused",
+            format!("this device is holding this model back ({reason}), so there is nothing to buy from"),
+            reason = reason
+        ));
+    }
     let device_id = state.device_id();
     authed(
         state,
