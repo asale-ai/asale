@@ -391,7 +391,18 @@ pub async fn save_antigravity_listing(store: &LocalStore, account_id: &str, acco
 
 async fn record_antigravity_refresh(store: &LocalStore, account_id: &str, result: anyhow::Result<asale_client_core::antigravity::Account>) {
     match result {
-        Ok(account) => { let _ = save_antigravity_listing(store, account_id, &account).await; }
+        Ok(account) => {
+            // Logged here, once per refresh, rather than on every pool rebuild.
+            let tradable: Vec<String> = load_catalog(store).await
+                .and_then(|c| c.by_provider.get("antigravity").cloned()).unwrap_or_default();
+            let aliases = index_custom_models(&account.models, &tradable);
+            tracing::info!(
+                account = %account_id,
+                "antigravity serves {} models, {} sellable {:?}; unmatched {:?}",
+                account.models.len(), aliases.len(), aliases, unmatched_ids(&account.models, &aliases)
+            );
+            let _ = save_antigravity_listing(store, account_id, &account).await;
+        }
         Err(error) => {
             // Transient outages can retain the last known catalog; an explicit
             // client rejection cannot. Otherwise old supply stays advertised.
@@ -559,6 +570,62 @@ fn market_candidates(endpoint_id: &str) -> Vec<String> {
     out
 }
 
+/// Reasoning-effort suffixes an endpoint may append to one model, most capable
+/// first. Antigravity lists `gemini-3.8-flash` only as `-high` / `-low` /
+/// `-medium` / `-tiered`, while the market trades the bare id; before these were
+/// tried the account showed the two 5%-priced flash-lite lanes and hid the
+/// models that actually sell.
+///
+/// The order is also the tie-break when several variants alias one market id:
+/// the bare id is what a buyer asked for, so the variant that degrades it least
+/// is the one sold under it — and a fixed order keeps the choice stable across
+/// rebuilds instead of following the endpoint's listing order.
+const EFFORT_SUFFIXES: [&str; 4] = ["-high", "-medium", "-tiered", "-low"];
+
+/// An id the endpoint itself marks as switched off (`gemini-4-argon-disabled`).
+/// Mapping it onto the live market id would sell something the vendor has
+/// deliberately withheld, so it is never a lane.
+fn is_disabled_id(endpoint_id: &str) -> bool {
+    endpoint_id.to_ascii_lowercase().ends_with("-disabled")
+}
+
+/// Looser spellings, tried only after every endpoint id has had its literal
+/// candidates ([`market_candidates`]) — so a model listed under its exact
+/// market id always wins over a variant that merely resembles it.
+///
+/// Returns `(market candidate, preference)`; lower preference wins a collision.
+fn loose_candidates(endpoint_id: &str) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    for base in market_candidates(endpoint_id) {
+        for (rank, suffix) in EFFORT_SUFFIXES.iter().enumerate() {
+            if let Some(stripped) = base.strip_suffix(suffix).filter(|s| !s.is_empty()) {
+                out.push((stripped.to_string(), rank));
+            }
+        }
+        // The catalog sometimes keeps the preview name for a model the endpoint
+        // lists as GA (`gemini-3-flash` vs `gemini-3-flash-preview`). Ranked
+        // after every effort variant so it never displaces a closer spelling.
+        if !base.ends_with("-preview") {
+            out.push((format!("{base}-preview"), EFFORT_SUFFIXES.len()));
+        }
+    }
+    out
+}
+
+/// Endpoint ids that ended up in no lane, for the log. Without this an id the
+/// client could not match vanished without a trace and the account just looked
+/// like it served fewer models.
+pub fn unmatched_ids<'a>(
+    endpoint_ids: &'a [String],
+    aliases: &std::collections::BTreeMap<String, String>,
+) -> Vec<&'a str> {
+    let used: std::collections::BTreeSet<&str> = aliases.values().map(String::as_str).collect();
+    let mut out: Vec<&str> = endpoint_ids.iter().map(String::as_str).filter(|id| !used.contains(id)).collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 /// Index an endpoint's model list by the id the market knows each model as.
 ///
 /// `tradable` is what the platform actually prices — the catalog — and it is
@@ -585,20 +652,44 @@ fn market_candidates(endpoint_id: &str) -> Vec<String> {
 /// So an unprefixed id wins, and ties below that are broken by name, which
 /// keeps the choice stable across rebuilds rather than dependent on the
 /// endpoint's ordering.
+///
+/// A second, looser pass follows ([`loose_candidates`]): an effort-suffixed id
+/// (`gemini-3.8-flash-high`) or a GA id whose catalog row is the preview name
+/// fills a market id nobody claimed literally. Ids the endpoint marks disabled
+/// are never indexed.
 pub fn index_custom_models(
     endpoint_ids: &[String],
     tradable: &[String],
 ) -> std::collections::BTreeMap<String, String> {
-    let mut sorted: Vec<&String> = endpoint_ids.iter().collect();
+    let mut sorted: Vec<&String> = endpoint_ids.iter().filter(|id| !is_disabled_id(id)).collect();
     sorted.sort_by_key(|id| (id.contains('/'), id.as_str()));
     let mut out = std::collections::BTreeMap::new();
+    let mut unmatched = Vec::new();
     for id in sorted {
         let market = match market_candidates(id).into_iter().find(|c| tradable.iter().any(|t| t == c)) {
             Some(m) => m,
             None if tradable.is_empty() => market_id_of(id),
-            None => continue,
+            None => {
+                unmatched.push(id);
+                continue;
+            }
         };
         out.entry(market).or_insert_with(|| id.clone());
+    }
+    // Loose pass: best (preference, prefixed?, id) per unclaimed market id, so
+    // the winner is decided by rule rather than by which variant came first.
+    let mut loose: std::collections::BTreeMap<String, (usize, bool, &String)> = std::collections::BTreeMap::new();
+    for id in unmatched {
+        for (market, pref) in loose_candidates(id) {
+            if out.contains_key(&market) || !tradable.iter().any(|t| *t == market) {
+                continue;
+            }
+            let key = (pref, id.contains('/'), id);
+            loose.entry(market).and_modify(|best| if key < *best { *best = key }).or_insert(key);
+        }
+    }
+    for (market, (_, _, id)) in loose {
+        out.insert(market, id.clone());
     }
     out
 }
@@ -719,9 +810,10 @@ async fn endpoint_models(
                     tracing::info!(
                         account = %tool.account_id,
                         provider = %tool.provider,
-                        "endpoint serves {} models ({} usable ids)",
+                        "endpoint serves {} models ({} usable ids); unmatched {:?}",
                         models.len(),
-                        fresh.aliases.len()
+                        fresh.aliases.len(),
+                        unmatched_ids(&models, &fresh.aliases)
                     );
                 }
                 fresh
@@ -2574,6 +2666,59 @@ mod tests {
         // The request still goes out under the endpoint's own spelling — only
         // the market id is folded.
         assert!(idx.values().all(|v| v.contains(char::is_uppercase)));
+    }
+
+    /// GitHub asale-ai/asale#3, with the account's and the catalog's real lists.
+    /// Exact matching found 2 lanes, both at 5% of list; the effort-suffixed
+    /// flagship the market prices at 100% was invisible.
+    #[test]
+    fn antigravitys_effort_suffixed_ids_find_their_market_rows() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let upstream = s(&[
+            "chat_20706", "chat_23310", "claude-opus-4-6-thinking", "claude-sonnet-4-6",
+            "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-flash-thinking", "gemini-2.5-pro",
+            "gemini-3-flash", "gemini-3.1-flash-image", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite",
+            "gemini-3.8-flash-high", "gemini-3.8-flash-low", "gemini-3.8-flash-medium",
+            "gemini-3.8-flash-tiered", "gemini-4-argon-disabled", "gpt-oss-120b-medium",
+            "tab_flash_lite_preview", "tab_jump_flash_lite_preview",
+        ]);
+        let catalog = s(&[
+            "claude-fable-5", "claude-haiku-4-5", "claude-opus-5", "claude-sonnet-5",
+            "gemini-3-flash-preview", "gemini-3.1-flash-lite", "gemini-3.1-flash-lite-preview",
+            "gemini-3.1-pro-preview", "gemini-3.5-flash-lite", "gemini-3.7-flash", "gemini-3.8-flash",
+            "gemini-4-argon", "gemma-3-27b-it",
+        ]);
+        let idx = index_custom_models(&upstream, &catalog);
+        let got: Vec<(&str, &str)> = idx.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("gemini-3-flash-preview", "gemini-3-flash"),
+                ("gemini-3.1-flash-lite", "gemini-3.1-flash-lite"),
+                ("gemini-3.5-flash-lite", "gemini-3.5-flash-lite"),
+                // Deterministic winner among the four variants, whatever their order.
+                ("gemini-3.8-flash", "gemini-3.8-flash-high"),
+            ]
+        );
+        // A disabled id is never mapped onto the live market id.
+        assert!(!idx.contains_key("gemini-4-argon"));
+        let mut reversed = upstream.clone();
+        reversed.reverse();
+        assert_eq!(index_custom_models(&reversed, &catalog), idx);
+        // The literal match outranks the `-preview` guess: `gemini-3.1-flash-lite`
+        // must not also claim `gemini-3.1-flash-lite-preview` ahead of itself.
+        assert!(!idx.contains_key("gemini-3.1-flash-lite-preview"));
+        // Stripping only ever proposes; the catalog still decides. `gpt-oss-120b`
+        // is not priced, so its `-medium` variant stays out, and is logged.
+        assert!(unmatched_ids(&upstream, &idx).contains(&"gpt-oss-120b-medium"));
+        assert!(unmatched_ids(&upstream, &idx).contains(&"gemini-4-argon-disabled"));
+    }
+
+    #[test]
+    fn a_literal_listing_beats_an_effort_variant() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let idx = index_custom_models(&s(&["gemini-3.8-flash-high", "gemini-3.8-flash"]), &s(&["gemini-3.8-flash"]));
+        assert_eq!(idx.get("gemini-3.8-flash").map(String::as_str), Some("gemini-3.8-flash"));
     }
 
     #[test]
