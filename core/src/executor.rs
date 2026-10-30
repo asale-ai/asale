@@ -1598,7 +1598,7 @@ pub fn with_claude_code_system(body: &[u8], session_id: &str) -> Option<Vec<u8>>
     // One ephemeral breakpoint, on the last block, so the caller's prompt is
     // inside the cached prefix rather than after it — but only if the relayed
     // body has not already spent the four Anthropic allows.
-    if spent_breakpoints(&v) < MAX_BREAKPOINTS {
+    if spent_breakpoints(&v) < MAX_BREAKPOINTS && !has_hour_cache(&v) {
         if let Some(last) =
             v.get_mut("system").and_then(|s| s.as_array_mut()).and_then(|a| a.last_mut()).and_then(|b| b.as_object_mut())
         {
@@ -1612,6 +1612,20 @@ pub fn with_claude_code_system(body: &[u8], session_id: &str) -> Option<Vec<u8>>
 /// Cache breakpoints Anthropic accepts on one request. A fifth is a `400`, and
 /// the whole turn with it.
 const MAX_BREAKPOINTS: usize = 4;
+
+/// A default (5m) breakpoint before a caller's 1h breakpoint is rejected by
+/// Anthropic. Keep the caller's cache layout when extended caching is in use,
+/// rather than inserting our optional short-lived breakpoints into it.
+fn has_hour_cache(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Object(o) => {
+            o.get("cache_control").and_then(|c| c.get("ttl")).and_then(|t| t.as_str()) == Some("1h")
+                || o.values().any(has_hour_cache)
+        }
+        serde_json::Value::Array(a) => a.iter().any(has_hour_cache),
+        _ => false,
+    }
+}
 
 /// How many breakpoints a body already spends outside the system slot.
 ///
@@ -1901,7 +1915,7 @@ fn inject_current_date(v: &mut serde_json::Value) {
     let Ok(index) = first_user_index(v) else { return };
     // Whether there is room for the breakpoint below. A body that already
     // spends all four keeps its own; adding a fifth is a `400` on the turn.
-    let room = spent_breakpoints(v) < MAX_BREAKPOINTS;
+    let room = spent_breakpoints(v) < MAX_BREAKPOINTS && !has_hour_cache(v);
     let Some(msgs) = v.get_mut("messages").and_then(|m| m.as_array_mut()) else {
         return;
     };
@@ -3553,6 +3567,27 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
         let system = out["system"].as_array().unwrap();
         assert_eq!(system.len(), 3, "{system:?}");
         assert_eq!(system[2]["text"], "Never edit files without reading them.");
+    }
+
+    #[test]
+    fn cowork_hour_cache_does_not_get_shorter_breakpoints_before_it() {
+        let body = json!({
+            "model": "claude-opus-5-5",
+            "system": [{"type": "text", "text": "Cowork instructions",
+                "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
+            "messages": [
+                {"role": "user", "content": "first turn"},
+                {"role": "assistant", "content": "hello"},
+                {"role": "user", "content": [{"type": "text", "text": "who are you",
+                    "cache_control": {"type": "ephemeral", "ttl": "1h"}}]}
+            ]
+        });
+        let out = with_claude_code_system(&serde_json::to_vec(&body).unwrap(), "ses-1").unwrap();
+        let out: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert!(out["system"].as_array().unwrap().iter().all(|b| b.get("cache_control").is_none()));
+        assert!(out["messages"][0]["content"].as_array().unwrap().iter().all(|b| b.get("cache_control").is_none()));
+        assert_eq!(out["messages"][2]["content"][0]["cache_control"]["ttl"], "1h");
+        assert_eq!(super::spent_breakpoints(&out), 1);
     }
 
     /// Anthropic refuses a request carrying a fifth cache breakpoint, and the
