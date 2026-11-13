@@ -773,7 +773,7 @@ function CardTopUpSheet({
                   ? t("wallet.cardBelowMin", { amount: fmtUsdt(limits.deposit_min) })
                   : aboveMax && limits
                     ? t("wallet.cardAboveMax", { amount: fmtUsdt(limits.deposit_max) })
-                    : t("wallet.cardHandoffHint")}
+                    : t(paygate ? "wallet.paygateHandoffHint" : "wallet.cardHandoffHint")}
               </p>
 
               <Err>{err}</Err>

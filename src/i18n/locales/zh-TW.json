@@ -564,6 +564,7 @@
     "cardBelowMin": "儲值最低 {{amount}} USDT。",
     "cardAboveMax": "儲值最高 {{amount}} USDT。",
     "cardHandoffHint": "支援微信支付、信用卡（Visa / Mastercard / 銀聯）與 Apple Pay / Google Pay，由 Dodo Payments 處理。",
+    "paygateHandoffHint": "支援 PayPal 及收銀台顯示的其他付款方式，可在下一步選擇。",
     "cardGoPay": "支付 {{charge}} USDT",
     "cardGoPayBare": "前往支付",
     "cardOpening": "正在開啟付款頁…",

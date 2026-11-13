@@ -564,6 +564,7 @@
     "cardBelowMin": "下限は {{amount}} USDT です。",
     "cardAboveMax": "上限は {{amount}} USDT です。",
     "cardHandoffHint": "クレジットカード（Visa / Mastercard / JCB）、Apple Pay / Google Pay、WeChat Pay に対応。決済は Dodo Payments が処理します。",
+    "paygateHandoffHint": "決済画面で PayPal または利用可能な他の支払い方法を選択できます。",
     "cardGoPay": "{{charge}} USDT を支払う",
     "cardGoPayBare": "支払いに進む",
     "cardOpening": "決済ページを開いています…",

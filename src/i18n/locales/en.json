@@ -564,6 +564,7 @@
     "cardBelowMin": "The minimum is {{amount}} USDT.",
     "cardAboveMax": "The maximum is {{amount}} USDT.",
     "cardHandoffHint": "Card, Apple Pay and Google Pay everywhere; Klarna and Cash App in the US. Handled by Dodo Payments.",
+    "paygateHandoffHint": "Choose PayPal or another available payment method at checkout.",
     "cardGoPay": "Pay {{charge}} USDT",
     "cardGoPayBare": "Continue to payment",
     "cardOpening": "Opening the checkout…",
