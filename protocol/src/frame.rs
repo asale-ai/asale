@@ -51,7 +51,7 @@ impl Envelope {
 /// A request travels as ONE message: its body is base64'd (≈4/3 expansion) into
 /// a single `http_request`, so this is the ceiling the gateway's request body
 /// limit (`GatewayConfig::max_request_bytes`) has to stay under. At that
-/// setting's 100 MiB default the frame lands near 134 MiB, which is what sizes
+/// setting's 128 MiB default the frame lands near 171 MiB, which is what sizes
 /// this constant — raise `ASALE_MAX_REQUEST_BYTES` past ~140 MiB and this has
 /// to move with it.
 pub const MAX_FRAME_BYTES: usize = 192 * 1024 * 1024;

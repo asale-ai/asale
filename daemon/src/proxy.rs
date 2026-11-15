@@ -82,11 +82,8 @@ pub fn router(state: ProxyState) -> Router {
 
 /// Largest request body this proxy will buffer.
 ///
-/// Deliberately above the asale gateway's own default
-/// (`ASALE_MAX_REQUEST_BYTES`, 100 MiB) so that an oversized market request is
-/// refused by the gateway with a 413 the caller can read, rather than dying
-/// here as an opaque local error. The direct route bypasses the gateway
-/// entirely and is bounded only by this.
+/// Matches the gateway default (ASALE_MAX_REQUEST_BYTES, 128 MiB).
+/// Direct requests bypass the gateway and use this same ceiling.
 const MAX_BODY_BYTES: usize = 128 * 1024 * 1024;
 
 fn now_secs() -> i64 {
