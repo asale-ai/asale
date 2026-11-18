@@ -120,7 +120,7 @@ jobs:
       matrix:
         include:
           - label: macOS (universal)
-            os: macos-14
+            os: macos-15
             artifact: asale-macos-universal
             # package.sh defaults to --universal on Darwin; output lands under target/<triple>/.
             bundle: target/universal-apple-darwin/release/bundle
