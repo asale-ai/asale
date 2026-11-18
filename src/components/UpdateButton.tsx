@@ -5,7 +5,7 @@
 // page, so the shortest route to installing was "notice a dot, open Settings,
 // scroll, read, press". This is the same news with the button attached.
 //
-// It runs the same sequence Settings and the forced-upgrade dialog run, from
+// It opens the same dialog Settings opens (`UpdateDialog`), from
 // the same shared state in `lib/updates` — an update started here is watched
 // from either of the others, and vice versa. Nothing new is downloaded or
 // installed by this file; it only asks earlier.
@@ -15,12 +15,10 @@
 // surprise, so the button opens the confirmation rather than the installer.
 
 import { useState } from "react";
-import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
-import { IconDownload, IconExternal, IconX } from "../icons";
-import { openExternal } from "../shell";
+import { IconDownload } from "../icons";
 import { hasPendingUpdate, useInstaller, useUpdateState } from "../lib/updates";
-import { UpdateProgress } from "./UpdateProgress";
+import { UpdateDialog } from "./UpdateDialog";
 
 export function UpdateButton() {
   const { t } = useTranslation();
@@ -33,72 +31,17 @@ export function UpdateButton() {
   // pointed at a remote daemon — it cannot install onto that machine.
   if (!hasPendingUpdate(update)) return null;
 
-  const close = () => {
-    setOpen(false);
-    installer.cancel();
-  };
-
   return (
     <>
       <button
         type="button"
         className="pill warn act"
-        onClick={() => { setOpen(true); installer.ask(); }}
+        onClick={() => { setOpen(true); if (!installer.running) installer.ask(); }}
       >
         <IconDownload />
         {t("update.button", { version: update.latest })}
       </button>
-
-      {/* Portaled: the top bar is a `backdrop-filter` layer, and a fixed
-          backdrop inside one is positioned against that strip rather than the
-          window — the dialog came up clipped by the 40px it is drawn in. */}
-      {open && createPortal(
-        // Dismissable, unlike the forced-upgrade gate: nothing is blocked yet,
-        // and "not now" is a legitimate answer to an optional update.
-        <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget && !installer.running) close(); }}>
-          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="update-title">
-            <div className="modal-head">
-              <h3 id="update-title">{t("settings.updateAvailable", { version: update.latest })}</h3>
-              {!installer.running && (
-                <button type="button" className="modal-x" onClick={close} title={t("settings.reinstallCancel")}>
-                  <IconX />
-                </button>
-              )}
-            </div>
-            <div className="upgrade-body">
-              <p className="text-sm">{t("settings.reinstallConfirm")}</p>
-              {update.page && (
-                <div className="btn-row">
-                  <button type="button" className="btn ghost" onClick={() => openExternal(update.page)}>
-                    <IconExternal />
-                    {t("settings.updateNotes")}
-                  </button>
-                </div>
-              )}
-              <UpdateProgress installer={installer} />
-              {installer.error && (
-                <p className="text-sm">{t("settings.reinstallError", { msg: installer.error })}</p>
-              )}
-            </div>
-            <div className="modal-foot">
-              <div className="modal-spacer" />
-              {installer.running ? (
-                <button type="button" className="btn" disabled>{t("settings.reinstallRunning")}</button>
-              ) : (
-                <>
-                  <button type="button" className="btn ghost" onClick={close}>
-                    {t("settings.reinstallCancel")}
-                  </button>
-                  <button type="button" className="btn" onClick={installer.run}>
-                    {t("settings.reinstallGo")}
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-        </div>,
-        document.body,
-      )}
+      {open && <UpdateDialog onClose={() => setOpen(false)} />}
     </>
   );
 }

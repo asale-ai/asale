@@ -5,7 +5,7 @@ import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { apiBase, daemonToken, invoke, realTauri } from "../lib";
 import { openExternal, shell } from "../shell";
 import { checkForUpdate, loadUpdatePreferences, setAutoUpdate, useInstaller, useUpdateState } from "../lib/updates";
-import { UpdateProgress } from "../components/UpdateProgress";
+import { UpdateDialog } from "../components/UpdateDialog";
 import { Card, CopyChip, Err, Ok, PageHead, FactGrid } from "../ui";
 import { IconPower, IconDownload, IconRefresh, IconCheck, IconServer, IconGlobe, IconInfo, IconExternal, IconAlert } from "../icons";
 import { errText } from "../errors";
@@ -70,6 +70,7 @@ export function Settings() {
 
   // How an update is applied — the same two-step the upgrade banner uses.
   const installer = useInstaller();
+  const [updateOpen, setUpdateOpen] = useState(false);
 
   useEffect(() => {
     void loadUpdatePreferences().catch(() => {});
@@ -380,45 +381,21 @@ export function Settings() {
             <div className="card-foot">
               <div className="hint">{t("settings.reinstallDesc")}</div>
 
-              {/* Three states, one sequence — the same one the forced-upgrade
-                  dialog runs, from the same shared state, so an update started
-                  in either place is watched from both. */}
-              {installer.running ? (
-                <>
-                  <div className="btn-row">
-                    <button className="btn" disabled>
-                      <IconRefresh className="spin" />
-                      {t("settings.reinstallRunning")}
-                    </button>
-                  </div>
-                  <UpdateProgress installer={installer} />
-                </>
-              ) : !installer.confirming ? (
-                <div className="btn-row">
-                  {/* Primary only when there is something to install; the rest
-                      of the time this is a repair tool, not the thing to press. */}
-                  <button className={available ? "btn" : "btn ghost"} onClick={installer.ask}>
-                    <IconRefresh />
-                    {t("settings.reinstallButton")}
-                  </button>
-                </div>
-              ) : (
-                <>
-                  <div className="callout warn">
-                    <IconAlert />
-                    <span>{t("settings.reinstallConfirm")}</span>
-                  </div>
-                  <div className="btn-row">
-                    <button className="btn" onClick={installer.run}>
-                      <IconDownload />
-                      {t("settings.reinstallGo")}
-                    </button>
-                    <button className="btn ghost" onClick={installer.cancel}>
-                      {t("settings.reinstallCancel")}
-                    </button>
-                  </div>
-                </>
-              )}
+              {/* Confirming and watching happen in the same dialog the top-bar
+                  button opens, so the two routes cannot drift apart. While a
+                  download runs, this reopens the dialog to watch it. */}
+              <div className="btn-row">
+                {/* Primary only when there is something to install; the rest
+                    of the time this is a repair tool, not the thing to press. */}
+                <button
+                  className={available || installer.running ? "btn" : "btn ghost"}
+                  onClick={() => { setUpdateOpen(true); if (!installer.running) installer.ask(); }}
+                >
+                  <IconRefresh className={installer.running ? "spin" : undefined} />
+                  {installer.running ? t("settings.reinstallRunning") : t("settings.reinstallButton")}
+                </button>
+              </div>
+              {updateOpen && <UpdateDialog onClose={() => setUpdateOpen(false)} />}
               {installer.error && <Err>{t("settings.reinstallError", { msg: installer.error })}</Err>}
             </div>
           </Card>

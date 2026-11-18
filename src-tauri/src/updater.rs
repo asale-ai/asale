@@ -181,6 +181,23 @@ fn cache_dir(version: &str) -> PathBuf {
 /// buys the one thing that was missing: the user can see it working, and the app
 /// only closes once the bytes are safely on disk.
 pub async fn download(app: &AppHandle) -> Result<PathBuf, String> {
+    // One download at a time. Without this the background watcher and a click
+    // on "update" each streamed the same release into the same `.part` file
+    // (`File::create` truncates, so the bytes interleaved and failed the hash),
+    // and both reported on the one progress channel, so the bar flickered
+    // between two counts. A caller that arrives second waits here — meanwhile
+    // the bar follows the first download — and then finds every file cached
+    // and verified, which costs a hash, not a re-fetch.
+    let _guard = DOWNLOAD_LOCK.lock().await;
+    download_locked(app).await
+}
+
+/// Serialises [`download`] and the watcher's download-then-install, which holds
+/// it across both so a manual install cannot race an automatic one.
+static DOWNLOAD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// [`download`] for a caller that already holds [`DOWNLOAD_LOCK`].
+async fn download_locked(app: &AppHandle) -> Result<PathBuf, String> {
     use tauri::Emitter;
     let (version, assets) = assets().await?;
     for id in wanted_ids() {
@@ -522,7 +539,16 @@ pub fn watch(app: AppHandle, shell: std::sync::Arc<crate::Shell>) {
                     if value.is_null() || value.as_str().is_some_and(|v| v != "0") {
                         if let Ok(release) = latest_release().await {
                             if newer(&release.version, env!("CARGO_PKG_VERSION")) && automatic_attempt_allowed(&release.version).unwrap_or(false) {
-                                let result = match download(&app).await {
+                                // Busy means the user pressed update and is
+                                // watching that download; leave it to them and
+                                // look again next round. Held through the
+                                // install so a click arriving now waits for
+                                // this attempt instead of starting a second one.
+                                let Ok(_guard) = DOWNLOAD_LOCK.try_lock() else {
+                                    tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                                    continue;
+                                };
+                                let result = match download_locked(&app).await {
                                     Ok(_) => {
                                         let handle = app.clone();
                                         let result = tauri::async_runtime::spawn_blocking(move || run_with_mode(&handle, true)).await
