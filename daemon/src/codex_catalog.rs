@@ -235,10 +235,7 @@ fn codex_binaries() -> Vec<PathBuf> {
     if let Ok(explicit) = std::env::var("ASALE_CODEX_BIN") {
         return vec![PathBuf::from(explicit)];
     }
-    let bundled = PathBuf::from("/Applications/ChatGPT.app/Contents/Resources/codex");
-    if bundled.is_file() {
-        out.push(bundled);
-    }
+    out.extend(bundled_binaries(Path::new("/Applications")));
     if let Ok(path) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path) {
             let candidate = dir.join("codex");
@@ -249,6 +246,45 @@ fn codex_binaries() -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// Prefer the desktop CLI over a potentially older npm installation.
+fn bundled_binaries(applications: &Path) -> Vec<PathBuf> {
+    ["ChatGPT.app", "Codex.app"]
+        .into_iter()
+        .flat_map(|app| {
+            [
+                "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+                "Contents/Resources/codex-cli/bin/codex",
+                "Contents/Resources/codex",
+            ]
+            .into_iter()
+            .map(move |relative| applications.join(app).join(relative))
+        })
+        .filter(|candidate| candidate.is_file())
+        .collect()
+}
+
+/// A nonempty buy selection needs both the catalog pointer and its alias map.
+pub fn selection_matches(models: &[String], configured_path: Option<&str>) -> bool {
+    if models.is_empty() {
+        return !configured_path.is_some_and(is_ours);
+    }
+    if !configured_path.is_some_and(is_ours) {
+        return false;
+    }
+    let Some(entries) = std::fs::read_to_string(path()).ok().and_then(|s| parse_models(&s)) else {
+        return false;
+    };
+    let aliases = std::fs::read_to_string(aliases_path()).ok()
+        .and_then(|s| serde_json::from_str::<BTreeMap<String, String>>(&s).ok());
+    let Some(aliases) = aliases else { return false };
+    let mut listed: Vec<&Value> = entries.iter()
+        .filter(|entry| entry["visibility"] == "list").collect();
+    listed.sort_by_key(|entry| entry["priority"].as_i64().unwrap_or(i64::MAX));
+    let selected: Option<Vec<&String>> = listed.iter()
+        .map(|entry| aliases.get(slug_of(entry))).collect();
+    selected.is_some_and(|selected| selected.iter().map(|s| s.as_str()).eq(models.iter().map(String::as_str)))
 }
 
 /// `codex debug models` → the built-in model entries.
@@ -280,7 +316,7 @@ fn dump_models(bin: &Path, scratch: &Path, out_path: &Path) -> Option<Vec<Value>
     // undrained pipe buffer.
     let out_file = std::fs::File::create(out_path).ok()?;
     let mut child = Command::new(bin)
-        .args(["debug", "models"])
+        .args(["debug", "models", "--bundled"])
         .env("CODEX_HOME", scratch)
         .stdin(Stdio::null())
         .stdout(Stdio::from(out_file))
@@ -450,6 +486,18 @@ mod tests {
                    "use_responses_lite": false, "base_instructions": "5.5 prompt"}),
             json!({"slug": "codex-auto-review", "visibility": "hide", "priority": 43}),
         ]
+    }
+
+    #[test]
+    fn discovers_relocated_desktop_cli_before_legacy_binary() {
+        let root = std::env::temp_dir().join(format!("asale-codex-paths-{}", std::process::id()));
+        let current = root.join("ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex");
+        let legacy = root.join("ChatGPT.app/Contents/Resources/codex");
+        std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+        std::fs::write(&current, "").unwrap();
+        std::fs::write(&legacy, "").unwrap();
+        assert_eq!(bundled_binaries(&root), vec![current, legacy]);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

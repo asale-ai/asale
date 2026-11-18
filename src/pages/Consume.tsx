@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   invoke, inTauri, pricePerMillion, fmtContext, isSignedOut, gotoSignIn, requireSignIn,
@@ -11,6 +11,7 @@ import { errText } from "../errors";
 
 /** Where the daemon keeps this machine's price ceiling (`commands::buy::MAX_RATIO_KEY`). */
 const MAX_RATIO_KEY = "buy_max_ratio";
+const CATALOG_TTL_MS = 2 * 60 * 60 * 1000;
 
 /** The range the market can actually quote in: below 5% no trade has ever
  *  existed, and 100% is list price, which is the market's own ceiling. Anything
@@ -75,6 +76,8 @@ export function Consume() {
   /** The market catalog, whole. The picker is what collapses it to one row per
    *  model family and hides what has no supply. */
   const [models, setModels] = useState<ModelOption[]>([]);
+  const catalogUpdatedAt = useRef(0);
+  const catalogRequest = useRef<Promise<void> | null>(null);
   const [loading, setLoading] = useState(inTauri);
   /** Tools with an action in flight, keyed by tool id. */
   const [pending, setPending] = useState<Record<string, boolean>>({});
@@ -119,12 +122,48 @@ export function Consume() {
 
   const loadCatalog = useCallback(() => {
     if (!inTauri) return Promise.resolve();
-    return invoke<{ models: MarketModel[] }>("market_models")
-      .then((r) => setModels(toOptions(r.models || [], t)))
+    if (catalogRequest.current) return catalogRequest.current;
+    const request = invoke<{ models: MarketModel[] }>("market_models")
+      .then((r) => {
+        setModels(toOptions(r.models || [], t));
+        catalogUpdatedAt.current = Date.now();
+      })
       // The fresh catalog determines automatic defaults; read them after
       // that response rather than leaving the initial cached selection up.
-      .then(() => loadTools());
+      .then(() => loadTools())
+      .finally(() => { catalogRequest.current = null; });
+    catalogRequest.current = request;
+    return request;
   }, [loadTools, t]);
+
+  const ensureCatalogFresh = useCallback(() => {
+    if (Date.now() - catalogUpdatedAt.current < CATALOG_TTL_MS) return Promise.resolve();
+    // Keep the last successful catalog on failure; it remains expired so the
+    // next check can retry instead of caching a network error for two hours.
+    return loadCatalog().catch(() => {});
+  }, [loadCatalog]);
+
+  useEffect(() => {
+    if (!inTauri) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const check = async () => {
+      await ensureCatalogFresh();
+      if (stopped) return;
+      clearTimeout(timer);
+      timer = setTimeout(check, Math.max(60_000, CATALOG_TTL_MS - (Date.now() - catalogUpdatedAt.current)));
+    };
+    const onVisible = () => { if (document.visibilityState === "visible") void check(); };
+    void check();
+    window.addEventListener("focus", check);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      window.removeEventListener("focus", check);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [ensureCatalogFresh]);
 
   const refresh = useCallback(() => {
     setRefreshing(true);
@@ -458,6 +497,7 @@ export function Consume() {
                           picks already saved must stay visible and removable. */}
                       <ModelMultiSelect
                         options={models}
+                        onOpen={() => { void ensureCatalogFresh(); }}
                         value={pickedOf(tool)}
                         onChange={(next) => setBuy(tool, tool.enabled, next)}
                         disabled={!inTauri || busy || !tool.installed}

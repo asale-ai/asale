@@ -326,6 +326,7 @@ pub async fn reconcile_configs(state: &AppState) -> Vec<String> {
         let drifted =
             tokio::task::spawn_blocking(move || {
                 tool_config::needs_reapply(&t)
+                    || (t == "codex" && !tool_config::codex_models_match(&selected))
                     || (t == "claude-desktop" && !tool_config::claude_desktop_models_match(&selected))
             }).await.unwrap_or(false);
         if !drifted && !defaults_changed && !(*tool == "claude-desktop" && desktop_seeded) {

@@ -699,6 +699,15 @@ pub fn needs_reapply(tool: &str) -> bool {
 
 }
 
+/// Match the selection against the catalog Codex will actually read.
+pub fn codex_models_match(models: &[String]) -> bool {
+    let doc = read_raw(&primary_config_path("codex"))
+        .and_then(|raw| raw.parse::<toml_edit::DocumentMut>().ok());
+    let configured = doc.as_ref().and_then(|doc| doc.get(CODEX_CATALOG))
+        .and_then(toml_edit::Item::as_str);
+    crate::codex_catalog::selection_matches(models, configured)
+}
+
 /// A catalog update can change automatic defaults while the endpoint and
 /// deployment mode stay the same. Republish the menu when its slots differ.
 pub fn claude_desktop_models_match(models: &[String]) -> bool {
@@ -2671,6 +2680,24 @@ mod tests {
             assert!(!backup.had_existing());
             restore("claude", &backup).unwrap();
             assert!(read_raw(&path).is_none(), "file removed since it never existed");
+        });
+    }
+
+    #[test]
+    fn missing_or_drifted_codex_catalog_requires_repair() {
+        with_temp_home(|| {
+            codex_stub(&["gpt-5.5"]);
+            let selected = models(&["claude-opus-5"]);
+            assert!(!codex_models_match(&selected));
+            assert!(codex_models_match(&[]));
+            apply("codex", "http://127.0.0.1:9787", "sk-a", &selected).unwrap();
+            assert!(codex_models_match(&selected));
+            assert!(!codex_models_match(&models(&["gemini-4-argon"])));
+            std::fs::remove_file(crate::codex_catalog::aliases_path()).unwrap();
+            assert!(!codex_models_match(&selected));
+            apply("codex", "http://127.0.0.1:9787", "sk-a", &selected).unwrap();
+            std::fs::remove_file(crate::codex_catalog::path()).unwrap();
+            assert!(!codex_models_match(&selected));
         });
     }
 

@@ -342,6 +342,7 @@ export function ModelMultiSelect({
   options,
   value,
   onChange,
+  onOpen,
   disabled = false,
   title,
   addLabel,
@@ -349,6 +350,7 @@ export function ModelMultiSelect({
   options: ModelOption[];
   value: string[];
   onChange: (next: string[]) => void;
+  onOpen?: () => void;
   disabled?: boolean;
   title?: string;
   addLabel?: string;
@@ -372,7 +374,7 @@ export function ModelMultiSelect({
             </button>
           </span>
         ))}
-        <button type="button" className="chip add" onClick={() => setOpen(true)} disabled={disabled}>
+        <button type="button" className="chip add" onClick={() => { onOpen?.(); setOpen(true); }} disabled={disabled}>
           <IconPlus />
           {addLabel ?? t("modelPicker.add")}
         </button>
