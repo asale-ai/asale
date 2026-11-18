@@ -1086,6 +1086,7 @@
     "reinstallGo": "Apply update",
     "reinstallCancel": "Cancel",
     "reinstallRunning": "Updating…",
+    "updateBackgroundHint": "Closing this window won't stop the download — it continues in the background, and you can reopen this to check progress.",
     "reinstallError": "Could not start the installer: {{msg}}",
     "autoUpdateLabel": "Automatic updates",
     "autoUpdateDesc": "Automatically checks and installs updates that can be applied directly. If authorization is needed or installation fails, the current client stays available and automatic retries for that release pause. Click Install update to retry."

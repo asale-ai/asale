@@ -20,10 +20,11 @@ export function UpdateDialog({ onClose }: { onClose: () => void }) {
   const available = hasPendingUpdate(update);
 
   const close = () => {
-    // Never mid-download: there is no cancel for it, and hiding the only
-    // progress bar would leave the app to restart out of nowhere.
-    if (installer.running) return;
-    installer.cancel();
+    // Mid-download this only hides the window: the download belongs to the
+    // shared store, not to this component, so it keeps going and reopening the
+    // dialog (from either place) shows it where it got to. Only an idle
+    // confirmation is actually withdrawn.
+    if (!installer.running) installer.cancel();
     onClose();
   };
 
@@ -38,11 +39,14 @@ export function UpdateDialog({ onClose }: { onClose: () => void }) {
           <h3 id="update-title">
             {available ? t("settings.updateAvailable", { version: update.latest }) : t("settings.reinstallButton")}
           </h3>
-          {!installer.running && (
-            <button type="button" className="modal-x" onClick={close} title={t("settings.reinstallCancel")}>
-              <IconX />
-            </button>
-          )}
+          <button
+            type="button"
+            className="modal-x"
+            onClick={close}
+            title={installer.running ? t("common.close") : t("settings.reinstallCancel")}
+          >
+            <IconX />
+          </button>
         </div>
         <div className="upgrade-body">
           <p className="text-sm">{t("settings.reinstallConfirm")}</p>
@@ -55,6 +59,7 @@ export function UpdateDialog({ onClose }: { onClose: () => void }) {
             </div>
           )}
           <UpdateProgress installer={installer} />
+          {installer.running && <p className="hint">{t("settings.updateBackgroundHint")}</p>}
           {installer.error && (
             <p className="text-sm">{t("settings.reinstallError", { msg: installer.error })}</p>
           )}
@@ -62,7 +67,12 @@ export function UpdateDialog({ onClose }: { onClose: () => void }) {
         <div className="modal-foot">
           <div className="modal-spacer" />
           {installer.running ? (
-            <button type="button" className="btn" disabled>{t("settings.reinstallRunning")}</button>
+            <>
+              <button type="button" className="btn ghost" onClick={close}>
+                {t("common.close")}
+              </button>
+              <button type="button" className="btn" disabled>{t("settings.reinstallRunning")}</button>
+            </>
           ) : (
             <>
               <button type="button" className="btn ghost" onClick={close}>

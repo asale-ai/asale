@@ -1086,6 +1086,7 @@
     "reinstallGo": "更新を適用",
     "reinstallCancel": "キャンセル",
     "reinstallRunning": "更新中…",
+    "updateBackgroundHint": "このウィンドウを閉じてもダウンロードは止まりません。バックグラウンドで続行し、再度開くと進捗を確認できます。",
     "reinstallError": "インストーラーを起動できません: {{msg}}",
     "autoUpdateLabel": "自動更新",
     "autoUpdateDesc": "直接適用できる更新を自動確認・インストールします。認証が必要な場合やインストールに失敗した場合は、そのバージョンの自動再試行を停止します。更新ボタンから再試行できます。"

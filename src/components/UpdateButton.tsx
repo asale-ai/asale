@@ -40,6 +40,8 @@ export function UpdateButton() {
       >
         <IconDownload />
         {t("update.button", { version: update.latest })}
+        {/* The dialog can be closed mid-download; this is where it still shows. */}
+        {installer.running && installer.progress !== null && ` · ${Math.round(installer.progress * 100)}%`}
       </button>
       {open && <UpdateDialog onClose={() => setOpen(false)} />}
     </>

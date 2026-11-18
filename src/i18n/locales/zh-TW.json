@@ -1086,6 +1086,7 @@
     "reinstallGo": "安裝更新",
     "reinstallCancel": "取消",
     "reinstallRunning": "更新中…",
+    "updateBackgroundHint": "關閉視窗不影響下載，更新會在背景繼續；再次開啟可查看進度。",
     "reinstallError": "無法啟動安裝程式：{{msg}}",
     "autoUpdateLabel": "自動更新",
     "autoUpdateDesc": "自動檢查並安裝可直接替換的更新。需要授權或安裝失敗時保留目前的客戶端，暫停該版本的自動重試；請點選安裝更新以重試。"
