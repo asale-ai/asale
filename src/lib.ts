@@ -355,14 +355,18 @@ export interface WithdrawalRow {
 export interface WithdrawLimits {
   /** "solana" | "tron" — which rail these numbers belong to. */
   chain: string;
-  /** Flat fee carved out at credit time; the wallet gains `deposited - deposit_fee`. */
+  /** Minimum deposit fee, in micro-USDT. */
   deposit_fee: number;
+  deposit_fee_bp?: number;
   /** Advisory floor shown in the UI — smaller deposits are still credited. */
   deposit_min: number;
   withdraw_min: number;
   /** Flat fee carved out of the requested amount; the destination receives
    *  `amount - withdraw_fee`. */
   withdraw_fee: number;
+  /** Proportional fee in basis points (1000 = 10%); the charged fee is
+   *  max(withdraw_fee, amount × bp / 10000). Absent on older servers. */
+  withdraw_fee_bp?: number;
   withdraw_max_single: number;
   withdraw_max_daily: number;
   withdraw_max_per_hour: number;

@@ -388,6 +388,7 @@ function RailDeposit({
               <PayReceipt
                 session={session}
                 fee={limits?.deposit_fee ?? null}
+                feeBp={limits?.deposit_fee_bp}
                 onRestart={() => { clearAmount(); restart(); }}
               />
             ) : (
@@ -447,7 +448,9 @@ function RailDeposit({
         { k: t("wallet.factNetwork"), v: method.network },
         // "0.00 USDT" is a true answer that reads as an oversight. A rail that
         // charges nothing should say so — it is the reason to pick it.
-        { k: t("wallet.factDepositFee"), v: <span className="mono">{limits ? (limits.deposit_fee > 0 ? `${fmtUsdt(limits.deposit_fee)} USDT` : t("wallet.feeFree")) : "—"}</span> },
+        { k: t("wallet.factDepositFee"), v: <span className="mono">{limits ? ((limits.deposit_fee_bp ?? 0) > 0
+          ? t("wallet.factDepositFeeRate", { rate: (limits.deposit_fee_bp ?? 0) / 100, floor: fmtUsdt(limits.deposit_fee) })
+          : limits.deposit_fee > 0 ? `${fmtUsdt(limits.deposit_fee)} USDT` : t("wallet.feeFree")) : "—"}</span> },
         { k: t("wallet.factDepositMin"), v: <span className="mono">{limits ? `${fmtUsdt(limits.deposit_min)} USDT` : "—"}</span> },
         { k: t("wallet.factCredit"), v: t("wallet.factCreditVal") },
       ]} />
@@ -476,11 +479,12 @@ function WalletMark({ wallet }: { wallet: WalletBrand }) {
  *  2.70 and the balance moved 1.70. The chain amount is still shown, demoted to
  *  the line that explains the difference. */
 function PayReceipt({
-  session, fee, onRestart,
+  session, fee, feeBp = 0, onRestart,
 }: {
   session: DepositSession;
-  /** Flat deposit fee in micro-USDT; null until the limits land. */
+  /** Deposit fee floor in micro-USDT; null until the limits land. */
   fee: number | null;
+  feeBp?: number;
   onRestart: () => void;
 }) {
   const { t } = useTranslation();
@@ -490,7 +494,8 @@ function PayReceipt({
   // estimate for the confirming screen (and for older servers). Recomputing a
   // percentage off the gross overstated the card fee, since the surcharge
   // rides on top of the requested figure.
-  const applied = credited ? (session.deposit?.fee ?? fee) : fee;
+  const estimate = fee != null && received != null ? Math.max(fee, Math.ceil(received * feeBp / 10_000)) : fee;
+  const applied = credited ? (session.deposit?.fee ?? estimate) : estimate;
   // Clamped exactly as the server clamps it (bin/chain.rs), so a deposit
   // smaller than the fee reads as the zero it will actually credit rather than
   // as a negative number no ledger will ever show.
@@ -814,7 +819,9 @@ function RailWithdraw({
   const micros = Math.round(parseFloat(amount || "0") * 1_000_000);
   const addrValid = method.isAddress(to);
   const min = limits?.withdraw_min ?? 0;
-  const fee = limits?.withdraw_fee ?? 0;
+  const feeBp = limits?.withdraw_fee_bp ?? 0;
+  /* max(gas floor, amount × rate) — the same rule the server charges. */
+  const fee = Math.max(limits?.withdraw_fee ?? 0, micros > 0 ? Math.ceil((micros * feeBp) / 10_000) : 0);
   const maxSingle = limits?.withdraw_max_single ?? 0;
   const belowMin = micros > 0 && min > 0 && micros < min;
   const overSingle = maxSingle > 0 && micros > maxSingle;
@@ -892,7 +899,7 @@ function RailWithdraw({
         {fee > 0 && (
           <>
             <div className="wd-line">
-              <span>{t("wallet.sumFee")}</span>
+              <span>{t("wallet.sumFee")}{feeBp > 0 ? ` (${feeBp / 100}%)` : ""}</span>
               <span className="mono tabular">−{fmtUsdt(fee)} USDT</span>
             </div>
             {/* The fee is deducted from the amount above, so state the arriving

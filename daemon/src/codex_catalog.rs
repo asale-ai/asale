@@ -102,7 +102,7 @@ fn version_path() -> PathBuf {
 fn installed_version() -> String {
     codex_binaries()
         .iter()
-        .filter_map(|bin| Command::new(bin).arg("--version").output().ok())
+        .filter_map(|bin| codex_command(bin).arg("--version").output().ok())
         .filter(|out| out.status.success())
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
         .collect::<Vec<_>>()
@@ -224,28 +224,83 @@ pub fn is_ours(value: &str) -> bool {
 
 // ── native catalog ─────────────────────────────────────────────────────────
 
-/// Codex binaries to ask for the built-in catalog, most specific first. The
-/// ChatGPT app bundles its own; a standalone CLI may also be installed. Both
-/// read the same `~/.codex/config.toml`, so one catalog serves whichever is
-/// present.
+/// Every Codex install on this machine, most specific first. The ChatGPT app
+/// bundles its own; standalone CLIs (npm, nvm, Homebrew, …) may sit beside it,
+/// often at a different version. *All* of them read the same
+/// `~/.codex/config.toml`, so the one catalog we write has to deserialize under
+/// each — which is why every install is found, not just the first.
+///
+/// `$PATH` alone is not enough: the daemon launched by the desktop app gets
+/// the bare GUI path (`/usr/bin:/bin:…`), which reaches neither nvm nor
+/// Homebrew, so the usual install locations are searched too.
 fn codex_binaries() -> Vec<PathBuf> {
-    let mut out = Vec::new();
     // Escape hatch for an install we do not know about (and what the tests
     // point at, so they never depend on a codex being installed).
     if let Ok(explicit) = std::env::var("ASALE_CODEX_BIN") {
-        return vec![PathBuf::from(explicit)];
+        return std::env::split_paths(&explicit).collect();
     }
-    out.extend(bundled_binaries(Path::new("/Applications")));
+    let mut candidates = bundled_binaries(Path::new("/Applications"));
     if let Ok(path) = std::env::var("PATH") {
-        for dir in std::env::split_paths(&path) {
-            let candidate = dir.join("codex");
-            if candidate.is_file() {
-                out.push(candidate);
-                break;
-            }
+        candidates.extend(std::env::split_paths(&path).map(|dir| dir.join("codex")));
+    }
+    candidates.extend(well_known_dirs(&home()).into_iter().map(|dir| dir.join("codex")));
+    dedup_installs(candidates)
+}
+
+/// Where standalone CLIs usually land, for when `$PATH` does not say.
+fn well_known_dirs(home: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    // One bin dir per installed node under nvm; newest name last is fine —
+    // order only decides which dump is the base, and every one is merged.
+    if let Ok(entries) = std::fs::read_dir(home.join(".nvm/versions/node")) {
+        let mut nodes: Vec<PathBuf> = entries.flatten().map(|e| e.path().join("bin")).collect();
+        nodes.sort();
+        dirs.extend(nodes);
+    }
+    dirs.extend(
+        [
+            ".volta/bin",
+            "Library/pnpm",
+            ".bun/bin",
+            ".local/bin",
+            ".npm-global/bin",
+            ".cargo/bin",
+        ]
+        .iter()
+        .map(|d| home.join(d)),
+    );
+    dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"].iter().map(PathBuf::from));
+    dirs
+}
+
+/// Existing files only (a dangling symlink is no install), each install once
+/// however many paths lead to it.
+fn dedup_installs(candidates: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    candidates
+        .into_iter()
+        .filter(|c| c.is_file())
+        .filter(|c| seen.insert(std::fs::canonicalize(c).unwrap_or_else(|_| c.clone())))
+        .collect()
+}
+
+/// A `Command` for a codex binary that also runs under the GUI `$PATH`.
+///
+/// npm's `codex` is a node script (`#!/usr/bin/env node`); with the bare GUI
+/// path `env` cannot find node and the run fails before Codex says anything.
+/// The binary's own directory is where nvm/volta/Homebrew put node beside it.
+fn codex_command(bin: &Path) -> Command {
+    let mut cmd = Command::new(bin);
+    if let Some(dir) = bin.parent() {
+        let mut path = vec![dir.to_path_buf()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            path.extend(std::env::split_paths(&existing));
+        }
+        if let Ok(joined) = std::env::join_paths(path) {
+            cmd.env("PATH", joined);
         }
     }
-    out
+    cmd
 }
 
 /// Prefer the desktop CLI over a potentially older npm installation.
@@ -294,20 +349,53 @@ pub fn selection_matches(models: &[String], configured_path: Option<&str>) -> bo
 /// the state an older asale build leaves behind) would take the dump with it.
 /// It also keeps the dump native — our own `model_catalog_json` is not in
 /// scope there, so re-applying never feeds a previous generation back in.
+///
+/// Every install is dumped, not just the first: the most specific one supplies
+/// the entries, and the others only add the fields *they* insist on (see
+/// [`backfill`]). Without that, a catalog dumped from the desktop app's newer
+/// Codex lacked `supports_parallel_tool_calls`, which an older npm Codex
+/// requires — and that Codex then refused to start at all.
 fn native_catalog() -> Option<Vec<Value>> {
     let scratch = std::env::temp_dir().join(format!("asale-codex-catalog-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&scratch);
     let out_path = scratch.join("models.json");
 
-    let mut found = None;
+    let mut base: Option<Vec<Value>> = None;
     for bin in codex_binaries() {
-        if let Some(models) = dump_models(&bin, &scratch, &out_path) {
-            found = Some(models);
-            break;
+        let Some(models) = dump_models(&bin, &scratch, &out_path) else { continue };
+        match base.as_mut() {
+            None => base = Some(models),
+            Some(base) => backfill(base, &models),
         }
     }
     let _ = std::fs::remove_dir_all(&scratch);
-    found
+    base
+}
+
+/// Give every entry of `base` the fields `other`'s Codex treats as required,
+/// without touching anything `base` already says.
+///
+/// Required is read off the dump: a key present on *every* entry is one that
+/// build always emits, and most likely one it will not parse without. Keys
+/// only some entries carry are optional there and are left out — inventing
+/// them would put values on entries that never had them. The value comes from
+/// the same model in `other` when it has one, else from its first entry.
+fn backfill(base: &mut [Value], other: &[Value]) {
+    let Some(first) = other.first().and_then(Value::as_object) else { return };
+    let required: Vec<&String> = first
+        .keys()
+        .filter(|k| other.iter().all(|e| e.get(k.as_str()).is_some()))
+        .collect();
+    for entry in base.iter_mut() {
+        let twin = other.iter().find(|o| slug_of(o) == slug_of(entry)).and_then(Value::as_object);
+        let Some(o) = entry.as_object_mut() else { continue };
+        for key in &required {
+            if !o.contains_key(key.as_str()) {
+                let value = twin.and_then(|t| t.get(key.as_str())).unwrap_or(&first[key.as_str()]);
+                o.insert((*key).clone(), value.clone());
+            }
+        }
+    }
 }
 
 fn dump_models(bin: &Path, scratch: &Path, out_path: &Path) -> Option<Vec<Value>> {
@@ -315,7 +403,7 @@ fn dump_models(bin: &Path, scratch: &Path, out_path: &Path) -> Option<Vec<Value>
     // prompt for every model (hundreds of KiB), which would deadlock against an
     // undrained pipe buffer.
     let out_file = std::fs::File::create(out_path).ok()?;
-    let mut child = Command::new(bin)
+    let mut child = codex_command(bin)
         .args(["debug", "models", "--bundled"])
         .env("CODEX_HOME", scratch)
         .stdin(Stdio::null())
@@ -572,6 +660,50 @@ mod tests {
         assert_eq!(parse_models(r#"[{"slug":"a"}]"#).unwrap().len(), 1);
         assert!(parse_models(r#"{"models":[]}"#).is_none(), "an empty catalog is not usable");
         assert!(parse_models("not json").is_none());
+    }
+
+    #[test]
+    fn backfill_adds_only_the_fields_another_codex_requires() {
+        // The desktop app's newer dump (base) dropped a field the older npm
+        // Codex still requires; that Codex then refused to start at all.
+        let mut base = vec![
+            json!({"slug": "gpt-5.5", "visibility": "list", "default_service_tier": "flex"}),
+            json!({"slug": "gpt-6", "visibility": "list"}),
+        ];
+        let older = vec![
+            json!({"slug": "gpt-5.5", "visibility": "hide", "supports_parallel_tool_calls": false,
+                   "legacy_only_sometimes": 1}),
+            json!({"slug": "gpt-5.2", "visibility": "list", "supports_parallel_tool_calls": true}),
+        ];
+        backfill(&mut base, &older);
+        assert_eq!(base[0]["supports_parallel_tool_calls"], false, "the same model's value wins");
+        assert_eq!(base[1]["supports_parallel_tool_calls"], false, "else the first entry's");
+        assert_eq!(base[0]["visibility"], "list", "nothing base says is overwritten");
+        assert_eq!(base[0]["default_service_tier"], "flex");
+        assert!(base[0].get("legacy_only_sometimes").is_none(), "optional keys are not invented");
+        backfill(&mut base, &[]);
+        assert_eq!(base.len(), 2, "an empty dump changes nothing");
+    }
+
+    #[test]
+    fn finds_nvm_installs_that_the_gui_path_cannot_see() {
+        let root = std::env::temp_dir().join(format!("asale-codex-nvm-{}", std::process::id()));
+        let bin = root.join(".nvm/versions/node/v22.0.0/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("codex"), "").unwrap();
+        let found = dedup_installs(well_known_dirs(&root).into_iter().map(|d| d.join("codex")).collect());
+        assert!(found.contains(&bin.join("codex")), "{found:?}");
+        // The same install reached twice (PATH and the nvm scan) counts once.
+        let twice = dedup_installs(vec![bin.join("codex"), bin.join("codex"), root.join("missing/codex")]);
+        assert_eq!(twice, vec![bin.join("codex")]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn codex_command_puts_the_binarys_own_dir_first_on_path() {
+        let cmd = codex_command(Path::new("/opt/node/bin/codex"));
+        let path = cmd.get_envs().find(|(k, _)| *k == "PATH").and_then(|(_, v)| v).unwrap();
+        assert!(path.to_string_lossy().starts_with("/opt/node/bin"), "{path:?}");
     }
 
     #[test]
