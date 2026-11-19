@@ -2338,16 +2338,35 @@ fn error_class(status: u16, body: &str) -> String {
             serde_json::Value::Number(n) => Some(n.to_string()),
             _ => None,
         });
-    let class = match class {
+    let mut class = match class {
         Some(c) => format!("{status} {}", c.chars().take(64).collect::<String>()),
         None => status.to_string(),
     };
+    // `type` names the family (`invalid_request_error`) and `code` the actual
+    // cause (`invalid_encrypted_content`, `context_length_exceeded`, …). With
+    // only the first, every distinct 400 a Responses upstream returns read the
+    // same in the task ledger and none of them could be told apart. A code is
+    // a vendor-defined identifier, so it travels — but only if it looks like one.
+    if let (Some(_), Some(code)) = (e["type"].as_str(), e["code"].as_str()) {
+        if is_identifier(code) && !class.ends_with(code) {
+            class = format!("{class} code={code}");
+        }
+    }
     // Only fixed schema names travel. Never send provider messages, unknown
-    // paths, credentials, or account identifiers to the gateway.
-    let field = e["param"].as_str().filter(|p| matches!(*p,
-        "model" | "messages" | "tools" | "tool_choice" | "temperature" |
-        "top_p" | "max_tokens" | "max_completion_tokens" | "response_format" |
-        "stream" | "thinking" | "reasoning_effort"));
+    // paths, credentials, or account identifiers to the gateway. A Responses
+    // upstream names a path into `input` (`input[12].encrypted_content`): the
+    // index and field names are schema, not content.
+    let field = e["param"].as_str().filter(|p| {
+        let root = p.split(['.', '[']).next().unwrap_or_default();
+        matches!(root,
+            "model" | "messages" | "tools" | "tool_choice" | "temperature" |
+            "top_p" | "max_tokens" | "max_completion_tokens" | "response_format" |
+            "stream" | "thinking" | "reasoning_effort" | "input" | "instructions" |
+            "reasoning" | "include" | "store" | "text" | "prompt_cache_key" |
+            "parallel_tool_calls" | "service_tier" | "max_output_tokens")
+            && p.len() <= 96
+            && p.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '[' | ']'))
+    });
     let class = field.map_or_else(|| class.clone(), |p| format!("{class} param={p}"));
     // The gateway downgrades to its own search only when it can tell the vendor
     // refused *search* — and the message that says so is dropped above. A fixed
@@ -2358,6 +2377,11 @@ fn error_class(status: u16, body: &str) -> String {
     } else {
         class
     }
+}
+
+/// A short vendor-defined token (`invalid_encrypted_content`), not prose.
+fn is_identifier(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
 /// A failed attempt held back while another local account is tried.
@@ -2495,6 +2519,12 @@ mod tests {
         assert_eq!(super::error_class(400,r#"{"error":{"type":"invalid_request_error","param":"max_tokens","message":"private account"}}"#),"400 invalid_request_error param=max_tokens");
         assert_eq!(super::error_class(404,r#"{"error":{"type":"resource_not_found_error","param":"model"}}"#),"404 resource_not_found_error param=model");
         assert!(!super::error_class(400,r#"{"error":{"param":"sk-live-secret","message":"secret@example.com"}}"#).contains("secret"));
+        assert_eq!(
+            super::error_class(400, r#"{"error":{"type":"invalid_request_error","code":"invalid_encrypted_content","param":"input[12].encrypted_content","message":"acct x"}}"#),
+            "400 invalid_request_error code=invalid_encrypted_content param=input[12].encrypted_content"
+        );
+        assert!(!super::error_class(400, r#"{"error":{"type":"invalid_request_error","code":"user me@x.com"}}"#).contains('@'));
+        assert!(!super::error_class(400, r#"{"error":{"type":"invalid_request_error","param":"input[0].sk-live-secret"}}"#).contains("secret"));
     }
 
     /// The buyer's half and the operator's half of an upstream rejection travel
