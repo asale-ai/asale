@@ -74,6 +74,10 @@ export function WalletPage() {
   useEffect(() => { refresh(); }, [refresh]);
 
   const availableMicros = w?.balance ?? 0;
+  const withdrawalLimits = hist?.chains ?? (hist?.limits ? [hist.limits] : []);
+  const minimumWithdrawal = withdrawalLimits.length > 0
+    ? Math.min(...withdrawalLimits.map((chain) => chain.withdraw_min))
+    : null;
 
   /* 网关的充提面板是在**外部浏览器**里打开的（webview 装不下第三方支付页，
      而网关的 frame-ancestors 里也没有 tauri://localhost），所以这一页没有任何
@@ -220,6 +224,9 @@ export function WalletPage() {
               <IconShare />{t("share.open")}
             </button>
           </div>
+          {minimumWithdrawal !== null && (
+            <p className="wh-withdraw-min">{t("wallet.belowMin", { amount: fmtUsdt(minimumWithdrawal) })}</p>
+          )}
           <div className="wh-trust">
             <span className="trust-chip"><IconShield />{t("wallet.trustCustody")}</span>
             <span className="trust-chip"><IconCheck />{t("wallet.trustNetwork")}</span>

@@ -1927,7 +1927,9 @@ table.tbl .td-note { font-size: var(--fs-micro); color: var(--fg-3); font-weight
 }
 
 .wallet-hero .wh-actions { display: flex; gap: var(--s8); flex-wrap: wrap; margin-top: var(--s20); }
-.wallet-hero .wh-actions + .wh-trust { margin-top: var(--s12); }
+.wallet-hero .wh-withdraw-min { margin: var(--s8) 0 0; color: var(--muted); font-size: 13px; }
+.wallet-hero .wh-actions + .wh-trust,
+.wallet-hero .wh-withdraw-min + .wh-trust { margin-top: var(--s12); }
 
 /* ── Link row ───────────────────────────────────────────────────────────────
    A whole row that opens a page on the website. It reads as a card rather than
