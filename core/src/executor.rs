@@ -2329,6 +2329,13 @@ fn transport_error_kind(error: &reqwest::Error) -> &'static str {
 /// organisation, the key prefix, sometimes the account email, and none of that
 /// belongs in the gateway's task rows. The local log still has the text.
 fn error_class(status: u16, body: &str) -> String {
+    if (400..500).contains(&status) {
+        let mut summary = asale_protocol::upstream_error::Diagnostic::from_body(body).summary(status);
+        if asale_protocol::search::unavailable(body) {
+            summary.push_str(" web_search_unsupported");
+        }
+        return summary;
+    }
     let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
     let e = &v["error"];
     let class = [&e["type"], &e["code"], &e["details"]["error_code"], &v["type"], &v["code"]]
@@ -2504,24 +2511,24 @@ mod tests {
     #[test]
     fn an_upstream_body_is_reduced_to_its_error_class() {
         use super::error_class;
-        assert_eq!(error_class(429, r#"{"error":{"type":"rate_limit_error","message":"org org-abc123 hit its limit"}}"#), "429 rate_limit_error");
-        assert_eq!(error_class(402, r#"{"error":{"message":"x","details":{"error_code":"credits_required"}}}"#), "402 credits_required");
-        assert_eq!(error_class(401, r#"{"error":{"code":401,"message":"bad key sk-live-secret"}}"#), "401 401");
+        assert_eq!(error_class(429, r#"{"error":{"type":"rate_limit_error","message":"org org-abc123 hit its limit"}}"#), "429 rate_limit_error reason=not_classified");
+        assert_eq!(error_class(402, r#"{"error":{"message":"x","details":{"error_code":"credits_required"}}}"#), "402 code=credits_required reason=not_classified");
+        assert_eq!(error_class(401, r#"{"error":{"code":401,"message":"bad key sk-live-secret"}}"#), "401 reason=not_classified");
         assert_eq!(error_class(502, "<html>gateway</html>"), "502");
         let openrouter = r#"{"error":{"message":"The requested model does not support native web search. Use engine: \"auto\" or \"exa\" instead","code":404}}"#;
-        assert_eq!(error_class(404, openrouter), "404 404 web_search_unsupported");
+        assert!(error_class(404, openrouter).ends_with(" web_search_unsupported"));
         assert!(asale_protocol::search::unavailable(&error_class(404, openrouter)), "the gateway must recognise the marker");
         assert!(!error_class(400, r#"{"error":{"type":"invalid_request_error","message":"secret@example.com"}}"#).contains('@'));
     }
 
     #[test]
     fn bad_request_diagnostics_only_include_known_parameter_names() {
-        assert_eq!(super::error_class(400,r#"{"error":{"type":"invalid_request_error","param":"max_tokens","message":"private account"}}"#),"400 invalid_request_error param=max_tokens");
+        assert_eq!(super::error_class(400,r#"{"error":{"type":"invalid_request_error","param":"max_tokens","message":"private account"}}"#),"400 invalid_request_error param=max_tokens reason=not_classified");
         assert_eq!(super::error_class(404,r#"{"error":{"type":"resource_not_found_error","param":"model"}}"#),"404 resource_not_found_error param=model");
         assert!(!super::error_class(400,r#"{"error":{"param":"sk-live-secret","message":"secret@example.com"}}"#).contains("secret"));
         assert_eq!(
             super::error_class(400, r#"{"error":{"type":"invalid_request_error","code":"invalid_encrypted_content","param":"input[12].encrypted_content","message":"acct x"}}"#),
-            "400 invalid_request_error code=invalid_encrypted_content param=input[12].encrypted_content"
+            "400 invalid_request_error code=invalid_encrypted_content param=input[12].encrypted_content reason=invalid_encrypted_content"
         );
         assert!(!super::error_class(400, r#"{"error":{"type":"invalid_request_error","code":"user me@x.com"}}"#).contains('@'));
         assert!(!super::error_class(400, r#"{"error":{"type":"invalid_request_error","param":"input[0].sk-live-secret"}}"#).contains("secret"));

@@ -22,6 +22,7 @@ pub mod ids;
 pub mod payload;
 pub mod providers;
 pub mod search;
+pub mod upstream_error;
 
 pub use frame::{
     codes, is_bad_credential, is_out_of_credit, is_rate_limited, is_retriable, Envelope,
