@@ -195,14 +195,8 @@ const AMOUNT_PRESETS = [10, 20, 50, 100];
  *  amount". */
 const DEFAULT_AMOUNT = 20;
 
-/** The card rail's own chips. They start lower than the chain's, because this
- *  is the rail a first-time buyer reaches for and the first question they are
- *  asking is "how little can I risk to find out whether this works". */
-const CARD_AMOUNT_PRESETS = [5, 10, 20, 50];
-
-/** Lit on open: the smallest top-up the processor accepts. A default of 10
- *  reads as a suggestion to spend more than necessary on a first try. */
-const CARD_DEFAULT_AMOUNT = 5;
+const CARD_AMOUNT_PRESETS = [10, 20, 50, 100];
+const CARD_DEFAULT_AMOUNT = 20;
 
 function RailDeposit({
   method, limits, onDone,
