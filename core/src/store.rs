@@ -862,16 +862,21 @@ impl LocalStore {
     }
 
     /// Paged read of provider (publisher-side) records, newest first.
-    pub async fn list_provider_records(&self, limit: i64, offset: i64) -> anyhow::Result<(Vec<RecordRow>, i64)> {
+    pub async fn list_provider_records(&self, limit: i64, offset: i64, visible_only: bool) -> anyhow::Result<(Vec<RecordRow>, i64)> {
+        // The mirror records detailed executor errors as strings. Only the
+        // normal and user-stopped outcomes belong in the offline history.
+        let filter = if visible_only { " WHERE status IN ('ok', 'budget', 'canceled')" } else { "" };
         let rows: Vec<(String, i64, String, i64, i64, i64, i64, i64, String)> = sqlx::query_as(
-            "SELECT task_id, ts, model, in_tokens, out_tokens, cache_read, cache_write, amount_usdt, status
-             FROM provider_records ORDER BY ts DESC, task_id DESC LIMIT ? OFFSET ?",
+            &format!("SELECT task_id, ts, model, in_tokens, out_tokens, cache_read, cache_write, amount_usdt, status
+             FROM provider_records{filter} ORDER BY ts DESC, task_id DESC LIMIT ? OFFSET ?"),
         )
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.pool)
         .await?;
-        let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM provider_records").fetch_one(&self.pool).await?;
+        let total: (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM provider_records{filter}"))
+            .fetch_one(&self.pool)
+            .await?;
         let out = rows
             .into_iter()
             .map(|(task_id, ts, model, in_tokens, out_tokens, cache_read, cache_write, amount_usdt, status)| RecordRow {
@@ -1389,7 +1394,7 @@ mod tests {
         // Provider record amount sync (reconcile).
         s.insert_provider_record("p1", "claude", "a@b.io", "claude-sonnet", 100, 50, 0, 0, "ok").await.unwrap();
         s.set_provider_record_amount("p1", 777).await.unwrap();
-        let (prow, ptotal) = s.list_provider_records(10, 0).await.unwrap();
+        let (prow, ptotal) = s.list_provider_records(10, 0, false).await.unwrap();
         assert_eq!(ptotal, 1);
         assert_eq!(prow[0].amount_usdt, 777);
 
@@ -1398,6 +1403,18 @@ mod tests {
         assert!(s.delete_tool("claude", "a@b.io").await.unwrap());
         assert!(!s.delete_tool("claude", "a@b.io").await.unwrap());
         assert!(s.list_tools().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn provider_history_filters_errors_before_paging() {
+        let s = LocalStore::open_memory().await.unwrap();
+        for (id, status) in [("1", "ok"), ("2", "canceled"), ("3", "upstream_error"), ("4", "stream_error")] {
+            s.insert_provider_record(id, "claude", "account", "model", 0, 0, 0, 0, status).await.unwrap();
+        }
+        let (rows, total) = s.list_provider_records(1, 1, true).await.unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(rows[0].task_id, "1");
+        assert_eq!(s.list_provider_records(10, 0, false).await.unwrap().1, 4);
     }
 
     #[tokio::test]

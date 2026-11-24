@@ -51,8 +51,7 @@ export function Records() {
   // sells, so it has a first-hand record with real settled amounts; what it
   // buys is priced after its stream closes, so there is nothing local worth
   // falling back to — an offline buyer sees `server_error` and no table.
-  const useLocal =
-    role === "provider" && (!!data?.server_error || (data?.records?.length ?? 0) === 0);
+  const useLocal = role === "provider" && !!data?.server_error;
   const serverRows: ServerRecord[] = data?.records ?? [];
   const localRows: LocalRecord[] = data?.local.records ?? [];
   const rowsShown = useLocal ? localRows.length : serverRows.length;

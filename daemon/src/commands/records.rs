@@ -7,7 +7,7 @@ use super::server_client::{authed};
 use super::{R, err, now_secs};
 
 /// Task records: the server's authoritative page, plus — on the provider side —
-/// the matching local page for offline display and reconcile.
+/// the matching local page for offline display.
 ///
 /// There is no consumer-side local page. This device serves the calls it sells,
 /// so `provider_records` is a first-hand account with real settled amounts in
@@ -22,12 +22,12 @@ pub async fn records_query(state: &AppState, role: String, page: i64) -> R<Value
     let offset = (page - 1) * per_page;
 
     let (local_rows, local_total) = if role == "provider" {
-        state.store.list_provider_records(per_page, offset).await.map_err(err)?
+        state.store.list_provider_records(per_page, offset, true).await.map_err(err)?
     } else {
         (Vec::new(), 0)
     };
 
-    let server = authed(state, reqwest::Method::GET, &format!("/api/v1/me/records?role={role}&page={page}"), None).await;
+    let server = authed(state, reqwest::Method::GET, &format!("/api/v1/me/records?role={role}&page={page}&visible_only=true"), None).await;
     let (records, server_error) = match server {
         Ok(v) => (v["records"].clone(), Value::Null),
         Err(e) => (json!([]), json!(e.message)),
@@ -72,7 +72,7 @@ pub async fn reconcile_now(state: &AppState) -> R<Value> {
         }
     }
 
-    let (local_rows, _) = state.store.list_provider_records(500, 0).await.map_err(err)?;
+    let (local_rows, _) = state.store.list_provider_records(500, 0, false).await.map_err(err)?;
     let local_entries: Vec<reconcile::RecEntry> = local_rows
         .iter()
         .map(|r| reconcile::RecEntry {
