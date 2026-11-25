@@ -390,6 +390,11 @@ pub async fn list_accounts(state: &AppState) -> R<Value> {
         let gate = super::usage::account_quota_gate(&state.store, &s.provider, &s.account_id, now_secs()).await;
         let mut row = serde_json::to_value(&s).map_err(err)?;
         if let Some(obj) = row.as_object_mut() {
+            if s.provider == "codex" && state.store.get_setting(&super::usage::codex_login_expired_key(&s.account_id))
+                .await.ok().flatten().as_deref() == Some("1")
+            {
+                obj.insert("login_expired".into(), json!(true));
+            }
             obj.insert("window_cap".into(), json!(window_cap));
             // Daily equivalent of the 5h rolling cap (24h / 5h = 4.8×).
             obj.insert("daily_cap".into(), json!(window_cap * 24 / 5));

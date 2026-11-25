@@ -224,6 +224,7 @@ export function Limits() {
     // data — and hides the windows the provider reports that we cannot derive
     // (the weekly per-model ones).
     const reason = p.fallback_reason || "";
+    const loginExpired = p.login_expired;
     // Codex has no endpoint to poll — its numbers ride back on the headers of
     // an accepted API call, so the freshest reading can be minutes old. Still
     // the provider's own number, but the page has to say when it was taken.
@@ -232,7 +233,9 @@ export function Limits() {
       age ? t("limits.measuredAt", { ago: age }) : "",
       p.stale_reason ? t("limits.staleReason", { reason: p.stale_reason }) : "",
     ].filter(Boolean).join("\n");
-    const badge = p.live
+    const badge = loginExpired
+      ? <span className="pill warn tiny" title={t("publish.codexLoginExpired")}>{t("publish.statusExpired")}</span>
+      : p.live
       ? (
         <span className="pill on tiny" title={liveTitle || undefined}>
           {t("limits.live")}{age ? ` · ${age}` : ""}
@@ -277,6 +280,7 @@ export function Limits() {
             )}
           </div>
         )}
+        {loginExpired && <div className="ld-line">{t("publish.codexLoginExpired")}</div>}
         {expanded && (
           <div className="limit-detail">
             {rows.map(({ w, pace }) => {
@@ -288,10 +292,10 @@ export function Limits() {
                 </div>
               );
             })}
-            {reason && <div className="ld-line">{t("limits.estimateReason", { reason })}</div>}
+            {!loginExpired && reason && <div className="ld-line">{t("limits.estimateReason", { reason })}</div>}
             {/* Real numbers that stopped refreshing. Says why they are old
                 without calling them an estimate, which they are not. */}
-            {p.stale_reason && (
+            {!loginExpired && p.stale_reason && (
               <div className="ld-line">{t("limits.staleReason", { reason: p.stale_reason })}</div>
             )}
           </div>

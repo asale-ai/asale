@@ -630,6 +630,7 @@ export interface SupplyTest {
 }
 
 export interface AccountStatus {
+  login_expired?: boolean;
   provider: string;
   account_id: string;
   plan: string | null;
@@ -834,6 +835,7 @@ export interface LimitProvider {
   /** Why `live` is false, when a live read was attempted and failed. Absent for
    *  providers that expose no usage endpoint at all. */
   fallback_reason?: string | null;
+  login_expired?: boolean;
 }
 export interface UsageLimits {
   providers: LimitProvider[];

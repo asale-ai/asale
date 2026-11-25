@@ -136,7 +136,7 @@ pub async fn oauth_submit_code(state: &Arc<AppState>, flow_id: String, input: St
 
 /// Wait for the provider callback, exchange the code, persist tokens + tool row.
 pub(crate) async fn finish_provider_oauth(
-    state: &AppState,
+    state: &Arc<AppState>,
     p: &oauth::OAuthProvider,
     provider: &str,
     fut: oauth::AuthCodeFuture,
@@ -265,6 +265,23 @@ pub(crate) async fn finish_provider_oauth(
     // replaced has no claim on the new one.
     credential_replaced(state, provider, &account_id).await;
     accounts_changed(state).await;
+    if provider == "codex" {
+        // The old reading remains valid as history, but a new credential
+        // deserves a fresh check without waiting for the next sweep.
+        let state = Arc::clone(state);
+        let account_id = account_id.clone();
+        tokio::spawn(async move {
+            match super::usage::probe_codex_account(&state, "codex", &account_id).await {
+                Ok(_) => {
+                    publisher::rebuild_pool(&state.store, &state.pool).await;
+                    if let Some(handle) = state.publisher.read().await.as_ref() {
+                        handle.nudge();
+                    }
+                }
+                Err(e) => tracing::debug!(account = %account_id, "Codex quota check after OAuth: {e}"),
+            }
+        });
+    }
 
     Ok(json!({"provider": provider, "account_id": account_id, "keychain_ref": keychain::token_ref(provider, &account_id)}))
 }

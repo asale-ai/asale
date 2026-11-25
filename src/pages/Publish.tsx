@@ -2001,7 +2001,7 @@ export function Publish() {
               // `auth` pause is on disk and comes back. Asking only the account
               // meant a restart quietly dropped the banner and left six lanes
               // labelled "sign-in needed" with nothing on the page saying why.
-              const deadCred = a.status === "expired" || own.some((l) => l.paused_reason === "auth");
+              const deadCred = a.login_expired || a.status === "expired" || own.some((l) => l.paused_reason === "auth");
               const open = openAcct[k] ?? openByDefault;
               return (
                 <div key={k} className={`acct ${a.sell_enabled ? "selling" : ""}`}>
@@ -2017,7 +2017,7 @@ export function Publish() {
                       </div>
                       <div className="acct-meta">
                         <span className="mono">{a.provider}</span>
-                        {statusPill(a.status)}
+                        {statusPill(a.login_expired ? "expired" : a.status)}
                         {a.shared_with_local_cli
                           ? <span className="pill warn" title={t("publish.sharedHint")}>{t("publish.sharedBadge")}</span>
                           : <span className="pill on" title={t("publish.ownedHint")}>{t("publish.ownedBadge")}</span>}
@@ -2076,7 +2076,7 @@ export function Publish() {
 
                   {deadCred && (
                     <div className="callout warn compact">
-                      <IconInfo /><span>{t("publish.expiredHint")}</span>
+                      <IconInfo /><span>{t(a.login_expired ? "publish.codexLoginExpired" : "publish.expiredHint")}</span>
                       {canReauth(a) && (
                         <button
                           className="btn ghost sm callout-act"

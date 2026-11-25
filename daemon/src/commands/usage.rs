@@ -291,6 +291,8 @@ pub async fn usage_limits(state: &AppState, force: Option<bool>) -> R<Value> {
                 _ => (json!([]), false, None, None, None),
             };
 
+        let login_expired = provider == "codex" && [stale_reason.as_deref(), fallback_reason.as_deref()]
+            .into_iter().flatten().any(|reason| reason.ends_with(": token_expired"));
         providers.push(json!({
             "id": provider,
             "connected": true,
@@ -300,6 +302,7 @@ pub async fn usage_limits(state: &AppState, force: Option<bool>) -> R<Value> {
             "as_of": as_of,
             "stale_reason": stale_reason,
             "fallback_reason": fallback_reason,
+            "login_expired": login_expired,
         }));
     }
     Ok(json!({ "providers": providers }))
@@ -670,7 +673,25 @@ pub(crate) async fn record_quota_headers(
         Some(asale_protocol::QuotaSource::Headers(_)) => normalize_ratelimit_headers(headers, now_secs()),
         _ => return,
     };
-    record_quota_windows(store, provider, account_id, &Value::Array(windows)).await;
+    if provider == "codex" {
+        // The plan and the windows can arrive independently. A plan-only
+        // response must not erase or mark an older reading as current.
+        let plan_key = format!("plan:{provider}:{account_id}");
+        let plan = headers.get("x-codex-plan-type").filter(|p| !p.is_empty());
+        if let Some(plan) = plan {
+            let _ = store.set_setting(&plan_key, plan).await;
+        }
+        if !windows.is_empty() {
+            let plan = match plan {
+                Some(plan) => Some(plan.clone()),
+                None => store.get_setting(&plan_key).await.ok().flatten().filter(|p| !p.is_empty()),
+            };
+            let snap = json!({ "at": now_secs(), "windows": windows, "plan": plan });
+            let _ = store.set_setting(&quota_snapshot_key(provider, account_id), &snap.to_string()).await;
+        }
+    } else {
+        record_quota_windows(store, provider, account_id, &Value::Array(windows)).await;
+    }
 }
 
 /// Bank a reading, however it was obtained — Codex's response headers or
@@ -775,50 +796,121 @@ pub(crate) async fn probe_codex_account(state: &AppState, provider: &str, accoun
         .ok()
         .flatten()
         .ok_or_else(|| "no OAuth token in the local secret store".to_string())?;
-    let chatgpt_id = asale_client_core::executor::chatgpt_account_id(&token).unwrap_or_default();
-    let model = codex_probe_model(state, &token, &chatgpt_id).await?;
-    let headers = match fetch_codex_headers(&token, &chatgpt_id, &model).await {
+    let chatgpt_id = state.store.get_setting(&crate::publisher::upstream_acct_key(provider, account_id))
+        .await.ok().flatten().filter(|s| !s.is_empty())
+        .or_else(|| asale_client_core::executor::chatgpt_account_id(&token))
+        .unwrap_or_default();
+    let plan = state.store.get_setting(&format!("plan:{provider}:{account_id}")).await.ok().flatten();
+    let model_key = codex_probe_model_key(account_id, plan.as_deref());
+    let expired_key = codex_login_expired_key(account_id);
+    let attempt = async {
+        let model = codex_probe_model(state, &token, &chatgpt_id, &model_key).await?;
+        fetch_codex_headers(&token, &chatgpt_id, &model).await
+    }.await;
+    let headers = match attempt {
         Ok(h) => h,
-        Err(e) => {
+        Err(CodexProbeError::TokenExpired) => {
+            if keychain::get(&keychain::token_ref(provider, account_id)).ok().flatten().as_deref() == Some(&token) {
+                let _ = state.store.set_setting(&expired_key, "1").await;
+            }
+            return Err("token_expired".into());
+        }
+        Err(CodexProbeError::Other(e)) => {
             // The entitled model set moves with each Codex release, so a
             // rejected slug means the cached pick has aged out, not that the
             // account is broken. Drop it and let the next attempt re-ask.
             if e.contains("not supported when using Codex") {
-                let _ = state.store.set_setting(CODEX_PROBE_MODEL_KEY, "").await;
+                let _ = state.store.set_setting(&model_key, "").await;
             }
             return Err(e);
         }
     };
+    let _ = state.store.delete_setting(&expired_key).await;
+    record_quota_headers(&state.store, provider, account_id, &headers).await;
     let windows = normalize_codex_headers(&headers, now_secs());
     if windows.is_empty() {
         return Err("response carried no x-codex-* rate-limit headers".into());
     }
-    record_quota_headers(&state.store, provider, account_id, &headers).await;
     Ok(Value::Array(windows))
 }
 
-/// When this account's banked reading was taken, if it has one at all.
-///
-/// Cheaper than [`account_quota_gate`] and answers a different question: not
-/// "what may this account still sell" but "is it time to buy a fresh reading".
-pub(crate) async fn quota_snapshot_at(store: &LocalStore, provider: &str, account_id: &str) -> Option<i64> {
-    let raw = store.get_setting(&quota_snapshot_key(provider, account_id)).await.ok().flatten()?;
-    serde_json::from_str::<Value>(&raw).ok()?.get("at").and_then(Value::as_i64)
+pub(crate) fn codex_login_expired_key(account_id: &str) -> String {
+    format!("codex_login_expired:{account_id}")
 }
 
-/// Cached slug for the probe request.
-const CODEX_PROBE_MODEL_KEY: &str = "codex:probe_model";
+enum CodexProbeError {
+    TokenExpired,
+    Other(String),
+}
+
+#[cfg(test)]
+#[test]
+fn codex_login_expiry_requires_the_upstream_error_code() {
+    use discovery::codex_token_expired;
+    let expired = json!({"error": {"code": "token_expired"}});
+    assert!(codex_token_expired(401, &expired));
+    assert!(!codex_token_expired(429, &expired));
+    assert!(!codex_token_expired(401, &json!({"error": {"code": "invalid_token"}})));
+    assert!(!codex_token_expired(401, &Value::Null));
+}
+
+/// A recent reading from before a plan change still gates sales, but should
+/// not suppress the next probe.
+pub(crate) async fn codex_snapshot_current(store: &LocalStore, provider: &str, account_id: &str, now: i64) -> bool {
+    let plan = store.get_setting(&format!("plan:{provider}:{account_id}")).await.ok().flatten();
+    let snap = store.get_setting(&quota_snapshot_key(provider, account_id)).await.ok().flatten()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    snap.is_some_and(|snap| codex_snapshot_matches(&snap, plan.as_deref(), now))
+}
+
+fn codex_snapshot_matches(snap: &Value, plan: Option<&str>, now: i64) -> bool {
+    snap["at"].as_i64().is_some_and(|at| now - at < CODEX_SNAPSHOT_TTL)
+        && snap["plan"].as_str() == plan.filter(|p| !p.is_empty())
+}
+
+fn codex_probe_model_key(account_id: &str, plan: Option<&str>) -> String {
+    format!("codex:probe_model:{}:{account_id}", plan.unwrap_or_default())
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn codex_plan_change_rechecks_without_erasing_quota() {
+    let store = LocalStore::open_memory().await.unwrap();
+    let (provider, account) = ("codex", "account-a");
+    let key = quota_snapshot_key(provider, account);
+    let now = now_secs();
+    let old = json!({"at": now, "plan": "plus", "windows": [{"used_percent": 100}]});
+    store.set_setting(&key, &old.to_string()).await.unwrap();
+    store.set_setting("plan:codex:account-a", "plus").await.unwrap();
+    assert!(codex_snapshot_current(&store, provider, account, now).await);
+
+    let mut headers = BTreeMap::from([("x-codex-plan-type".into(), "pro".into())]);
+    record_quota_headers(&store, provider, account, &headers).await;
+    assert!(!codex_snapshot_current(&store, provider, account, now).await);
+    assert_eq!(store.get_setting(&key).await.unwrap(), Some(old.to_string()));
+
+    headers.remove("x-codex-plan-type");
+    headers.insert("x-codex-primary-used-percent".into(), "8".into());
+    headers.insert("x-codex-primary-window-minutes".into(), "300".into());
+    record_quota_headers(&store, provider, account, &headers).await;
+    assert!(codex_snapshot_current(&store, provider, account, now_secs()).await);
+    assert_ne!(codex_probe_model_key(account, Some("plus")), codex_probe_model_key(account, Some("pro")));
+    assert_ne!(codex_probe_model_key(account, Some("pro")), codex_probe_model_key("account-b", Some("pro")));
+}
 
 /// A model slug this account is entitled to. The set is per-account and per
 /// release, so it is asked for rather than assumed — `codex/models` is free and
 /// the answer is cached until a request is refused for naming it.
-async fn codex_probe_model(state: &AppState, token: &str, account_id: &str) -> Result<String, String> {
-    if let Some(m) = state.store.get_setting(CODEX_PROBE_MODEL_KEY).await.ok().flatten().filter(|s| !s.is_empty()) {
+async fn codex_probe_model(state: &AppState, token: &str, account_id: &str, key: &str) -> Result<String, CodexProbeError> {
+    if let Some(m) = state.store.get_setting(key).await.ok().flatten().filter(|s| !s.is_empty()) {
         return Ok(m);
     }
-    let models = discovery::codex_servable_models(token, account_id).await.map_err(|e| e.to_string())?;
-    let model = models.into_iter().next().ok_or("this account is not entitled to the Codex surface")?;
-    let _ = state.store.set_setting(CODEX_PROBE_MODEL_KEY, &model).await;
+    let models = discovery::codex_servable_models(token, account_id).await.map_err(|e| {
+        if e.is::<discovery::CodexTokenExpired>() { CodexProbeError::TokenExpired }
+        else { CodexProbeError::Other(e.to_string()) }
+    })?;
+    let model = models.into_iter().next().ok_or_else(|| CodexProbeError::Other("this account is not entitled to the Codex surface".into()))?;
+    let _ = state.store.set_setting(key, &model).await;
     Ok(model)
 }
 
@@ -827,7 +919,7 @@ async fn fetch_codex_headers(
     token: &str,
     account_id: &str,
     model: &str,
-) -> Result<BTreeMap<String, String>, String> {
+) -> Result<BTreeMap<String, String>, CodexProbeError> {
     let body = json!({
         "model": model,
         "input": [{ "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "." }] }],
@@ -850,7 +942,7 @@ async fn fetch_codex_headers(
     if !account_id.is_empty() {
         req = req.header("chatgpt-account-id", account_id);
     }
-    let resp = req.send().await.map_err(|e| format!("request to chatgpt.com failed: {e}"))?;
+    let resp = req.send().await.map_err(|e| CodexProbeError::Other(format!("request to chatgpt.com failed: {e}")))?;
     let status = resp.status();
     let headers = asale_client_core::executor::quota_headers("codex", resp.headers());
     if !status.is_success() {
@@ -865,6 +957,9 @@ async fn fetch_codex_headers(
         }
         let body = resp.text().await.unwrap_or_default();
         let detail: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+        if discovery::codex_token_expired(status.as_u16(), &detail) {
+            return Err(CodexProbeError::TokenExpired);
+        }
         let msg = detail
             .pointer("/detail")
             .or_else(|| detail.pointer("/error/message"))
@@ -873,7 +968,7 @@ async fn fetch_codex_headers(
             .chars()
             .take(200)
             .collect::<String>();
-        return Err(format!("HTTP {status} {msg}"));
+        return Err(CodexProbeError::Other(format!("HTTP {status} {msg}")));
     }
     // Headers in hand; dropping the response aborts the stream before the model
     // gets far enough to cost anything worth counting.

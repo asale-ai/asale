@@ -285,6 +285,8 @@ const CODEX_ENTITLEMENT_RETRY_BACKOFF: i64 = 60;
 struct CodexEntitlement {
     fetched_at: i64,
     models: Vec<String>,
+    #[serde(default)]
+    plan: Option<String>,
 }
 
 /// The slugs this Codex account may ask its upstream for.
@@ -310,7 +312,7 @@ async fn codex_entitlement(store: &LocalStore, tool: &asale_client_core::store::
         .flatten()
         .and_then(|raw| serde_json::from_str(&raw).ok());
     if let Some(c) = &cached {
-        if now_secs() - c.fetched_at < CODEX_ENTITLEMENT_TTL {
+        if now_secs() - c.fetched_at < CODEX_ENTITLEMENT_TTL && c.plan == resolve_plan(store, tool).await {
             return c.models.clone();
         }
     }
@@ -343,6 +345,7 @@ async fn codex_entitlement(store: &LocalStore, tool: &asale_client_core::store::
 /// Ask the account which slugs it may serve and cache the answer. Runs off the
 /// request path — see `codex_entitlement`.
 async fn refresh_codex_entitlement(store: &LocalStore, tool: &asale_client_core::store::ToolRow) {
+    let plan = resolve_plan(store, tool).await;
     let Some(token) = keychain::get(&tool.keychain_ref).ok().flatten() else {
         tracing::warn!(account = %tool.account_id, "codex entitlement: no token in the secret store");
         return;
@@ -360,7 +363,7 @@ async fn refresh_codex_entitlement(store: &LocalStore, tool: &asale_client_core:
             let key = codex_entitlement_key(&tool.account_id);
             let known: Option<CodexEntitlement> =
                 store.get_setting(&key).await.ok().flatten().and_then(|raw| serde_json::from_str(&raw).ok());
-            let fresh = CodexEntitlement { fetched_at: now_secs(), models };
+            let fresh = CodexEntitlement { fetched_at: now_secs(), models, plan };
             if known.as_ref().map(|c| &c.models) != Some(&fresh.models) {
                 tracing::info!(account = %tool.account_id, "codex account serves {:?}", fresh.models);
             }
@@ -2367,6 +2370,9 @@ pub async fn persist_refresh(
     t: &RefreshedToken,
 ) -> anyhow::Result<()> {
     keychain::set(&keychain::token_ref(provider, account_id), &t.access_token)?;
+    if provider == "codex" {
+        store.delete_setting(&crate::commands::usage::codex_login_expired_key(account_id)).await?;
+    }
     if let Some(r) = &t.refresh_token {
         keychain::set(&keychain::refresh_ref(provider, account_id), r)?;
     }
@@ -2406,6 +2412,7 @@ pub fn account_setting_keys(provider: &str, account_id: &str) -> Vec<String> {
         format!("antigravity_models_retry:{account_id}"),
         codex_entitlement_key(account_id),
         codex_entitlement_retry_key(account_id),
+        crate::commands::usage::codex_login_expired_key(account_id),
         custom_models_key(provider, account_id),
     ]
 }
@@ -3040,7 +3047,7 @@ mod tests {
         let s = asale_client_core::store::LocalStore::open_memory().await.unwrap();
         s.upsert_tool("codex", "a@b.io", "asale:codex:a@b.io", &["import"], "import").await.unwrap();
         let tool = s.list_tools().await.unwrap().into_iter().next().unwrap();
-        let old = CodexEntitlement { fetched_at: now_secs() - CODEX_ENTITLEMENT_TTL - 1, models: vec!["gpt-5.5".into()] };
+        let old = CodexEntitlement { fetched_at: now_secs() - CODEX_ENTITLEMENT_TTL - 1, models: vec!["gpt-5.5".into()], plan: None };
         s.set_setting(&codex_entitlement_key("a@b.io"), &serde_json::to_string(&old).unwrap()).await.unwrap();
 
         let began = std::time::Instant::now();

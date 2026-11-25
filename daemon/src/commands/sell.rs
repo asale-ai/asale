@@ -204,6 +204,10 @@ pub async fn accounts_changed(state: &AppState) {
 /// callers are the ones that know a *credential* changed, as opposed to a
 /// switch or a limit.
 pub async fn credential_replaced(state: &AppState, provider: &str, account_id: &str) {
+    if provider == "codex" {
+        let _ = state.store.delete_setting(&super::usage::codex_login_expired_key(account_id)).await;
+        state.limits_cache.write().await.remove(provider);
+    }
     let cleared = state
         .store
         .clear_lane_pause_reason(provider, account_id, "auth")

@@ -468,6 +468,9 @@ pub async fn codex_servable_models(token: &str, chatgpt_account_id: &str) -> any
     let status = resp.status();
     let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
     if !status.is_success() {
+        if codex_token_expired(status.as_u16(), &body) {
+            return Err(CodexTokenExpired.into());
+        }
         anyhow::bail!("codex models {status}: {body}");
     }
     Ok(body
@@ -481,6 +484,14 @@ pub async fn codex_servable_models(token: &str, chatgpt_account_id: &str) -> any
                 .collect()
         })
         .unwrap_or_default())
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("token_expired")]
+pub struct CodexTokenExpired;
+
+pub fn codex_token_expired(status: u16, body: &serde_json::Value) -> bool {
+    status == 401 && body.pointer("/error/code").and_then(serde_json::Value::as_str) == Some("token_expired")
 }
 
 // ── Custom endpoint ─────────────────────────────────────────────────────────

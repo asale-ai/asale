@@ -260,18 +260,14 @@ pub fn spawn_quota_loop(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
             // Codex traffic banks one per sale for nothing and rarely gets here;
             // an idle one pays a near-empty request every ten minutes.
             //
-            // `account_quota_gate` rather than the timestamp alone, because a
-            // reading whose windows have all reset stops gating the moment they
-            // do — and that is exactly when a fresh one is worth buying, a
-            // minute after the reset rather than nine minutes into the next
-            // window.
+            // Recheck on a plan change as well as on age or window reset, but
+            // keep the previous reading until the upstream confirms a new one.
             for tool in tools.iter().filter(|t| t.sell_enabled && probeable(&t.provider)) {
                 let key = format!("{}:{}", tool.provider, tool.account_id);
                 if last_probe.get(&key).is_some_and(|t| now - t < CODEX_PROBE_MIN_GAP) {
                     continue;
                 }
-                let banked_at = usage::quota_snapshot_at(&state.store, &tool.provider, &tool.account_id).await;
-                let current = banked_at.is_some_and(|at| now - at < usage::CODEX_SNAPSHOT_TTL)
+                let current = usage::codex_snapshot_current(&state.store, &tool.provider, &tool.account_id, now).await
                     && account_quota_gate(&state.store, &tool.provider, &tool.account_id, now).await.is_some();
                 if current {
                     continue;
