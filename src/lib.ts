@@ -673,6 +673,8 @@ export interface AccountStatus {
   window_used_percent: number | null;
   window_as_of: number | null;
   window_key: string | null;
+  /** Provider-reported reset of this window, in Unix seconds. */
+  window_reset_at: number | null;
   /** A metered platform key rather than a plan subscription: billed against a
    *  balance, so it has no rolling window and the two caps above are guesses
    *  that do not apply to it. The UI hides window figures for these. */

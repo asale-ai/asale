@@ -158,6 +158,7 @@
     "accountsEmpty": "No accounts yet — connect via OAuth above or import from an installed CLI below.",
     "remove": "Remove",
     "windowUpstream": "Subscription window used ({{window}}, from the provider)",
+    "windowReset": "Next reset {{time}} (local time)",
     "usedTodayFact": "Served today (UTC)",
     "expiredHint": "This credential has expired or could not be refreshed — reconnect the account before selling again.",
     "codexLoginExpired": "Your Codex sign-in has expired. On the Sell page, click the refresh button next to the account to sign in again.",

@@ -16,6 +16,7 @@ import {
 import { ModelMultiSelect, type ModelOption } from "../components/ModelPicker";
 import { errText } from "../errors";
 import { formatAge } from "./Limits";
+import { formatExactReset } from "../lib/limit-pace";
 import {
   BatchVerifyPanel, ModelChecklist, recordedStatus, type LaneVerdict, type VerifyOverview,
 } from "../components/VerifyPanel";
@@ -1044,7 +1045,7 @@ function TestResult({ result: r }: { result: SupplyTest }) {
 }
 
 export function Publish() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
@@ -1963,6 +1964,10 @@ export function Publish() {
               // the operator's own daily cap — and to nothing at all when they
               // have not set one.
               const upstream = !a.key_based && a.window_used_percent != null;
+              const resetTime = upstream && a.window_reset_at != null && a.window_reset_at > now
+                ? formatExactReset(a.window_reset_at, i18n.language)
+                : null;
+              const resetLabel = resetTime && t("publish.windowReset", { time: resetTime });
               const used = a.used_today;
               const denom = limit;
               const pct = upstream
@@ -2123,6 +2128,7 @@ export function Publish() {
                           {upstream ? (a.window_key ?? "") : t("publish.limitUsedToday")}
                         </span>
                       </span>
+                      {resetLabel && <span>{resetLabel}</span>}
                       <span className="mono tabular">{`\u2265 ${floor}%`} <span className="faint">{t("publish.unitOfList")}</span></span>
                       <span className="mono tabular">{slots} <span className="faint">{t("publish.unitRequests")}</span></span>
                       <span>
@@ -2149,6 +2155,7 @@ export function Publish() {
                         {upstream && formatAge(a.window_as_of, t) && (
                           <span className="faint"> · {formatAge(a.window_as_of, t)}</span>
                         )}
+                        {resetLabel && <span> · {resetLabel}</span>}
                       </span>
                       <span className="mono tabular">
                         {upstream ? (

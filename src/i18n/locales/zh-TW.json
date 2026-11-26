@@ -158,6 +158,7 @@
     "accountsEmpty": "尚無帳號 — 可透過上方 OAuth 連結，或在下方從本機 CLI 匯入。",
     "remove": "移除",
     "windowUpstream": "訂閱視窗已用（{{window}}，服務商即時）",
+    "windowReset": "下次重設 {{time}}（本地時間）",
     "usedTodayFact": "今日已售出（UTC）",
     "expiredHint": "此憑證已失效或無法自動更新，請重新連接帳號後再賣出。",
     "codexLoginExpired": "Codex 登入已過期。請在「賣出」頁點選該帳號右側的重新整理按鈕重新登入。",

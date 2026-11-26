@@ -400,6 +400,7 @@ pub async fn list_accounts(state: &AppState) -> R<Value> {
             obj.insert("daily_cap".into(), json!(window_cap * 24 / 5));
             obj.insert("window_used_percent".into(), json!(gate.as_ref().map(|(g, _)| (1.0 - g.headroom) * 100.0)));
             obj.insert("window_as_of".into(), json!(gate.as_ref().map(|(_, at)| *at)));
+            obj.insert("window_reset_at".into(), json!(gate.as_ref().and_then(|(g, _)| g.window_reset_at)));
             obj.insert("window_key".into(), json!(gate.as_ref().map(|(g, _)| g.tightest.clone())));
             obj.insert("source".into(), json!(tool.and_then(|t| t.source.clone())));
             // Every store holding this same account. Two entries mean the

@@ -58,6 +58,8 @@ pub struct QuotaGate {
     /// The key of the window `headroom` came from, for the log line that
     /// explains a lane leaving the market.
     pub tightest: String,
+    /// Provider-reported reset of the displayed window, even with quota left.
+    pub window_reset_at: Option<i64>,
 }
 
 impl QuotaGate {
@@ -202,6 +204,7 @@ pub fn gate_from_windows(windows: &[Value], now: i64) -> Option<QuotaGate> {
         reset_at: (headroom <= 0.0).then_some(reset_at).flatten(),
         blocked,
         tightest,
+        window_reset_at: reset_at,
     })
 }
 
@@ -231,6 +234,7 @@ mod tests {
         assert_eq!(g.tightest, "7d");
         // Nothing is spent, so there is no countdown to show.
         assert_eq!(g.reset_at, None);
+        assert_eq!(g.window_reset_at, parse_rfc3339("2026-08-20T09:59:59Z"));
     }
 
     #[test]
@@ -246,6 +250,7 @@ mod tests {
         assert!(g.exhausted());
         // 2026-08-17T09:19:59Z, parsed out of the RFC 3339 the vendor sent.
         assert_eq!(g.reset_at, Some(1_786_958_399));
+        assert_eq!(g.window_reset_at, g.reset_at);
     }
 
     /// Opus has its own weekly window. Spending it must take Opus off the
@@ -297,6 +302,7 @@ mod tests {
         let g = gate_from_windows(&w, NOW).unwrap();
         assert!((g.headroom - 0.57).abs() < 1e-9);
         assert_eq!(g.tightest, "5h");
+        assert_eq!(g.window_reset_at, Some(NOW + 3600));
     }
 
     #[test]
