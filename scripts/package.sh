@@ -109,7 +109,9 @@ build_linux_cli() {
     # musl 等非 glibc 目标：没有 glibc 下限这回事。
     step "构建命令行工具（asale + asaled，${triple}）"
     cargo build "${args[@]}" --target "$triple"
-  elif cargo zigbuild --version >/dev/null 2>&1; then
+  # 探测只看可执行文件在不在：`cargo zigbuild --version` 不是合法用法（--version 只有
+  # 直接调 cargo-zigbuild 才认），退出码 2，会把装好的工具判成没装。
+  elif command -v cargo-zigbuild >/dev/null 2>&1; then
     step "构建命令行工具（asale + asaled，${triple}，glibc ≥ ${CLI_GLIBC}）"
     # 带 --target 的构建需要显式装过这个 target 的标准库；host 那份默认就有，
     # 交叉编译时补一下（已装是空操作）。
