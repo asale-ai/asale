@@ -325,7 +325,7 @@ fn refuse_foreign_caller(headers: &HeaderMap, _uri: &axum::http::Uri, local_key:
                 .filter_map(presented)
                 .any(|v| crate::rpc::constant_time_eq(v.as_bytes(), k.as_bytes()))
     });
-    (!ok).then(|| (StatusCode::UNAUTHORIZED, "the local proxy requires the asale key the buy switch wrote into the tool's config").into_response())
+    (!ok).then(|| (StatusCode::UNAUTHORIZED, "The local proxy requires the platform API key. Check the tool configuration or enable buying again in the desktop client.").into_response())
 }
 
 async fn forward(
@@ -732,6 +732,15 @@ async fn remint_key(st: &ProxyState, used: &str) -> Result<String, String> {
     crate::commands::mint_consumer_key(app).await.map_err(|e| e.message)
 }
 
+fn market_connection_error(error: &reqwest::Error) -> Response {
+    tracing::warn!(timeout = error.is_timeout(), "market gateway request failed");
+    if error.is_timeout() {
+        (StatusCode::GATEWAY_TIMEOUT, "The platform did not respond in time. Try again shortly.").into_response()
+    } else {
+        (StatusCode::BAD_GATEWAY, "The local proxy could not reach the platform. Check your connection and try again.").into_response()
+    }
+}
+
 /// Market route: forward to the asale server gateway with the asale API key
 /// (spec §6.2). What the trade cost is the server's to record — see the note by
 /// the return.
@@ -745,7 +754,7 @@ async fn forward_market(
     let mut key = match st.asale_key.read().await.clone() {
         Some(k) => k,
         None => {
-            return (StatusCode::UNAUTHORIZED, "Asale api key not configured").into_response();
+            return (StatusCode::UNAUTHORIZED, "The platform API key is missing. Configure a key in the desktop client before retrying.").into_response();
         }
     };
     let target = format!("{}{}", st.server_api_base.trim_end_matches('/'), path_and_query);
@@ -753,7 +762,7 @@ async fn forward_market(
 
     let mut resp = match send_market(&st, tool, &target, &reqwest_method, &bytes, &key).await {
         Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("upstream error: {e}")).into_response(),
+        Err(error) => return market_connection_error(&error),
     };
 
     // The gateway does not know this key. Retrying it never helps — the key row
@@ -767,7 +776,9 @@ async fn forward_market(
                 key = fresh;
                 resp = match send_market(&st, tool, &target, &reqwest_method, &bytes, &key).await {
                     Ok(r) => r,
-                    Err(e) => return (StatusCode::BAD_GATEWAY, format!("upstream error: {e}")).into_response(),
+                    Err(error) => {
+                        return market_connection_error(&error);
+                    }
                 };
             }
             Err(e) => tracing::warn!("gateway rejected the asale api key and re-minting failed: {e}"),
