@@ -57,6 +57,95 @@ done
 step() { echo; echo "==> $*"; }
 die()  { echo "!! $*" >&2; exit 1; }
 
+# ------------------------------------------------------- Linux 的 glibc 下限
+# 动态链接 glibc 的二进制只能在「glibc 不低于编译机」的系统上跑。在 ubuntu-22.04
+# （glibc 2.35）上直接 cargo build 出来的 asale 引用了 GLIBC_2.32/2.33/2.34 的符号，
+# 放到 Ubuntu 20.04 / Debian 11（glibc 2.31）上一启动就是
+#   asale: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.34' not found
+# 两类产物对这件事的态度不一样：
+#
+#   桌面包     躲不开。它链接的 webkit2gtk-4.1 本身就只有 22.04 / Debian 12 以后
+#              才有，下限就是编译机（DESKTOP_GLIBC）。
+#   命令行归档 是给服务器装的，而服务器恰恰是老系统最多的地方。所以 asale/asaled
+#              不跟着编译机走，用 cargo-zigbuild 钉一个明确的下限：zig 自带各版本
+#              glibc 的符号表，`--target <triple>.<版本>` 链接出来的二进制只引用到
+#              那个版本为止。2.17 是 Rust 标准库自己的下限，也是 CentOS 7 的版本，
+#              还在服役的发行版没有比它更老的。
+CLI_GLIBC="${ASALE_CLI_GLIBC:-2.17}"
+DESKTOP_GLIBC="2.35"
+
+# version_le A B —— A <= B（按 . 分段的数字比较，2.9 < 2.17）。
+version_le() {
+  [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -t. -k1,1n -k2,2n -k3,3n | head -1)" == "$1" ]]
+}
+
+# 一个 ELF 实际要求的最低 glibc：动态符号表里引用到的最高 GLIBC_x.y。
+# 没有 objdump（或文件不是 ELF）时输出为空，调用方按“查不了”处理。
+glibc_needed() {
+  command -v objdump >/dev/null 2>&1 || return 0
+  objdump -T "$1" 2>/dev/null \
+    | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/^GLIBC_//' \
+    | sort -u -t. -k1,1n -k2,2n -k3,3n | tail -1
+}
+
+# 构建 Linux 的 asale-cli + asaled，把产物目录放进 LINUX_CLI_BIN。
+#
+# .deb 里的更新器（target/update-support）和命令行归档用的是同一对二进制，两处都
+# 调这个函数；第二次调用直接返回，不再进 cargo。
+LINUX_CLI_BIN=""
+build_linux_cli() {
+  [[ -z "$LINUX_CLI_BIN" ]] || return 0
+
+  local args=(-p asale-cli -p asale-daemon --bin asale-cli --bin asaled)
+  local profile_dir="release"
+  if [[ "$PROFILE" == "--debug" ]]; then profile_dir="debug"; else args+=(--release); fi
+
+  local triple="$TARGET"
+  [[ -n "$triple" ]] || triple="$(rustc -vV | sed -n 's/^host: //p')"
+  [[ -n "$triple" ]] || die "读不到 Rust 的 host triple（rustc -vV）"
+
+  local pinned=0
+  if [[ "$triple" != *-linux-gnu* ]]; then
+    # musl 等非 glibc 目标：没有 glibc 下限这回事。
+    step "构建命令行工具（asale + asaled，${triple}）"
+    cargo build "${args[@]}" --target "$triple"
+  elif cargo zigbuild --version >/dev/null 2>&1; then
+    step "构建命令行工具（asale + asaled，${triple}，glibc ≥ ${CLI_GLIBC}）"
+    # 带 --target 的构建需要显式装过这个 target 的标准库；host 那份默认就有，
+    # 交叉编译时补一下（已装是空操作）。
+    rustup target add "$triple" >/dev/null 2>&1 || true
+    cargo zigbuild "${args[@]}" --target "${triple}.${CLI_GLIBC}"
+    pinned=1
+  else
+    local msg="没有 cargo-zigbuild，命令行产物只能在 glibc 不低于本机的系统上运行。
+   要发布的归档必须钉住下限：pip install cargo-zigbuild（会带上 zig）后重打。"
+    if [[ -n "${CI:-}" ]]; then die "$msg"; fi
+    step "构建命令行工具（asale + asaled，${triple}）"
+    echo "   注意：$msg"
+    cargo build "${args[@]}" --target "$triple"
+  fi
+  # zigbuild 把 glibc 后缀只用在链接上，产物目录仍是不带后缀的 triple。
+  LINUX_CLI_BIN="target/$triple/$profile_dir"
+
+  # 自检：工具说钉住了不算数，看二进制实际引用了什么。这一步挡的是「CI 全绿，
+  # 用户机器上起不来」—— 上面那行报错在出现之前，没有任何一步会失败。
+  local bin need
+  for bin in asale-cli asaled; do
+    [[ -f "$LINUX_CLI_BIN/$bin" ]] || die "构建结束但没有 $LINUX_CLI_BIN/$bin"
+    need="$(glibc_needed "$LINUX_CLI_BIN/$bin")"
+    if [[ -z "$need" ]]; then
+      echo "    $bin  glibc 下限未检查（没有 objdump，或不是 glibc 目标）"
+    elif [[ $pinned == 1 ]] && ! version_le "$need" "$CLI_GLIBC"; then
+      die "$bin 需要 glibc ${need}，高于钉住的下限 ${CLI_GLIBC}。
+   多半是某个依赖的 C 代码或预编译库引用了更新的符号：
+     objdump -T $LINUX_CLI_BIN/$bin | grep GLIBC_${need}
+   确实降不下去就用 ASALE_CLI_GLIBC 抬高下限，并同步更新发布说明。"
+    else
+      echo "    $bin  需要 glibc ≥ ${need}"
+    fi
+  done
+}
+
 # ---------------------------------------------------------------- 打包参数
 [[ -f "$ENV_FILE" ]] || die "缺少 ${ENV_FILE}：cp .env.package.example $ENV_FILE 后填值"
 set -a; . "./$ENV_FILE"; set +a
@@ -120,6 +209,23 @@ elif [[ "$os" == "Linux" ]]; then
    （只想出命令行/无桌面产物的话，加 --cli-only，这些依赖都不需要）"
   fi
   [[ -n "$BUNDLES" ]] || BUNDLES="deb,appimage"
+
+  # 桌面包的 glibc 下限就是编译机的 glibc：AppImage 把编译机上的 webkit/GTK 整套
+  # 打进去，.deb 链接的也是编译机那一版。安装脚本（asale-web 的
+  # src/installers/install.sh，DESKTOP_MIN_GLIBC）按 DESKTOP_GLIBC 这个数决定一台
+  # 机器装不装桌面版 —— 编译机比它新，脚本就会把桌面版装到一台起不来的机器上。
+  # 换 runner 镜像时两边一起改。
+  if [[ $BUILD_APP == 1 ]]; then
+    host_glibc="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')"
+    if [[ -n "$host_glibc" ]] && ! version_le "$host_glibc" "$DESKTOP_GLIBC"; then
+      msg="编译机 glibc ${host_glibc} 高于桌面包承诺的下限 ${DESKTOP_GLIBC}：出来的 .deb/.AppImage
+   在 glibc ${DESKTOP_GLIBC} 的系统上起不来。发布包请在 ubuntu-22.04 上打；确实要抬下限，
+   同时改这里的 DESKTOP_GLIBC 和安装脚本里的 DESKTOP_MIN_GLIBC。"
+      # CI 上出来的就是要发布的包，不能带着这个问题过；本地试打只提醒。
+      if [[ -n "${CI:-}" ]]; then die "$msg"; fi
+      echo "   注意：$msg"
+    fi
+  fi
 else
   die "不支持的系统: ${os}（Windows 请用 scripts/package.ps1）"
 fi
@@ -133,21 +239,18 @@ echo "    ASALE_GATEWAY_API=$ASALE_GATEWAY_API"
 echo "    ASALE_GATEWAY_WS=$ASALE_GATEWAY_WS"
 echo "    ASALE_QUOTA_PUBKEY=${ASALE_QUOTA_PUBKEY:0:16}…"
 
-if [[ $BUILD_APP == 1 && "$(uname -s)" == Linux ]]; then
+if [[ $BUILD_APP == 1 && "$os" == Linux ]]; then
   # The Debian package includes a protected updater worker. Build it before
   # bundling so its postinst can register a timer under the existing dpkg grant.
+  #
+  # Same two binaries as the command-line archive further down (the function
+  # builds them once), so they carry the low glibc floor too — not that it buys
+  # anything inside a package that already depends on webkit2gtk-4.1.
   pnpm build
-  update_args=(build -p asale-cli -p asale-daemon --bin asale-cli --bin asaled)
-  update_profile=release
-  if [[ "$PROFILE" == --debug ]]; then update_args+=(--profile dev); update_profile=debug; else update_args+=(--release); fi
-  if [[ -n "$TARGET" ]]; then update_args+=(--target "$TARGET"); fi
-  cargo "${update_args[@]}"
-  update_bin="$PWD/target"
-  if [[ -n "$TARGET" ]]; then update_bin="$update_bin/$TARGET"; fi
-  update_bin="$update_bin/$update_profile"
+  build_linux_cli
   mkdir -p "$PWD/target/update-support"
-  cp "$update_bin/asale-cli" "$PWD/target/update-support/asale"
-  cp "$update_bin/asaled" "$PWD/target/update-support/asaled"
+  cp "$LINUX_CLI_BIN/asale-cli" "$PWD/target/update-support/asale"
+  cp "$LINUX_CLI_BIN/asaled" "$PWD/target/update-support/asaled"
 fi
 
 if [[ $BUILD_APP == 1 ]]; then
@@ -256,6 +359,13 @@ if [[ $BUILD_CLI == 1 ]]; then
         "target/x86_64-apple-darwin/$profile_dir/$built"
     done
     plat="macos-universal"
+  elif [[ "$os" == "Linux" ]]; then
+    # 钉住 glibc 下限的构建（见文件开头的 build_linux_cli）。打过桌面包的话这对
+    # 二进制已经为 .deb 的更新器编过一次，这里只是取结果。
+    build_linux_cli
+    cp "$LINUX_CLI_BIN/asale-cli" "$stage/asale"
+    cp "$LINUX_CLI_BIN/asaled" "$stage/asaled"
+    plat="linux-$(uname -m)"
   else
     step "构建命令行工具（asale + asaled）"
     if [[ -n "$TARGET" ]]; then
@@ -267,10 +377,7 @@ if [[ $BUILD_CLI == 1 ]]; then
     fi
     cp "$bin_dir/asale-cli" "$stage/asale"
     cp "$bin_dir/asaled" "$stage/asaled"
-    case "$os" in
-      Darwin) plat="macos-$(uname -m)" ;;
-      *)      plat="linux-$(uname -m)" ;;
-    esac
+    plat="macos-$(uname -m)"
   fi
 
   # strip 要在签名之前：先签再 strip 会把签名一起去掉，签名失效的二进制在

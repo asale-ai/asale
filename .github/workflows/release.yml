@@ -18,6 +18,18 @@
 # it is what https://asale.ai/dl/install.sh downloads. Linux is x86_64 only for now; arm64
 # boxes have to build it themselves with `./scripts/package.sh --cli-only`.
 #
+# The Linux job ships two different glibc floors, on purpose:
+#
+#   .deb / .AppImage   the build machine's (ubuntu-22.04 → 2.35). Nothing to gain from going
+#                      lower: webkit2gtk-4.1 does not exist on anything older.
+#   asale-cli-*.tar.gz 2.17, pinned with cargo-zigbuild. This is the archive servers install,
+#                      and servers are where Ubuntu 20.04 / Debian 11 / EL8 still live — built
+#                      the plain way it died there with "version `GLIBC_2.34' not found".
+#
+# package.sh enforces both (it reads the symbol versions back out of the binaries and fails
+# the job if they exceed the floor), and the installer relies on both: see CLI_GLIBC /
+# DESKTOP_GLIBC in scripts/package.sh and DESKTOP_MIN_GLIBC in asale-web's install.sh.
+#
 # Triggers: pushing a v* tag, or a manual workflow_dispatch.
 #
 # Must be configured in the repository (Settings → Secrets and variables → Actions):
@@ -129,9 +141,12 @@ jobs:
             artifact: asale-windows-x64
             bundle: target/release/bundle
           - label: Linux (x64)
-            # Pinned to 22.04: the glibc floor of the artifacts is set by the build machine,
-            # and bundles built on 24.04 fail to start on Debian 12 / Ubuntu 22.04 because
-            # their glibc requirement is too new.
+            # Pinned to 22.04: the glibc floor of the desktop bundles is set by the build
+            # machine, and bundles built on 24.04 fail to start on Debian 12 / Ubuntu 22.04
+            # because their glibc requirement is too new. package.sh refuses to package on
+            # anything newer than its DESKTOP_GLIBC, so moving this pin means moving that
+            # constant and the installer's DESKTOP_MIN_GLIBC with it.
+            # (The command-line archive does not follow the runner — see the header.)
             os: ubuntu-22.04
             artifact: asale-linux-x64
             bundle: target/release/bundle
@@ -181,6 +196,18 @@ jobs:
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev build-essential curl wget file \
             libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      # cargo-zigbuild links asale/asaled against an old glibc (see the header); the pip
+      # package brings its own zig along as the `ziglang` wheel, so there is nothing else to
+      # install. Both are pinned: a new zig can change which symbols get picked, and a release
+      # build should not find that out on its own. package.sh fails the job without it — in CI
+      # it will not fall back to a plain cargo build.
+      - name: cargo-zigbuild (Linux glibc floor)
+        if: runner.os == 'Linux'
+        run: |
+          python3 -m pip install --user cargo-zigbuild==0.24.1 ziglang==0.17.1
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/cargo-zigbuild" --version
 
       # Both scripts read their configuration from files (an installed app has no shell
       # environment, so these values must be baked into the binary at compile time), so the
