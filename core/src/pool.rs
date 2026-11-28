@@ -85,6 +85,19 @@ pub const COOLDOWN_RATE_LIMIT_SECS: i64 = 900;
 /// means a model that comes back — or an entitlement that is granted — stays
 /// unsold until the daemon restarts.
 pub const COOLDOWN_UNSUPPORTED_SECS: i64 = 24 * 3600;
+/// How long a [`PauseReason::Credits`] lane waits before it re-asks the
+/// upstream when nothing has said whether the account can pay yet, seconds.
+///
+/// Only the backstop. What normally ends the pause is the quota poll (every
+/// five minutes) seeing the account gain the credits it was refused for — see
+/// `publisher::rebuild_pool`. Shorter than [`COOLDOWN_UNSUPPORTED_SECS`]
+/// because this is a billing switch the seller can flip at any moment, not a
+/// fact about the vendor's catalogue.
+pub const COOLDOWN_CREDITS_SECS: i64 = 6 * 3600;
+/// The backstop once the poll has positively read that the account still has
+/// no usable credits: every five minutes it re-confirms, so the long clock is
+/// only there in case the reading itself is wrong.
+pub const COOLDOWN_CREDITS_CONFIRMED_SECS: i64 = 24 * 3600;
 /// Auto-recovery cooldowns for the first refusals aimed at the machine
 /// (`Blocked`), seconds. Running out of rungs trips the breaker.
 pub const LANE_COOLDOWN_LADDER: [i64; 2] = [30, 120];
@@ -147,6 +160,17 @@ pub enum PauseReason {
     Unsupported,
     /// The whole OAuth client is rejected; token refresh cannot repair it.
     ClientUnsupported,
+    /// The upstream serves this model to this account only against usage
+    /// credits it does not have (Anthropic's `429 credits_required`,
+    /// `disabled_reason: org_level_disabled`).
+    ///
+    /// Split from [`PauseReason::Unsupported`]: that one is the vendor's
+    /// catalogue and changes with a release, this one is a billing switch the
+    /// seller can flip in a minute — or a scoped allowance that refills at its
+    /// own reset. So it is not waited out on a day-long clock: the quota poll
+    /// reads the account every five minutes and lifts the pause as soon as the
+    /// account can pay (`publisher::rebuild_pool`).
+    Credits,
 }
 
 impl PauseReason {
@@ -161,6 +185,7 @@ impl PauseReason {
             PauseReason::Untradable => "untradable",
             PauseReason::Unsupported => "unsupported",
             PauseReason::ClientUnsupported => "client_unsupported",
+            PauseReason::Credits => "credits",
         }
     }
 
@@ -175,6 +200,7 @@ impl PauseReason {
             "untradable" => PauseReason::Untradable,
             "unsupported" => PauseReason::Unsupported,
             "client_unsupported" => PauseReason::ClientUnsupported,
+            "credits" => PauseReason::Credits,
             _ => return None,
         })
     }
@@ -353,6 +379,9 @@ pub enum UpstreamErrorKind {
     Unsupported,
     /// The whole OAuth client is rejected; token refresh cannot repair it.
     ClientUnsupported,
+    /// The model needs usage credits this account does not have. See
+    /// [`PauseReason::Credits`].
+    CreditsRequired,
 }
 
 /// Selection strategy (spec §4).
@@ -1119,6 +1148,17 @@ impl AccountPool {
                 // other models are unaffected and must keep selling.
                 Some(PauseReason::Unsupported)
             }
+            // Same one-request evidence as `Unsupported` and the same
+            // per-lane scope — the account's other models are paid for out of
+            // the plan and keep selling — but on the short backstop: the poll
+            // is what normally lifts it.
+            UpstreamErrorKind::CreditsRequired => {
+                let lane = a.lanes.entry(model.to_string()).or_default();
+                lane.last_error = detail.to_string();
+                lane.paused = Some(PauseReason::Credits);
+                lane.resume_at = now + COOLDOWN_CREDITS_SECS;
+                Some(PauseReason::Credits)
+            }
             UpstreamErrorKind::ClientUnsupported => {
                 a.lanes.entry(model.to_string()).or_default();
                 for lane in a.lanes.values_mut() {
@@ -1157,12 +1197,50 @@ impl AccountPool {
 
     /// Put a lane out of service explicitly (operator switch, spent quota, a
     /// gateway `lane.pause` control frame).
+    ///
+    /// A pause of a *different* reason never shortens one already in force.
+    /// The per-minute rebuild re-applies a scoped quota block with the window's
+    /// reset (often just "an hour from now"), and that used to overwrite the
+    /// day-long `Unsupported` pause a vendor's "credits required" answer had
+    /// earned — so the lane came back within the hour and the next buyer paid
+    /// for the same refusal, every hour. An indefinite pause (`resume_at == 0`)
+    /// outlasts any timed one; between two timed ones the later wins. The same
+    /// reason always replaces itself, so a moved reset instant is honoured.
     pub fn pause_lane(&mut self, provider: &str, account_id: &str, model: &str, reason: PauseReason, resume_at: i64) {
         if let Some(a) = self.find(provider, account_id) {
             let lane = a.lanes.entry(model.to_string()).or_default();
+            if let Some(held) = lane.paused {
+                let outlasts = if resume_at == 0 {
+                    false
+                } else {
+                    held.requires_user() || lane.resume_at == 0 || lane.resume_at > resume_at
+                };
+                if held != reason && outlasts {
+                    return;
+                }
+            }
             lane.paused = Some(reason);
             lane.resume_at = resume_at;
         }
+    }
+
+    /// End a pause held for `reason`, and only that one — what a recovery
+    /// signal is allowed to clear. Returns whether anything was lifted.
+    ///
+    /// Narrower than [`AccountPool::resume_lane`]: the poll that reads an
+    /// account's credits knows nothing about its cooldowns or its breaker, so
+    /// it must not touch them, and a lane that has since been paused for some
+    /// other reason stays paused for it.
+    pub fn lift_pause(&mut self, provider: &str, account_id: &str, model: &str, reason: PauseReason) -> bool {
+        let Some(lane) = self.find(provider, account_id).and_then(|a| a.lanes.get_mut(model)) else {
+            return false;
+        };
+        if lane.paused != Some(reason) {
+            return false;
+        }
+        lane.paused = None;
+        lane.resume_at = 0;
+        true
     }
 
     /// Clear every exclusion on a lane — the operator says it is fixed.
@@ -2334,5 +2412,51 @@ mod tests {
         p.pause_lane("claude", "a", OPUS, PauseReason::Auth, 0);
         p.pause_lane("claude", "b", OPUS, PauseReason::Auth, 0);
         assert_eq!(p.next_auto_resume(now), None);
+    }
+
+    #[test]
+    fn an_hourly_quota_block_does_not_cut_short_an_unsupported_pause() {
+        // Production 11-28: a "credits required" 429 paused a fable lane for a
+        // day, then the per-minute rebuild re-applied the account's scoped
+        // quota block (reset ≈ an hour away) over it — so the lane was back on
+        // the market within the hour and the next buyer hit the same 429.
+        let now = 1000;
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        p.set_accounts(vec![sellable("a")]);
+        p.pause_lane("claude", "a", OPUS, PauseReason::Unsupported, now + COOLDOWN_UNSUPPORTED_SECS);
+        p.pause_lane("claude", "a", OPUS, PauseReason::Quota, now + 3600);
+        assert!(p.pick_for_sale("claude", OPUS, None, now + 3601).is_none(), "still unsupported after the window reset");
+        assert_eq!(p.next_auto_resume(now), Some(now + COOLDOWN_UNSUPPORTED_SECS));
+        // A longer pause of another reason does take over…
+        p.pause_lane("claude", "a", HAIKU, PauseReason::RateLimit, now + 60);
+        p.pause_lane("claude", "a", HAIKU, PauseReason::Quota, now + 3600);
+        assert!(p.pick_for_sale("claude", HAIKU, None, now + 61).is_none());
+        // …the same reason may move its own reset earlier…
+        p.pause_lane("claude", "a", HAIKU, PauseReason::Quota, now + 120);
+        assert!(p.pick_for_sale("claude", HAIKU, None, now + 121).is_some());
+        // …and an indefinite (operator) pause always wins.
+        p.pause_lane("claude", "a", OPUS, PauseReason::Manual, 0);
+        p.pause_lane("claude", "a", OPUS, PauseReason::Quota, now + 3600);
+        assert!(p.pick_for_sale("claude", OPUS, None, now + COOLDOWN_UNSUPPORTED_SECS + 1).is_none());
+    }
+
+    #[test]
+    fn a_credits_refusal_pauses_only_its_lane_and_the_poll_can_lift_it() {
+        let now = 1000;
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        p.set_accounts(vec![sellable("a")]);
+        let r = p.on_error("claude", "a", OPUS, UpstreamErrorKind::CreditsRequired, "429 credits", now);
+        assert_eq!(r, Some(PauseReason::Credits));
+        assert!(!PauseReason::Credits.requires_user());
+        assert_eq!(PauseReason::parse("credits"), Some(PauseReason::Credits));
+        assert!(p.pick_for_sale("claude", OPUS, None, now + 1).is_none());
+        assert!(p.pick_for_sale("claude", HAIKU, None, now + 1).is_some(), "other models keep selling");
+        // Only the reason it names: a lift for Credits leaves a Manual alone.
+        assert!(!p.lift_pause("claude", "a", OPUS, PauseReason::Unsupported));
+        assert!(p.lift_pause("claude", "a", OPUS, PauseReason::Credits));
+        assert!(p.pick_for_sale("claude", OPUS, None, now + 2).is_some());
+        // The backstop alone also brings it back, hours (not a day) later.
+        p.on_error("claude", "a", OPUS, UpstreamErrorKind::CreditsRequired, "429", now);
+        assert!(p.pick_for_sale("claude", OPUS, None, now + COOLDOWN_CREDITS_SECS + 1).is_some());
     }
 }

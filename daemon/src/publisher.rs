@@ -1667,6 +1667,10 @@ impl TokenProvider for PoolTokens {
                     let d = "upstream does not serve this model";
                     (pool.on_error(provider, account_id, model, UpstreamErrorKind::Unsupported, d, now), d.to_string())
                 }
+                TaskOutcome::CreditsRequired => {
+                    let d = "this model needs usage credits — enable extra usage at claude.ai/settings/usage";
+                    (pool.on_error(provider, account_id, model, UpstreamErrorKind::CreditsRequired, d, now), d.to_string())
+                }
                 // The pool treats it as the rate limit it is; the operator is
                 // told what it actually is, because waiting this one out does
                 // nothing — the allowance only comes back if they top it up.
@@ -1798,6 +1802,10 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
     // on top of the account-wide ones. Collected here and applied after
     // `set_accounts`, which is the call that decides which lanes exist.
     let mut scoped_blocks: Vec<(String, String, String, i64)> = Vec::new();
+    // Only the vendor-stated reset instants: a spent model window is what makes
+    // the vendor ask for credits, so its rollover ends a `Credits` pause too.
+    let mut scope_resets: std::collections::HashMap<(String, String, String), i64> =
+        std::collections::HashMap::new();
     for tool in &tools {
         if !asale_protocol::PROVIDERS.iter().any(|p|p.id==tool.provider&&p.offered_by_default){continue;}
         if tool.origin.as_deref() == Some("import") && buying.contains(&tool.provider) {
@@ -1952,6 +1960,9 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
                     // vendor will roll over on its own. An hour is short enough
                     // to re-ask soon and long enough not to hammer the upstream.
                     let resume_at = b.reset_at.unwrap_or_else(|| now_secs() + 3600);
+                    if let Some(r) = b.reset_at {
+                        scope_resets.insert((tool.provider.clone(), tool.account_id.clone(), model.clone()), r);
+                    }
                     scoped_blocks.push((
                         tool.provider.clone(),
                         tool.account_id.clone(),
@@ -1967,6 +1978,21 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
     // would put a lane the operator was asked to fix straight back on the
     // market, which is exactly the flapping the breaker exists to stop.
     let persisted = store.list_lane_pauses().await.unwrap_or_default();
+    // The poll's reading of each account that has a `Credits` pause: read here
+    // because the pool lock below is synchronous.
+    let mut credit_signals: std::collections::HashMap<(String, String), CreditsSignal> =
+        std::collections::HashMap::new();
+    for (provider, account_id, _, reason, _, _) in &persisted {
+        if reason == PauseReason::Credits.as_str() {
+            let key = (provider.clone(), account_id.clone());
+            if !credit_signals.contains_key(&key) {
+                if let Some(sig) = read_credits_signal(store, provider, account_id).await {
+                    credit_signals.insert(key, sig);
+                }
+            }
+        }
+    }
+    let mut lifted_credits: Vec<(String, String, String)> = Vec::new();
     // The cached market prices, judged against each account's band *after*
     // `set_accounts` — that is the call which restores the hysteresis state the
     // verdict is built on, so applying the band before it would forget every
@@ -1975,19 +2001,95 @@ pub async fn rebuild_pool(store: &LocalStore, pool: &StdMutex<AccountPool>) {
     let ratios = catalog.map(|c| c.ratios).unwrap_or_default();
     if let Ok(mut p) = pool.lock() {
         p.set_accounts(fresh);
-        for (provider, account_id, model, reason, _err) in persisted {
-            if let Some(r) = PauseReason::parse(&reason) {
-                p.pause_lane(&provider, &account_id, &model, r, 0);
+        for (provider, account_id, model, reason, _err, paused_at) in persisted {
+            match PauseReason::parse(&reason) {
+                // The one persisted pause with a clock: it runs from when the
+                // vendor refused, so a restart (an upgrade, a reboot) neither
+                // resets nor extends it. Once over it is simply not restored.
+                Some(PauseReason::Unsupported) => {
+                    let until = paused_at + asale_client_core::pool::COOLDOWN_UNSUPPORTED_SECS;
+                    if until > now_secs() {
+                        p.pause_lane(&provider, &account_id, &model, PauseReason::Unsupported, until);
+                    }
+                }
+                // No fixed day off: the five-minute poll reads whether the
+                // account has extra usage turned on, and the lane comes back
+                // the moment it is (or the model's window rolls over).
+                Some(PauseReason::Credits) => {
+                    let sig = credit_signals.get(&(provider.clone(), account_id.clone()));
+                    let scope_reset = scope_resets
+                        .get(&(provider.clone(), account_id.clone(), model.clone()))
+                        .copied();
+                    match credits_resume_at(paused_at, sig, scope_reset, now_secs()) {
+                        Some(until) => {
+                            p.pause_lane(&provider, &account_id, &model, PauseReason::Credits, until);
+                        }
+                        None => {
+                            p.lift_pause(&provider, &account_id, &model, PauseReason::Credits);
+                            lifted_credits.push((provider, account_id, model));
+                        }
+                    }
+                }
+                Some(r) => p.pause_lane(&provider, &account_id, &model, r, 0),
+                None => {}
             }
         }
         // Not persisted, unlike the pauses above: this one carries the vendor's
         // own reset instant, so it clears itself the moment that passes and a
         // rebuild that no longer sees the block simply stops re-applying it.
+        // `pause_lane` keeps a longer pause of another reason in force, so a
+        // window's hourly reset cannot cut short a day-long `Unsupported`.
         for (provider, account_id, model, resume_at) in scoped_blocks {
             p.pause_lane(&provider, &account_id, &model, PauseReason::Quota, resume_at);
         }
         p.apply_prices(&ratios, now_secs());
     }
+    for (provider, account_id, model) in lifted_credits {
+        tracing::info!(provider, account_id, model, "usage credits pause over; lane back on the market");
+        let _ = store.clear_lane_pause(&provider, &account_id, &model).await;
+    }
+}
+
+/// The quota poll's last reading of whether an account may spend usage
+/// credits (`organization.has_extra_usage_enabled` on the Claude profile).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CreditsSignal {
+    /// When it was last read.
+    pub at: i64,
+    pub enabled: bool,
+    /// When the current value was first seen; 0 for the very first reading,
+    /// which cannot tell whether the value changed.
+    pub since: i64,
+}
+
+pub(crate) fn credits_key(provider: &str, account_id: &str) -> String {
+    format!("credits:{provider}:{account_id}")
+}
+
+pub(crate) async fn read_credits_signal(store: &LocalStore, provider: &str, account_id: &str) -> Option<CreditsSignal> {
+    let raw = store.get_setting(&credits_key(provider, account_id)).await.ok().flatten()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// When a `Credits` pause should end; `None` means now.
+///
+///   * extra usage switched on after the refusal → back at once;
+///   * the model's own window rolls over → back then (the vendor asks for
+///     credits only once the included allowance is spent);
+///   * otherwise a backstop: longer when a reading after the refusal still
+///     says "off", so a lane nobody fixes is not retried every few hours.
+pub(crate) fn credits_resume_at(paused_at: i64, sig: Option<&CreditsSignal>, scope_reset: Option<i64>, now: i64) -> Option<i64> {
+    use asale_client_core::pool::{COOLDOWN_CREDITS_CONFIRMED_SECS, COOLDOWN_CREDITS_SECS};
+    let read_after = sig.filter(|s| s.at > paused_at);
+    if read_after.is_some_and(|s| s.enabled && s.since > paused_at) {
+        return None;
+    }
+    let backstop = match read_after {
+        Some(s) if !s.enabled => paused_at + COOLDOWN_CREDITS_CONFIRMED_SECS,
+        _ => paused_at + COOLDOWN_CREDITS_SECS,
+    };
+    let until = scope_reset.map_or(backstop, |r| r.min(backstop));
+    (until > now).then_some(until)
 }
 
 /// Drain lane state changes: persist the ones a person has to clear, then push
@@ -2005,10 +2107,16 @@ pub fn spawn_lane_loop(
     tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
             match ev.paused.as_deref().and_then(PauseReason::parse) {
-                Some(r) if r.requires_user() => {
+                Some(r) if r.requires_user() || matches!(r, PauseReason::Unsupported | PauseReason::Credits) => {
                     tracing::warn!(
                         provider = %ev.provider, account = %ev.account_id, model = %ev.model,
-                        "lane paused ({}) — waiting for the operator: {}", r.as_str(), ev.last_error
+                        "lane paused ({}) — {}: {}", r.as_str(),
+                        match r {
+                            PauseReason::Unsupported => "retries in a day",
+                            PauseReason::Credits => "lifted once the quota poll sees credits",
+                            _ => "waiting for the operator",
+                        },
+                        ev.last_error
                     );
                     let _ = store
                         .set_lane_pause(&ev.provider, &ev.account_id, &ev.model, r.as_str(), &ev.last_error, now_secs())
@@ -2424,6 +2532,33 @@ fn now_secs() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_credits_pause_follows_the_polled_signal_not_a_fixed_day() {
+        use super::{credits_resume_at, CreditsSignal};
+        use asale_client_core::pool::{COOLDOWN_CREDITS_CONFIRMED_SECS, COOLDOWN_CREDITS_SECS};
+        let paused = 10_000;
+        let now = paused + 300;
+        // Nothing read yet: the short backstop.
+        assert_eq!(credits_resume_at(paused, None, None, now), Some(paused + COOLDOWN_CREDITS_SECS));
+        // Switched on after the refusal → back at once.
+        let on = CreditsSignal { at: now, enabled: true, since: now };
+        assert_eq!(credits_resume_at(paused, Some(&on), None, now), None);
+        // Already on before the refusal (the first-ever read has since=0):
+        // not proof anything changed, so wait for the backstop.
+        let on_before = CreditsSignal { at: now, enabled: true, since: 0 };
+        assert_eq!(credits_resume_at(paused, Some(&on_before), None, now), Some(paused + COOLDOWN_CREDITS_SECS));
+        // Confirmed off after the refusal: the long backstop…
+        let off = CreditsSignal { at: now, enabled: false, since: 0 };
+        assert_eq!(credits_resume_at(paused, Some(&off), None, now), Some(paused + COOLDOWN_CREDITS_CONFIRMED_SECS));
+        // …unless the model's own window rolls over first.
+        assert_eq!(credits_resume_at(paused, Some(&off), Some(paused + 3600), now), Some(paused + 3600));
+        // A reading from before the pause says nothing about it.
+        let stale = CreditsSignal { at: paused - 1, enabled: true, since: paused - 1 };
+        assert_eq!(credits_resume_at(paused, Some(&stale), None, now), Some(paused + COOLDOWN_CREDITS_SECS));
+        // Past due: lifted.
+        assert_eq!(credits_resume_at(paused, None, None, paused + COOLDOWN_CREDITS_SECS), None);
+    }
+
     #[tokio::test]
     async fn antigravity_rejection_withdraws_cached_supply_but_timeout_does_not() {
         let store = LocalStore::open_memory().await.unwrap();

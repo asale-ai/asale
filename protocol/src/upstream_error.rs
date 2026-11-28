@@ -45,7 +45,7 @@ fn param(value: &str) -> Option<String> {
         "role", "content", "type", "text", "name", "input", "id", "tool_use_id", "tool_calls",
         "function", "arguments", "encrypted_content", "source", "data", "url", "media_type",
         "input_schema", "description", "cache_control", "budget_tokens", "effort", "format",
-        "required", "properties", "schema", "signature", "thinking", "is_error",
+        "required", "properties", "schema", "signature", "thinking", "is_error", "custom",
     ];
     if value.len() > 96 { return None; }
     let end_field = |s: &str| s.find(['.', '[']).unwrap_or(s.len());
@@ -55,9 +55,17 @@ fn param(value: &str) -> Option<String> {
     while !rest.is_empty() {
         if let Some(field) = rest.strip_prefix('.') {
             let (field, tail) = field.split_at(end_field(field));
-            known(field, FIELDS)?;
-            out.push('.');
-            out.push_str(field);
+            // Anthropic spells indices as dot segments (`tools.73.custom.input_schema`);
+            // render them in the bracket form the rest of the vocabulary uses.
+            if !field.is_empty() && field.len() <= 6 && field.bytes().all(|b| b.is_ascii_digit()) {
+                out.push('[');
+                out.push_str(field);
+                out.push(']');
+            } else {
+                known(field, FIELDS)?;
+                out.push('.');
+                out.push_str(field);
+            }
             rest = tail;
         } else if let Some(index) = rest.strip_prefix('[') {
             let (index, tail) = index.split_once(']')?;
@@ -86,6 +94,7 @@ const REASONS: &[(&str, &str)] = &[
     ("missing_parameter", "The upstream requires a missing parameter"),
     ("invalid_encrypted_content", "The upstream rejected encrypted content"),
     ("invalid_max_tokens", "The upstream rejected the max_tokens setting"),
+    ("invalid_signature", "The upstream rejected a thinking block signature"),
     ("invalid_thinking", "The upstream rejected the thinking configuration"),
     ("invalid_messages", "The upstream rejected the messages structure"),
     ("beta_header", "The upstream rejected an Anthropic beta header"),
@@ -114,6 +123,10 @@ fn classify_message(message: &str, code: Option<&str>) -> Option<&'static str> {
         "invalid_encrypted_content"
     } else if m.contains("anthropic-beta") {
         "beta_header"
+    } else if m.contains("signature") && m.contains("thinking") {
+        // A `thinking` block replayed with a signature this upstream did not
+        // mint. It is in the buyer's history, so every seller refuses it alike.
+        "invalid_signature"
     } else if m.contains("thinking") && (m.contains("budget_tokens") || m.contains("thinking is not supported")) {
         "invalid_thinking"
     } else if m.contains("max_tokens") {
@@ -202,6 +215,22 @@ mod tests {
         let summary = diagnostic.summary(400);
         assert!(!summary.contains("sk-secret"));
         assert_eq!(Diagnostic::from_summary(400, &summary), diagnostic);
+    }
+
+    #[test]
+    fn anthropic_dotted_tool_index_keeps_its_path() {
+        let diagnostic = Diagnostic::from_body(r#"{"type":"error","error":{"type":"invalid_request_error","message":"tools.73.custom.input_schema: JSON schema is invalid. It must match JSON Schema draft 2020-12"}}"#);
+        assert_eq!(diagnostic.param.as_deref(), Some("tools[73].custom.input_schema"));
+        assert_eq!(diagnostic.reason, Some("tool_schema"));
+        assert_eq!(Diagnostic::from_summary(400, &diagnostic.summary(400)), diagnostic);
+    }
+
+    #[test]
+    fn a_forged_thinking_signature_is_named() {
+        let diagnostic = Diagnostic::from_body(r#"{"type":"error","error":{"type":"invalid_request_error","message":"messages.1.content.0: Invalid `signature` in `thinking` block"}}"#);
+        assert_eq!(diagnostic.param.as_deref(), Some("messages[1].content[0]"));
+        assert_eq!(diagnostic.reason, Some("invalid_signature"));
+        assert_eq!(Diagnostic::from_summary(400, &diagnostic.summary(400)), diagnostic);
     }
 
     #[test]

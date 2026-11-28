@@ -217,7 +217,7 @@ CREATE TABLE IF NOT EXISTS lane_state (
   provider   TEXT NOT NULL,
   account_id TEXT NOT NULL,
   model      TEXT NOT NULL,
-  reason     TEXT NOT NULL,      -- auth | breaker | manual
+  reason     TEXT NOT NULL,      -- auth | breaker | manual | … | unsupported (timed: paused_at + 24h)
   last_error TEXT NOT NULL DEFAULT '',
   paused_at  INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(provider, account_id, model)
@@ -389,7 +389,9 @@ impl LocalStore {
         Ok(())
     }
 
-    /// Persist an operator-clearable lane pause (auth / breaker / manual).
+    /// Persist a lane pause that must survive a restart: the operator-clearable
+    /// ones (auth / breaker / manual …) and `unsupported`, whose day-long
+    /// cooldown would otherwise reset on every restart or upgrade.
     pub async fn set_lane_pause(
         &self,
         provider: &str,
@@ -460,9 +462,13 @@ impl LocalStore {
         Ok(models.into_iter().map(|r| r.0).collect())
     }
 
-    /// Every persisted lane pause: (provider, account_id, model, reason, last_error).
-    pub async fn list_lane_pauses(&self) -> anyhow::Result<Vec<(String, String, String, String, String)>> {
-        let rows = sqlx::query_as("SELECT provider, account_id, model, reason, last_error FROM lane_state")
+    /// Every persisted lane pause: (provider, account_id, model, reason, last_error, paused_at).
+    ///
+    /// `paused_at` matters for the one persisted pause that has a clock —
+    /// `unsupported`, which comes back [`crate::pool::COOLDOWN_UNSUPPORTED_SECS`]
+    /// after it was recorded, not after the daemon last started.
+    pub async fn list_lane_pauses(&self) -> anyhow::Result<Vec<(String, String, String, String, String, i64)>> {
+        let rows = sqlx::query_as("SELECT provider, account_id, model, reason, last_error, paused_at FROM lane_state")
             .fetch_all(&self.pool)
             .await?;
         Ok(rows)

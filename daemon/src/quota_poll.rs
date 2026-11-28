@@ -58,6 +58,7 @@ use crate::commands::usage::{self, account_quota_gate, record_quota_windows};
 use crate::keychain;
 use crate::publisher;
 use crate::state::AppState;
+use asale_client_core::PauseReason;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -182,6 +183,57 @@ async fn refresh_plan(state: &AppState, provider: &str, account_id: &str, now: i
     true
 }
 
+/// Re-read whether an account may spend usage credits, but only while one of
+/// its lanes sits in a `Credits` pause — that is the only lane state the answer
+/// can end. Returns true when the reading changed, which is a re-gate: the
+/// rebuild is what lifts the pause.
+///
+/// `organization.has_extra_usage_enabled` on the free profile endpoint, not
+/// `oauth/usage`'s `extra_usage` block: the profile field is the one observed
+/// in real responses, and the usage endpoint shares Claude Code's budget.
+async fn refresh_credits(state: &AppState, provider: &str, account_id: &str, now: i64) -> bool {
+    let paused = state
+        .store
+        .list_lane_pauses()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .any(|(p, a, _, r, _, _)| p == provider && a == account_id && r == PauseReason::Credits.as_str());
+    if !paused {
+        return false;
+    }
+    let Some(token) = keychain::get(&keychain::token_ref(provider, account_id)).ok().flatten() else {
+        return false;
+    };
+    let body = match asale_client_core::discovery::fetch_claude_profile(&token).await {
+        Ok(body) => body,
+        Err(e) => {
+            tracing::debug!(provider, account = %account_id, "oauth/profile (credits) lookup failed: {e}");
+            return false;
+        }
+    };
+    let Some(enabled) = body["organization"]["has_extra_usage_enabled"].as_bool() else {
+        return false;
+    };
+    let prev = publisher::read_credits_signal(&state.store, provider, account_id).await;
+    let since = match prev {
+        Some(p) if p.enabled == enabled => p.since,
+        Some(_) => now,
+        None => 0,
+    };
+    let sig = publisher::CreditsSignal { at: now, enabled, since };
+    if let Ok(raw) = serde_json::to_string(&sig) {
+        let _ = state.store.set_setting(&publisher::credits_key(provider, account_id), &raw).await;
+    }
+    if prev.is_some_and(|p| p.enabled != enabled) {
+        tracing::info!(provider, account = %account_id, enabled, "extra usage setting changed on the account");
+    }
+    // Any fresh reading can end a pause (a confirmed "off" moves the backstop),
+    // so every successful one earns a rebuild; it is at most one per paused
+    // account per sweep.
+    true
+}
+
 /// Refresh one account's reading and bank it. Errors are the caller's to log:
 /// a 429 or a region block is expected often enough that it must not be noise.
 ///
@@ -234,6 +286,7 @@ pub fn spawn_quota_loop(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
             let mut replan = false;
             for tool in tools.iter().filter(|t| asale_protocol::ids::is_claude_family(&t.provider)) {
                 replan |= refresh_plan(&state, &tool.provider, &tool.account_id, now).await;
+                replan |= refresh_credits(&state, &tool.provider, &tool.account_id, now).await;
             }
 
             let mut asked = 0usize;

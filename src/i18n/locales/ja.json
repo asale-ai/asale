@@ -261,6 +261,7 @@
       "quarantined": "プラットフォームにより停止",
       "untradable": "共有対象外",
       "unsupported": "上流に該当モデルなし",
+      "credits": "追加使用量が必要（有効化を検知すると自動再開）",
       "client_unsupported": "OAuth クライアントのサポートが終了しました。アカウントを移行してください",
       "price": "価格がレンジ外"
     },

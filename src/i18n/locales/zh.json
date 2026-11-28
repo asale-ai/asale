@@ -261,6 +261,7 @@
       "quarantined": "已被平台暂停",
       "untradable": "平台未开放共享",
       "unsupported": "上游没有该模型",
+      "credits": "需开启额外用量（检测到后自动恢复）",
       "client_unsupported": "上游已停止支持此客户端，请迁移账号",
       "price": "价格低于区间"
     },

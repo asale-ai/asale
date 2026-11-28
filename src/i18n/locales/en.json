@@ -261,6 +261,7 @@
       "quarantined": "paused by the platform",
       "untradable": "not shared here",
       "unsupported": "upstream has no such model",
+      "credits": "needs usage credits — resumes once enabled",
       "client_unsupported": "OAuth client no longer supported; migrate this account",
       "price": "held on price"
     },

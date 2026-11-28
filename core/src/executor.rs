@@ -317,6 +317,10 @@ pub enum TaskOutcome {
     /// up rather than to wait out a window that will never reset on its own.
     /// See [`quota_exhausted`].
     QuotaExhausted { reset_at: Option<i64> },
+    /// The model is served to this account only against usage credits it does
+    /// not have. A fact about one `(account, model)` like [`TaskOutcome::Unsupported`],
+    /// but one the seller can fix with a billing switch. See [`credits_required`].
+    CreditsRequired,
 }
 
 /// Which of the two very different things a 401/403 can mean.
@@ -360,6 +364,18 @@ pub fn refusal_outcome(status: u16, body: &str) -> TaskOutcome {
 /// Narrow on purpose. A bare 404 with none of these words is a wrong URL —
 /// which is a real thing to get wrong on a custom endpoint — and the lane it
 /// belongs to may well be fine.
+/// Anthropic's "this model is billed to usage credits and this account has
+/// none" — a `429 rate_limit_error` carrying `credits_required` /
+/// `org_level_disabled`. Checked ahead of [`unsupported_model`] (which also
+/// accepts it, so the two can never disagree about which lane is unusable):
+/// this one has its own pause, which the quota poll lifts as soon as the
+/// account can pay instead of holding the lane for a day.
+pub fn credits_required(status: u16, body: &str) -> bool {
+    let b = body.to_ascii_lowercase();
+    status == 429
+        && (b.contains("credits_required") || b.contains("usage credits are required") || b.contains("org_level_disabled"))
+}
+
 pub fn unsupported_model(status: u16, body: &str) -> bool {
     let b = body.to_ascii_lowercase();
     match status {
@@ -1050,6 +1066,7 @@ pub async fn execute(
                 // that is working fine — and ahead of the 429 arm because Anthropic
                 // says it with a 429 that no amount of waiting clears. Sitting
                 // below that arm, this predicate could never see one.
+                s if credits_required(s, &detail) => TaskOutcome::CreditsRequired,
                 s if unsupported_model(s, &detail) => TaskOutcome::Unsupported,
                 429 => TaskOutcome::RateLimited { reset_at },
                 // A rate limit the vendor chose to report as something other than
@@ -1103,7 +1120,10 @@ pub async fn execute(
                     (protocol::codes::UPSTREAM_RATE_LIMIT, true)
                 }
                 TaskOutcome::AuthFailed => (protocol::codes::TOKEN_EXPIRED, true),
-                TaskOutcome::Unsupported | TaskOutcome::ClientUnsupported | TaskOutcome::Blocked => (protocol::codes::LANE_UNUSABLE, true),
+                TaskOutcome::Unsupported
+                | TaskOutcome::CreditsRequired
+                | TaskOutcome::ClientUnsupported
+                | TaskOutcome::Blocked => (protocol::codes::LANE_UNUSABLE, true),
                 TaskOutcome::ServerError | TaskOutcome::HandedOff => (protocol::codes::UPSTREAM_5XX, true),
                 // The catch-all arm of the classification above: a 4xx nothing
                 // recognised. It is the one shape that fails identically at
@@ -1123,6 +1143,7 @@ pub async fn execute(
                     | TaskOutcome::RateLimited { .. }
                     | TaskOutcome::AuthFailed
                     | TaskOutcome::Unsupported
+                    | TaskOutcome::CreditsRequired
                     | TaskOutcome::ServerError
             );
             let handoff = account_scoped && failovers_left > 0 && tokens.has_alternate(&provider, &model, &lease.account_id);
@@ -2635,6 +2656,14 @@ mod tests {
         // A bare 404 is a wrong URL — a real mistake on a custom endpoint, and
         // not evidence about the model.
         assert!(!unsupported_model(404, "<html><title>404 Not Found</title></html>"));
+    }
+
+    #[test]
+    fn the_credits_wall_is_its_own_outcome_not_a_rate_limit() {
+        let body = r#"{"type":"error","error":{"type":"rate_limit_error","message":"Usage credits are required for this model.","details":{"error_code":"credits_required","disabled_reason":"org_level_disabled","model":"claude-fable-5"}}}"#;
+        assert!(credits_required(429, body));
+        assert!(!credits_required(429, r#"{"error":{"type":"rate_limit_error","message":"rate limited"}}"#));
+        assert!(!credits_required(400, body));
     }
 
     #[test]
