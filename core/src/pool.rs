@@ -768,13 +768,20 @@ impl AccountPool {
             let band = (a.sell_min_ratio, a.sell_max_ratio);
             for (model, lane) in &mut a.lanes {
                 let market = ratios.get(model).copied();
-                let offered = match floors.get(&(a.provider.clone(), model.clone())) {
+                let floor = floors.get(&(a.provider.clone(), model.clone())).copied();
+                let offered = match floor {
                     // `max`, not the floor alone: once the market pays more than
                     // the cheapest ask, the dearer accounts join the lane exactly
                     // as they always did.
-                    Some(f) => market.map(|m| m.max(*f as i32)),
+                    Some(f) => market.map(|m| m.max(f as i32)),
                     None => market,
                 };
+                // Reopen the cheapest usable offer at its own floor. A past
+                // price hold may have been set while its slots were full or a
+                // cheaper account was setting the lane's ask.
+                if floor == Some(a.sell_min_ratio) {
+                    lane.price_withheld = false;
+                }
                 apply_price_band(lane, market, offered, band);
             }
         }
@@ -1666,6 +1673,30 @@ mod tests {
     }
 
     #[test]
+    fn a_lone_account_offers_its_reserve_again_after_releasing_its_last_slot() {
+        let now = 1_000;
+        let market = prices(&[(OPUS, 5), (HAIKU, 6)]);
+        let mut a = banded("only", (10, 100));
+        a.concurrency_max = 1;
+        let mut p = AccountPool::new(Strategy::RoundRobin);
+        p.set_accounts(vec![a]);
+
+        p.apply_prices(&market, now);
+        assert!(p.pick_for_sale("claude", OPUS, None, now).is_some());
+        p.apply_prices(&market, now + 1);
+        assert!(!p.any_sellable("claude", OPUS, now + 1));
+
+        p.on_success("claude", "only", OPUS, 1);
+        p.apply_prices(&market, now + 2);
+        let views = p.lane_views(now + 2);
+        for model in [OPUS, HAIKU] {
+            let lane = view(&views, "only", model);
+            assert_eq!(lane.status, "selling");
+            assert_eq!(lane.min_ratio, 10);
+        }
+    }
+
+    #[test]
     fn widening_the_band_puts_the_account_back_at_once() {
         let now = 1_000;
         let mut p = AccountPool::new(Strategy::RoundRobin);
@@ -1974,6 +2005,8 @@ mod tests {
         let now = 1_000;
         let mut p = AccountPool::new(Strategy::RoundRobin);
         p.set_accounts(vec![banded("cheap", (60, 100)), banded("dear", (90, 100))]);
+        p.apply_prices(&prices(&[(OPUS, 38)]), now);
+        assert_eq!(view(&p.lane_views(now), "dear", OPUS).status, "withheld");
         p.pick_for_sale("claude", OPUS, None, now).unwrap();
         p.find("claude", "cheap").unwrap().in_use = 0;
         p.on_error("claude", "cheap", OPUS, UpstreamErrorKind::ServerError, "500", now);
