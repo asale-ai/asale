@@ -113,6 +113,44 @@ async fn download(http: &reqwest::Client, asset: &Asset, directory: &Path) -> Re
     bail!("could not download {}: {last}", asset.name)
 }
 
+/// The manifest id for the CLI archive of the machine running this daemon.
+///
+/// Linux is split by architecture because the archive carries native binaries;
+/// plain `cli-linux` means x86_64, the only one older manifests published.
+fn cli_build_id() -> &'static str {
+    if cfg!(windows) {
+        "cli-windows"
+    } else if cfg!(target_os = "macos") {
+        "cli-mac"
+    } else {
+        match std::env::consts::ARCH {
+            "x86_64" => "cli-linux",
+            "aarch64" => "cli-linux-aarch64",
+            _ => "",
+        }
+    }
+}
+
+/// The suffix every archive name for this platform ends with, used when the
+/// manifest files the archive under an id this client does not know yet (an
+/// architecture added after the client shipped).
+fn cli_archive_suffix() -> String {
+    if cfg!(windows) {
+        "windows-x86_64.zip".into()
+    } else if cfg!(target_os = "macos") {
+        "macos-universal.tar.gz".into()
+    } else {
+        format!("linux-{}.tar.gz", std::env::consts::ARCH)
+    }
+}
+
+fn pick_cli_asset<'a>(builds: &'a [Asset], id: &str, suffix: &str) -> Option<&'a Asset> {
+    builds
+        .iter()
+        .find(|a| !id.is_empty() && a.id == id)
+        .or_else(|| builds.iter().find(|a| a.name.ends_with(suffix)))
+}
+
 pub async fn update_once(bind: std::net::SocketAddr, system_package: bool) -> Result<()> {
     let http = asale_client_core::http::plain();
     let token =
@@ -173,24 +211,23 @@ pub async fn update_once(bind: std::net::SocketAddr, system_package: bool) -> Re
     } else {
         prefix
     };
+    // Resolve the asset before creating the staging directory: an architecture
+    // the release does not build for must fail here, not after the download.
+    let asset = pick_cli_asset(&manifest.builds, cli_build_id(), &cli_archive_suffix())
+        .with_context(|| {
+            format!(
+                "release {} has no CLI archive for {}-{}",
+                manifest.version,
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            )
+        })?;
     let stage = staging_parent.join(format!(".asale-update-{attempt}"));
     // This checks ACLs and filesystem permissions before a download or restart.
     std::fs::create_dir(&stage).context(
         "installation is protected; enable the system update task once with administrator rights",
     )?;
     let result = async {
-        let id = if cfg!(windows) {
-            "cli-windows"
-        } else if cfg!(target_os = "macos") {
-            "cli-mac"
-        } else {
-            "cli-linux"
-        };
-        let asset = manifest
-            .builds
-            .iter()
-            .find(|a| a.id == id)
-            .context("release has no CLI archive for this platform")?;
         let archive = download(&http, asset, &stage).await?;
         let unpack = stage.join("new");
         std::fs::create_dir(&unpack)?;
@@ -842,5 +879,46 @@ mod tests {
         assert!(!super::newer("1.1.6", "1.1.6"));
         assert!(!super::newer("1.1.6", "1.2.0"));
         assert!(!super::newer("bogus", "1.1.6"));
+    }
+
+    fn asset(id: &str, name: &str) -> super::Asset {
+        super::Asset {
+            id: id.into(),
+            name: name.into(),
+            url: String::new(),
+            mirror: String::new(),
+            sha256: String::new(),
+        }
+    }
+
+    // The manifest may publish an architecture under the id the client expects,
+    // under a name it can recognise, or not at all. The third case used to pick
+    // the x86_64 archive and die with ENOEXEC after the download.
+    #[test]
+    fn cli_asset_prefers_the_architecture_id() {
+        let builds = [
+            asset("cli-linux", "asale-cli-1.4.3-linux-x86_64.tar.gz"),
+            asset("cli-linux-aarch64", "asale-cli-1.4.3-linux-aarch64.tar.gz"),
+        ];
+        let picked =
+            super::pick_cli_asset(&builds, "cli-linux-aarch64", "linux-aarch64.tar.gz").unwrap();
+        assert_eq!(picked.id, "cli-linux-aarch64");
+    }
+
+    #[test]
+    fn cli_asset_falls_back_to_the_archive_name() {
+        let builds = [asset("a-new-id", "asale-cli-1.4.3-linux-aarch64.tar.gz")];
+        let picked =
+            super::pick_cli_asset(&builds, "cli-linux-aarch64", "linux-aarch64.tar.gz").unwrap();
+        assert_eq!(picked.id, "a-new-id");
+    }
+
+    #[test]
+    fn cli_asset_absent_for_this_architecture_is_none() {
+        let builds = [asset("cli-linux", "asale-cli-1.4.3-linux-x86_64.tar.gz")];
+        assert!(
+            super::pick_cli_asset(&builds, "cli-linux-aarch64", "linux-aarch64.tar.gz").is_none()
+        );
+        assert!(super::pick_cli_asset(&builds, "", "linux-riscv64.tar.gz").is_none());
     }
 }
