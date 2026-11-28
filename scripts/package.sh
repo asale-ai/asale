@@ -367,7 +367,15 @@ if [[ $BUILD_CLI == 1 ]]; then
     build_linux_cli
     cp "$LINUX_CLI_BIN/asale-cli" "$stage/asale"
     cp "$LINUX_CLI_BIN/asaled" "$stage/asaled"
-    plat="linux-$(uname -m)"
+    # 名字跟着 triple 走，不跟编译机走：在 x86_64 runner 上交叉编 aarch64 时，
+    # uname -m 还是 x86_64，归档会被命名成 linux-x86_64，客户端会按后缀挑错文件。
+    triple="${LINUX_CLI_BIN#target/}"
+    triple="${triple%%/*}"
+    case "$triple" in
+      aarch64-*) plat="linux-aarch64" ;;
+      x86_64-*)  plat="linux-x86_64" ;;
+      *)         plat="linux-$(uname -m)" ;;
+    esac
   else
     step "构建命令行工具（asale + asaled）"
     if [[ -n "$TARGET" ]]; then
