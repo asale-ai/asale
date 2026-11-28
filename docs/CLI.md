@@ -65,6 +65,7 @@ interface, so build that URL with `asale url --host <public-ip>`.
 | `asale stop` | Stop it, giving it ten seconds to leave the market cleanly |
 | `asale restart` | Both, keeping the address it was on |
 | `asale status` | Running? On what port? Selling what? Autostart on? (`--json` for scripts) |
+| `asale reset-client-id` | Generate a new device ID and signing key for the running local client |
 | `asale logs [-f] [-n N]` | Show or follow the service log |
 | `asale open` | Open the app in a browser, starting the service first if needed |
 | `asale url` | Print the app URL without opening it |
@@ -74,6 +75,12 @@ interface, so build that URL with `asale url --host <public-ip>`.
 | `asale update` | Re-run the online installer |
 | `asale uninstall [--purge --yes]` | Remove the service; `--purge` also deletes your data |
 | `asale help [command]` | Everything, or one topic (`asale help web` is the headless guide) |
+
+### Restore a backup on another machine
+
+Run `asale reset-client-id` on the restored machine to print the old and new IDs. Use the OS user and data directory of the running `asaled`. If the service uses a custom port, pass `--port <n>`.
+
+The command preserves your sign-in, subscription credentials, and selling settings. Active publishing disconnects and attempts to reconnect with the new ID. The platform keeps the old device record and its history. Run `asale status` to check the current ID and publishing state.
 
 ### Options
 

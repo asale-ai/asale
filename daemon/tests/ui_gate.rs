@@ -151,6 +151,69 @@ fn rpc_req(cookie: Option<&str>) -> Request<Body> {
     req.body(Body::from("{}")).unwrap()
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn reset_client_id_rotates_only_the_device_identity() {
+    use asale_daemon::{keychain, state::DEVICE_OWNER_SETTING};
+
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let _sb = Sandbox::new("reset-client-id");
+    let state = Arc::new(AppState::new().await.unwrap());
+    let old_id = state.device_id();
+    let old_pubkey = state.identity().public_key_b64();
+    state.store.record_device_owner(&old_id, "123").await.unwrap();
+    let account_secret = keychain::token_ref("claude", "test-account");
+    let secrets = [
+        ("access_token", "test-access"),
+        ("refresh_token", "test-refresh"),
+        ("asale_api_key", "test-api-key"),
+        (account_secret.as_str(), "test-subscription"),
+    ];
+    for (key, value) in secrets {
+        keychain::set(key, value).unwrap();
+    }
+    state.store.upsert_tool("claude", "test-account", &account_secret, &[], "oauth").await.unwrap();
+    state.store.set_tool_sell("claude", "test-account", true, 200).await.unwrap();
+
+    let app = rpc::router(rpc::Ctx { state: state.clone(), token: Arc::new(TOKEN.into()) });
+    let reset = |token: Option<&str>| {
+        let mut req = rpc_req(None);
+        *req.uri_mut() = "/rpc/reset_client_id".parse().unwrap();
+        if let Some(token) = token {
+            req.headers_mut().insert("x-asale-token", token.parse().unwrap());
+        }
+        req
+    };
+    let (status, ..) = send(&app, reset(None)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(state.device_id(), old_id);
+
+    let (status, _, body) = send(&app, reset(Some(TOKEN))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let new_id = state.device_id();
+    let new_pubkey = state.identity().public_key_b64();
+    assert_eq!(response["previous_device_id"], old_id);
+    assert_eq!(response["device_id"], new_id);
+    assert_ne!(new_id, old_id);
+    assert_ne!(new_pubkey, old_pubkey);
+    // An old publisher may finish a registration that was already in flight.
+    state.store.record_device_owner(&old_id, "123").await.unwrap();
+    assert_eq!(state.store.get_setting(DEVICE_OWNER_SETTING).await.unwrap(), None);
+
+    drop(app);
+    drop(state);
+    let reopened = AppState::new().await.unwrap();
+    assert_eq!(reopened.device_id(), new_id);
+    assert_eq!(reopened.identity().public_key_b64(), new_pubkey);
+    for (key, value) in secrets {
+        assert_eq!(keychain::get(key).unwrap().as_deref(), Some(value));
+    }
+    let tools = reopened.store.list_tools().await.unwrap();
+    assert_eq!(tools.len(), 1);
+    assert!(tools[0].sell_enabled);
+    assert_eq!(tools[0].sell_daily_limit, 200);
+}
+
 /// The unlock page's own handshake — what it posts after reading `#token=`,
 /// which the gate itself never sees.
 #[tokio::test(flavor = "current_thread")]

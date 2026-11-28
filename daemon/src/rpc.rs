@@ -645,6 +645,12 @@ async fn rpc(
         Ok(match cmd.as_str() {
         // ── no arguments ────────────────────────────────────────────────
         "client_config" => commands::client_config(st),
+        "reset_client_id" => {
+            // Once started, finish persisting the identity even if the caller disconnects.
+            let st = st.clone();
+            tokio::spawn(async move { commands::reset_client_id(&st).await })
+                .await.map_err(commands::err)??
+        },
         "daemon_info" => commands::daemon_info(),
         "upgrade_notice" => commands::upgrade_notice(),
         "seller_status" => commands::seller_status(),

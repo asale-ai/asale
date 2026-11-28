@@ -39,6 +39,10 @@ pub struct AppState {
     pub asale_key: Arc<RwLock<Option<String>>>,
     /// The running publisher session (WS relay client), if publishing.
     pub publisher: Arc<RwLock<Option<PublisherHandle>>>,
+    /// Serializes publisher start/stop with device identity changes.
+    pub(crate) publisher_lifecycle: tokio::sync::Mutex<()>,
+    /// Request immediate reconciliation of the persisted sell switches.
+    pub(crate) publish_wakeup: tokio::sync::Notify,
     /// Serialize metadata syncs so an older name cannot overwrite a newer save.
     pub(crate) client_identity_sync: tokio::sync::Mutex<()>,
     pub(crate) client_identity_wakeup: tokio::sync::Notify,
@@ -101,20 +105,23 @@ impl AppState {
         self.identity.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// Become a new device (M1). Called on sign-out so the next account on this
-    /// machine registers a device of its own instead of re-binding the previous
-    /// owner's — which is what split one machine's earnings and verifications
-    /// between two users. Persisted first, then swapped in memory.
-    pub async fn rotate_device_identity(&self) -> anyhow::Result<()> {
+    /// Give this installation a new identity. The publisher lifecycle lock
+    /// must be held so a publisher cannot capture the identity mid-rotation.
+    pub(crate) async fn rotate_device_identity(&self) -> anyhow::Result<(String, String)> {
         let _sync = self.client_identity_sync.lock().await;
+        let previous = self.device_id();
         let id = format!("dev-{}", uuid::Uuid::new_v4().simple());
         let identity = DeviceIdentity::generate();
-        keychain::set(keychain::DEVICE_SEED, &identity.seed_b64())?;
-        self.store.set_setting("device_id", &id).await?;
-        self.store.delete_setting(DEVICE_OWNER_SETTING).await?;
+        // Stage the new seed alongside the current one. On restart the SQLite
+        // ID decides which seed to load, even if the process died mid-rotation.
+        keychain::stage_device_seed(&self.identity().seed_b64(), &id, &identity.seed_b64())?;
+        self.store.replace_device_id(&id).await?;
         *self.identity.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(identity);
-        *self.device_id.write().unwrap_or_else(|e| e.into_inner()) = id;
-        Ok(())
+        *self.device_id.write().unwrap_or_else(|e| e.into_inner()) = id.clone();
+        if let Err(e) = keychain::finish_device_seed(&id) {
+            tracing::warn!("could not finalize the device seed; the staged seed remains usable: {e}");
+        }
+        Ok((previous, id))
     }
 }
 
@@ -152,7 +159,7 @@ impl AppState {
         };
 
         // Device signing identity: seed lives in the encrypted secret store (§10.6).
-        let identity = Arc::new(load_or_create_identity()?);
+        let identity = Arc::new(load_or_create_identity(&device_id)?);
 
         // Seed the account pool from the store; kept fresh by the refresh loop
         // and rebuilt on every account change.
@@ -172,6 +179,8 @@ impl AppState {
             store,
             asale_key: Arc::new(RwLock::new(None)),
             publisher: Arc::new(RwLock::new(None)),
+            publisher_lifecycle: tokio::sync::Mutex::new(()),
+            publish_wakeup: tokio::sync::Notify::new(),
             client_identity_sync: tokio::sync::Mutex::new(()),
             client_identity_wakeup: tokio::sync::Notify::new(),
             client_identity_ip: RwLock::new(None),
@@ -192,8 +201,8 @@ impl AppState {
 
 /// Load the device Ed25519 seed from the encrypted secret store, generating +
 /// persisting one on first run.
-fn load_or_create_identity() -> anyhow::Result<DeviceIdentity> {
-    if let Some(seed) = keychain::get(keychain::DEVICE_SEED)? {
+fn load_or_create_identity(device_id: &str) -> anyhow::Result<DeviceIdentity> {
+    if let Some(seed) = keychain::device_seed(device_id)? {
         if let Ok(id) = DeviceIdentity::from_seed_b64(&seed) {
             return Ok(id);
         }

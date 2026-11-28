@@ -176,6 +176,39 @@ pub fn refresh_ref(provider: &str, account_id: &str) -> String {
 }
 
 pub const DEVICE_SEED: &str = "device_seed";
+const PENDING_DEVICE_SEED: &str = "pending_device_seed";
+
+fn staged_seed<'a>(map: &'a BTreeMap<String, String>, device_id: &str) -> Option<&'a str> {
+    let (id, seed) = map.get(PENDING_DEVICE_SEED)?.split_once(':')?;
+    (id == device_id).then_some(seed)
+}
+
+pub(crate) fn device_seed(device_id: &str) -> Result<Option<String>> {
+    let _g = lock();
+    let map = read_map()?;
+    Ok(staged_seed(&map, device_id)
+        .or_else(|| map.get(DEVICE_SEED).map(String::as_str))
+        .map(str::to_owned))
+}
+
+pub(crate) fn stage_device_seed(current: &str, next_id: &str, next_seed: &str) -> Result<()> {
+    let _g = lock();
+    let mut map = read_map()?;
+    map.insert(DEVICE_SEED.into(), current.into());
+    map.insert(PENDING_DEVICE_SEED.into(), format!("{next_id}:{next_seed}"));
+    write_map(&map)
+}
+
+pub(crate) fn finish_device_seed(device_id: &str) -> Result<()> {
+    let _g = lock();
+    let mut map = read_map()?;
+    if let Some(seed) = staged_seed(&map, device_id).map(str::to_owned) {
+        map.insert(DEVICE_SEED.into(), seed);
+        map.remove(PENDING_DEVICE_SEED);
+        write_map(&map)?;
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -213,6 +246,18 @@ mod tests {
             set(DEVICE_SEED, "seed-xyz").unwrap();
             // Simulate a fresh process: read_map re-loads the key from disk.
             assert_eq!(get(DEVICE_SEED).unwrap().as_deref(), Some("seed-xyz"));
+        });
+    }
+
+    #[test]
+    fn staged_device_seed_follows_the_committed_id() {
+        with_temp_dir(|| {
+            stage_device_seed("old-seed", "dev-new", "new-seed").unwrap();
+            assert_eq!(device_seed("dev-old").unwrap().as_deref(), Some("old-seed"));
+            assert_eq!(device_seed("dev-new").unwrap().as_deref(), Some("new-seed"));
+            finish_device_seed("dev-new").unwrap();
+            assert_eq!(get(DEVICE_SEED).unwrap().as_deref(), Some("new-seed"));
+            assert_eq!(get(PENDING_DEVICE_SEED).unwrap(), None);
         });
     }
 }

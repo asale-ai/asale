@@ -58,6 +58,7 @@ asale autostart enable
 | `asale stop` | 停止服务，先给它十秒干净地退出市场 |
 | `asale restart` | 停了再起，保持原来的监听地址 |
 | `asale status` | 在跑吗？什么端口？在卖什么？开机自启开了吗？（`--json` 给脚本用） |
+| `asale reset-client-id` | 为运行中的本机客户端生成新的设备 ID 和签名密钥 |
 | `asale logs [-f] [-n N]` | 查看 / 跟随服务日志 |
 | `asale open` | 用浏览器打开应用，服务没起会先起 |
 | `asale url` | 只打印网址，不打开 |
@@ -67,6 +68,12 @@ asale autostart enable
 | `asale update` | 重新跑一遍在线安装脚本 |
 | `asale uninstall [--purge --yes]` | 卸载服务；加 `--purge` 连数据一起删 |
 | `asale help [命令]` | 全部帮助，或某个专题（`asale help web` 是无桌面模式指南） |
+
+### 从备份恢复到另一台机器
+
+在恢复后的机器上运行 `asale reset-client-id`，命令会打印旧 ID 和新 ID。使用运行 `asaled` 的系统用户和数据目录，若服务使用自定义端口，可加 `--port <n>`。
+
+登录会话、订阅凭据和出售配置会保留。正在发布的客户端会断开，并尝试用新 ID 重新发布。服务端保留旧设备记录及其历史。可用 `asale status` 查看当前 ID 和发布状态。
 
 ### 选项
 

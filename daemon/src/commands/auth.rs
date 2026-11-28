@@ -159,6 +159,7 @@ pub async fn unlink_oauth(state: &AppState, provider: String) -> R<Value> {
 /// traffic billed to the previous one — or, once the key is revoked, 401 with
 /// no way back short of hitting "regenerate" by hand.
 pub async fn logout(state: &AppState) -> R<bool> {
+    let _lifecycle = state.publisher_lifecycle.lock().await;
     keychain::delete("access_token").map_err(err)?;
     keychain::delete("refresh_token").map_err(err)?;
     super::wallet::forget_key(state).await?;

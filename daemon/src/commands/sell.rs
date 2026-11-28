@@ -20,6 +20,7 @@ use super::{R, err, now_secs};
 /// re-asserted by the startup supervisor.
 pub async fn set_publishing(state: &AppState, on: bool) -> R<bool> {
     use asale_client_core::ConnState;
+    let _lifecycle = state.publisher_lifecycle.lock().await;
     if on {
         // Idempotent: if a live session exists, leave it. `Kicked` is not
         // live — the session loop has already returned and will never
@@ -51,6 +52,20 @@ pub async fn set_publishing(state: &AppState, on: bool) -> R<bool> {
         }
         Ok(false)
     }
+}
+
+/// Switch just the device identity. The durable account settings still decide
+/// whether the supervisor should open a session under the new identity.
+pub async fn reset_client_id(state: &AppState) -> R<Value> {
+    let _lifecycle = state.publisher_lifecycle.lock().await;
+    let mut publisher = state.publisher.write().await;
+    let (previous_device_id, device_id) = state.rotate_device_identity().await.map_err(err)?;
+    if let Some(handle) = publisher.take() {
+        handle.stop();
+    }
+    state.publish_wakeup.notify_one();
+    state.client_identity_wakeup.notify_one();
+    Ok(json!({ "previous_device_id": previous_device_id, "device_id": device_id }))
 }
 
 /// Live proxy + publisher status. `publish_state` reflects the real WS session

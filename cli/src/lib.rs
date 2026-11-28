@@ -71,6 +71,7 @@ fn run(args: &[String]) -> Result<u8> {
         "stop" | "down" => cmd_stop(),
         "restart" => cmd_restart(&rest),
         "status" | "st" => cmd_status(&rest),
+        "reset-client-id" => cmd_reset_client_id(&rest),
         "logs" | "log" => cmd_logs(&rest),
         "url" => cmd_url(&rest),
         "open" | "web" => cmd_open(&rest),
@@ -257,6 +258,9 @@ fn cmd_status(args: &[&str]) -> Result<u8> {
             let lanes = c["lanes_selling"].as_u64().unwrap_or(0);
             let blocked = c["lanes_blocked"].as_u64().unwrap_or(0);
             let signed_in = c["signed_in"].as_bool().unwrap_or(false);
+            if let Some(device_id) = c["device_id"].as_str() {
+                row("client id", device_id);
+            }
             row("account", if signed_in { "signed in" } else { "not signed in — open the web UI to sign in" });
             row(
                 "selling",
@@ -344,6 +348,57 @@ fn upgrade_block(v: &serde_json::Value) -> Option<String> {
         format!("  This build is {current}; the platform requires {min} or newer.")
     };
     Some(format!("!! {what}\n{versions}\n  Upgrade with:  asale update"))
+}
+
+fn cmd_reset_client_id(args: &[&str]) -> Result<u8> {
+    if has_flag(args, &["--help", "-h"]) {
+        print_help(Some("reset-client-id"));
+        return Ok(0);
+    }
+    let bind = match args {
+        [] => service::resolve_bind(None),
+        ["--bind" | "-b", arg] => arg.to_string(),
+        ["--port" | "-p", port] => {
+            let port: u16 = port.parse()?;
+            if port == 0 {
+                bail!("--port must be between 1 and 65535");
+            }
+            service::bind_with_port(None, port)
+        }
+        _ => {
+            eprintln!("Usage: asale reset-client-id [--bind ip:port | --port n]");
+            return Ok(2);
+        }
+    };
+    let bind: std::net::SocketAddr = bind.parse()
+        .map_err(|_| anyhow::anyhow!("invalid asaled bind address {bind}"))?;
+    let addr = http::dial_addr(&bind.to_string());
+    // The access token comes from this machine. A specific LAN bind is fine
+    // as long as its address also belongs to this machine.
+    if !addr.ip().is_loopback() && std::net::TcpListener::bind((addr.ip(), 0)).is_err() {
+        bail!("{addr} is not a local address. Run the command on the machine hosting asaled.");
+    }
+    let token = paths::read_token().ok_or_else(|| {
+        anyhow::anyhow!("could not read {}. Start the service or use its OS user and ASALE_DATA_DIR.", paths::token_file().display())
+    })?;
+    let reply = http::rpc(addr, "reset_client_id", &token, std::time::Duration::from_secs(15))
+        .ok_or_else(|| anyhow::anyhow!("no response from asaled at {addr}. Check the service and its bind address, then run asale status to check the ID before retrying."))?;
+    if reply.status == 401 {
+        bail!("asaled rejected the token. Use the OS user and ASALE_DATA_DIR of the running service.");
+    }
+    let result = reply.json().unwrap_or_default();
+    if result["key"].as_str() == Some("errors.daemon.unknownCommand") {
+        bail!("the running asaled does not support reset-client-id. Update and restart asaled.");
+    }
+    if reply.status != 200 {
+        let message = result["error"].as_str().unwrap_or("unexpected response");
+        bail!("client ID reset failed (HTTP {}): {message}", reply.status);
+    }
+    let (Some(previous), Some(current)) = (result["previous_device_id"].as_str(), result["device_id"].as_str()) else {
+        bail!("asaled returned an unexpected response. Run asale status to check the ID before retrying.");
+    };
+    println!("Client ID changed from {previous} to {current}.");
+    Ok(0)
 }
 
 fn cmd_logs(args: &[&str]) -> Result<u8> {
@@ -720,6 +775,7 @@ SERVICE
   stop                 Stop the service
   restart              Stop and start it again
   status               Is it running, what is it selling, is anything stopping it
+  reset-client-id      Generate a new client ID and device signing key
   logs [-f] [-n N]     Show (or follow) the service log
 
 ACCESS
@@ -839,6 +895,14 @@ fn help_topic(topic: &str) -> Option<&'static str> {
 
   If the port answers but nothing was started here, it is the desktop app: it
   runs the same daemon inside itself. Quit it from the tray icon."
+        }
+        "reset-client-id" => {
+            "asale reset-client-id [--bind ip:port | --port n]
+
+  Give this running client a new device ID and signing key after restoring a
+  backup on another machine. Your sign-in and configured accounts are kept.
+  Active publishing disconnects and is scheduled to reconnect as a new device.
+  The platform keeps the old device record and its device-specific history."
         }
         "autostart" => {
             "asale autostart <enable | disable | status>

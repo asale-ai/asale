@@ -483,6 +483,34 @@ impl LocalStore {
         Ok(())
     }
 
+    /// A new device starts without the previous device's registration owner.
+    pub async fn replace_device_id(&self, id: &str) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("INSERT INTO settings(k,v) VALUES('device_id',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM settings WHERE k='device_owner'")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// A publisher finishing registration after an ID reset cannot update the
+    /// new device's owner.
+    pub async fn record_device_owner(&self, id: &str, owner: &str) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO settings(k,v) SELECT 'device_owner', ? FROM settings WHERE k='device_id' AND v=?
+             ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+        )
+        .bind(owner)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Remove a setting row outright (an account's caches on removal, a
     /// secret that moved to the secret store). Missing is not an error.
     pub async fn delete_setting(&self, k: &str) -> anyhow::Result<()> {

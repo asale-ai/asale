@@ -1207,7 +1207,7 @@ impl ConfigSource for RestConfigSource {
                 .ok_or_else(|| anyhow::anyhow!("device registration failed: {v}"))?
                 .to_string();
             if !user.is_empty() && user != owner {
-                let _ = self.store.set_setting(crate::state::DEVICE_OWNER_SETTING, &user).await;
+                let _ = self.store.record_device_owner(&self.device_id, &user).await;
             }
             return Ok(WsConfig {
                 gateway_ws_url: self.gateway_ws_url.clone(),

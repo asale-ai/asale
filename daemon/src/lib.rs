@@ -312,7 +312,10 @@ pub async fn start(bind: SocketAddr) -> anyhow::Result<StartedDaemon> {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
             let mut complained = false;
             loop {
-                tick.tick().await;
+                tokio::select! {
+                    _ = tick.tick() => {},
+                    _ = st.publish_wakeup.notified() => {},
+                }
                 // Selling through a custom endpoint is a platform-operator
                 // capability now, and it did not used to be — so an ordinary
                 // seller may still have one connected from when it was open to
