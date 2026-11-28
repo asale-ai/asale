@@ -69,6 +69,16 @@ pub const T_SUPPLY_UPDATE: &str = "supply.update";
 /// device. The only thing that clears a quarantine (§4.5).
 pub const T_SUPPLY_RESUME: &str = "supply.resume";
 pub const T_HTTP_REQUEST: &str = "http_request";
+/// Publisher → gateway, after leasing a local account for a dispatched task.
+/// Payload: task_id, install-scoped account fingerprint and optional account_name. Repeated on local failover.
+pub const T_TASK_ACCOUNT: &str = "task.account";
+/// Maximum leases reported for one task, including the initial lease.
+pub const MAX_TASK_ACCOUNT_REPORTS: u8 = 3;
+
+/// Bound publisher-supplied display names and keep them on one line.
+pub fn task_account_name(name: &str) -> String {
+    name.trim().chars().filter(|c| !c.is_control()).take(120).collect::<String>().trim_end().to_owned()
+}
 pub const T_STREAM_START: &str = "stream_start";
 pub const T_STREAM_CHUNK: &str = "stream_chunk";
 pub const T_STREAM_END: &str = "stream_end";

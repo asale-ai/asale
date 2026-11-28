@@ -262,6 +262,8 @@ const CLAUDE_NODE_VERSION: &str = "v26.3.0";
 pub struct LeasedToken {
     pub token: String,
     pub account_id: String,
+    /// Install-scoped opaque fingerprint, suitable for admin attribution.
+    pub account_fingerprint: String,
     /// The session id the upstream knows this account by, where clinging is
     /// part of the bargain. Only Claude uses it so far: the executor derives
     /// one stable id per serving account the first time it leases that
@@ -709,8 +711,7 @@ pub async fn execute(
     // one of them and goes looking for a different *device*. Which account
     // served is knowable only here, and so is the fact that six others were
     // standing by.
-    const MAX_LOCAL_FAILOVERS: u32 = 2;
-    let mut failovers_left = MAX_LOCAL_FAILOVERS;
+    let mut failovers_left = protocol::MAX_TASK_ACCOUNT_REPORTS - 1;
     // C1: the bearer only ever goes to the vendor's own host, over TLS.
     if provider != "custom" && !upstream_url_allowed(&provider, &req.upstream.url) {
         tracing::warn!(task = %task_id, provider = %provider, url = %req.upstream.url, "refusing relayed request: upstream host is not this provider's");
@@ -768,6 +769,18 @@ pub async fn execute(
                 return;
             }
         };
+        if !lease.account_fingerprint.is_empty() {
+            let _ = out.send(Envelope::with_id(
+                &task_id,
+                protocol::T_TASK_ACCOUNT,
+                json!({
+                    "task_id": task_id,
+                    "fingerprint": lease.account_fingerprint,
+                    // The local account ID is the display name on the Sell page.
+                    "account_name": asale_protocol::frame::task_account_name(&lease.account_id),
+                }),
+            ));
+        }
         let token = lease.token.clone();
         let session_id = match lease.session_id.clone().filter(|s| !s.is_empty()) {
             Some(s) => s,
@@ -3917,6 +3930,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
             Some(LeasedToken {
                 token: "k".into(),
                 account_id: "dev@example.com".into(),
+                account_fingerprint: String::new(),
                 session_id: None,
                 upstream_account_id: self.0.map(String::from),
                 upstream_base: None,
@@ -3960,6 +3974,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
             Some(LeasedToken {
                 token: self.0.clone(),
                 account_id: "dev@example.com".into(),
+                account_fingerprint: String::new(),
                 session_id: None,
                 upstream_account_id: None,
                 upstream_base: None,
@@ -4025,6 +4040,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n";
                 Some(LeasedToken {
                     token: self.0.clone(),
                     account_id: "dev@example.com".into(),
+                    account_fingerprint: String::new(),
                     session_id: None,
                     upstream_account_id: Some("acc-stored".into()),
                 upstream_base: None,

@@ -1597,6 +1597,7 @@ impl TokenProvider for PoolTokens {
         match keychain::get(&picked.keychain_ref).ok().flatten() {
             Some(token) => Some(LeasedToken {
                 token,
+                account_fingerprint: credential_mark(provider, &picked.account_id, &None),
                 account_id: picked.account_id,
                 session_id: None,
                 upstream_account_id: picked.upstream_account_id,
