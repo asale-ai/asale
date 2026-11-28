@@ -1024,6 +1024,13 @@
     "backToSignIn": "返回登录"
   },
   "settings": {
+    "clientIdentityTitle": "客户端标识",
+    "clientName": "客户端名称",
+    "clientNameHint": "留空时使用机器名。",
+    "clientIp": "服务端记录的 IP",
+    "clientNameSave": "保存名称",
+    "clientNameSaved": "已保存并同步",
+    "clientNamePending": "已保存到本机，稍后自动同步。",
     "title": "设置",
     "sub": "应用行为：浏览器访问、窗口与托盘、开机自启、软件更新。",
     "autostartTitle": "开机自启",
@@ -1305,6 +1312,7 @@
       "providerNotGranted": "当前账号未获授权使用该凭据类型。"
     },
     "settings": {
+      "invalidClientName": "名称最多 100 个字符，且不能包含控制字符。",
       "unknownProxyMode": "未知的代理模式：{{value}}。",
       "badConsumeMode": "模式必须是 direct、market 或 auto。"
     },

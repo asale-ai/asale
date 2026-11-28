@@ -234,6 +234,24 @@ pub async fn start(bind: SocketAddr) -> anyhow::Result<StartedDaemon> {
     // and a machine that is offline must still start (see `version_gate`).
     version_gate::spawn_loop(app_state.cfg.server_api_base.clone());
 
+    // Keep the identity of signed-in installs current, including buy-only
+    // daemons that never open a WebSocket. An offline save retries here.
+    {
+        let state = app_state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {},
+                    _ = state.client_identity_wakeup.notified() => {},
+                }
+                if let Err(e) = commands::sync_client_identity(&state).await {
+                    tracing::debug!("client identity sync deferred: {e}");
+                }
+            }
+        });
+    }
+
     // Token-refresh loop runs for the daemon lifetime so subscription tokens
     // stay fresh even before the first publish (spec §3.4).
     {

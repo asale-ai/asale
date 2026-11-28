@@ -1024,6 +1024,13 @@
     "backToSignIn": "Back to sign in"
   },
   "settings": {
+    "clientIdentityTitle": "Client identity",
+    "clientName": "Client name",
+    "clientNameHint": "Leave blank to use the machine name.",
+    "clientIp": "Server-observed IP",
+    "clientNameSave": "Save name",
+    "clientNameSaved": "Saved and synced",
+    "clientNamePending": "Saved locally. It will sync automatically.",
     "title": "Settings",
     "sub": "App behaviour: browser access, the window and the tray, launch at login, and updates.",
     "autostartTitle": "Launch at login",
@@ -1305,6 +1312,7 @@
       "providerNotGranted": "This account has not been granted that credential family."
     },
     "settings": {
+      "invalidClientName": "Client name must be at most 100 characters and contain no control characters.",
       "unknownProxyMode": "Unknown proxy mode: {{value}}.",
       "badConsumeMode": "The mode must be direct, market or auto."
     },

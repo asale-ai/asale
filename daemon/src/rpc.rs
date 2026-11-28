@@ -460,6 +460,7 @@ macro_rules! rpc_args {
 }
 
 rpc_args! {
+    ClientNameArgs { name: String }
     ProxyArgs      { mode: String, #[serde(default)] url: Option<String> }
     // Which self-check finding to repair, by its stable `Finding::id`.
     SelfCheckFixArgs { id: String }
@@ -649,6 +650,7 @@ async fn rpc(
         "seller_status" => commands::seller_status(),
         "self_check" => serde_json::json!({"findings": crate::selfcheck::run(st).await}),
         "proxy_settings" => commands::proxy_settings(),
+        "client_identity_settings" => commands::client_identity_settings(st).await?,
         "wallet_overview" => commands::wallet_overview(st).await?,
         "wallet_history" => commands::wallet_history(st).await?,
         "ensure_api_key" => commands::ensure_api_key(st).await?,
@@ -676,6 +678,10 @@ async fn rpc(
         "tool_processes" => commands::tool_processes().await?,
 
         // ── upstream proxy + settings ───────────────────────────────────
+        "set_client_name" => {
+            let p: ClientNameArgs = args(&a)?;
+            commands::set_client_name(st, p.name).await?
+        },
         "set_proxy_settings" => {
             let p: ProxyArgs = args(&a)?;
             commands::set_proxy_settings(st, p.mode, p.url.unwrap_or_default()).await?

@@ -35,6 +35,7 @@ uuid.workspace = true
 
 chacha20poly1305 = "0.10"
 mime_guess = "2"
+hostname = "0.4"
 # Best-effort "open the OAuth page in the local browser" when a desktop is present.
 open = "5"
 # Embedded web UI (../dist) so a single `asaled` binary serves the full app

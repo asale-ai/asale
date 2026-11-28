@@ -39,6 +39,11 @@ pub struct AppState {
     pub asale_key: Arc<RwLock<Option<String>>>,
     /// The running publisher session (WS relay client), if publishing.
     pub publisher: Arc<RwLock<Option<PublisherHandle>>>,
+    /// Serialize metadata syncs so an older name cannot overwrite a newer save.
+    pub(crate) client_identity_sync: tokio::sync::Mutex<()>,
+    pub(crate) client_identity_wakeup: tokio::sync::Notify,
+    /// Last address reported by the server, keyed to the local device id.
+    pub(crate) client_identity_ip: RwLock<Option<(String, String)>>,
     /// Background token-refresh loop handle (runs while publishing).
     pub refresh_task: Arc<RwLock<Option<JoinHandle<()>>>>,
     /// Device Ed25519 identity (seed persisted in the encrypted secret store).
@@ -101,6 +106,7 @@ impl AppState {
     /// owner's — which is what split one machine's earnings and verifications
     /// between two users. Persisted first, then swapped in memory.
     pub async fn rotate_device_identity(&self) -> anyhow::Result<()> {
+        let _sync = self.client_identity_sync.lock().await;
         let id = format!("dev-{}", uuid::Uuid::new_v4().simple());
         let identity = DeviceIdentity::generate();
         keychain::set(keychain::DEVICE_SEED, &identity.seed_b64())?;
@@ -166,6 +172,9 @@ impl AppState {
             store,
             asale_key: Arc::new(RwLock::new(None)),
             publisher: Arc::new(RwLock::new(None)),
+            client_identity_sync: tokio::sync::Mutex::new(()),
+            client_identity_wakeup: tokio::sync::Notify::new(),
+            client_identity_ip: RwLock::new(None),
             refresh_task: Arc::new(RwLock::new(None)),
             identity: std::sync::RwLock::new(identity),
             device_id: std::sync::RwLock::new(device_id),

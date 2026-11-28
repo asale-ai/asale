@@ -22,6 +22,13 @@ interface DaemonInfo {
   remote: boolean | null;
 }
 
+interface ClientIdentity {
+  name: string;
+  default_name: string;
+  ip: string | null;
+  synced?: boolean;
+}
+
 type ProxyMode = "auto" | "off" | "manual";
 
 interface ProxySettings {
@@ -43,6 +50,11 @@ interface ProxyTest {
 
 export function Settings() {
   const { t } = useTranslation();
+  const [identity, setIdentity] = useState<ClientIdentity | null>(null);
+  const [clientName, setClientName] = useState("");
+  const [identityBusy, setIdentityBusy] = useState(false);
+  const [identitySaved, setIdentitySaved] = useState("");
+  const [identityErr, setIdentityErr] = useState("");
   const [version, setVersion] = useState("");
   const [daemon, setDaemon] = useState<DaemonInfo | null>(null);
   const [daemonErr, setDaemonErr] = useState("");
@@ -101,6 +113,40 @@ export function Settings() {
     shell.getCloseToTray().then((v) => setCloseToTray(v ?? true)).catch(() => setCloseToTray(true));
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    const readIdentity = () => invoke<ClientIdentity>("client_identity_settings");
+    readIdentity()
+      .then((value) => {
+        if (!active) return;
+        setIdentity(value);
+        setClientName(value.name);
+      })
+      .catch((e) => { if (active) setIdentityErr(errText(e)); });
+    const poll = window.setInterval(() => {
+      readIdentity().then(({ ip }) => {
+        if (active) setIdentity((current) => current && current.ip !== ip ? { ...current, ip } : current);
+      }).catch(() => {});
+    }, 10_000);
+    return () => { active = false; window.clearInterval(poll); };
+  }, []);
+
+  const saveIdentity = async () => {
+    setIdentityBusy(true);
+    setIdentityErr("");
+    setIdentitySaved("");
+    try {
+      const value = await invoke<ClientIdentity>("set_client_name", { name: clientName });
+      setIdentity(value);
+      setClientName(value.name);
+      setIdentitySaved(value.synced ? "synced" : "pending");
+    } catch (error) {
+      setIdentityErr(errText(error));
+    } finally {
+      setIdentityBusy(false);
+    }
+  };
+
   const applyProxy = (p: ProxySettings) => {
     setProxy(p);
     setProxyMode(p.mode);
@@ -147,6 +193,34 @@ export function Settings() {
   return (
     <div>
       <PageHead title={t("settings.title")} sub={t("settings.sub")} />
+
+      <Card icon={<IconServer />} title={t("settings.clientIdentityTitle")}>
+        {identity && (
+          <form onSubmit={(e) => { e.preventDefault(); void saveIdentity(); }}>
+            <div className="field">
+              <label htmlFor="client-name">{t("settings.clientName")}</label>
+              <input
+                id="client-name"
+                value={clientName}
+                placeholder={identity.default_name}
+                disabled={identityBusy}
+                onChange={(e) => { setClientName(e.target.value); setIdentitySaved(""); }}
+              />
+              <div className="hint">{t("settings.clientNameHint")}</div>
+            </div>
+            <FactGrid facts={[
+              { k: t("settings.clientIp"), v: <span className="mono">{identity.ip || "—"}</span> },
+            ]} />
+            <div className="btn-row" style={{ marginTop: 12 }}>
+              <button type="submit" className="btn" disabled={identityBusy || clientName.trim() === identity.name}>
+                {t("settings.clientNameSave")}
+              </button>
+              {identitySaved && <span role="status">{t(identitySaved === "synced" ? "settings.clientNameSaved" : "settings.clientNamePending")}</span>}
+            </div>
+          </form>
+        )}
+        {identityErr && <Err>{identityErr}</Err>}
+      </Card>
 
       {/* The daemon — the real backend every frontend (shell/browser) talks to. */}
       <Card

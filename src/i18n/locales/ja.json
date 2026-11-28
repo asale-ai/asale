@@ -1024,6 +1024,13 @@
     "backToSignIn": "ログインに戻る"
   },
   "settings": {
+    "clientIdentityTitle": "クライアント識別情報",
+    "clientName": "クライアント名",
+    "clientNameHint": "空欄の場合はマシン名を使用します。",
+    "clientIp": "サーバーで記録した IP",
+    "clientNameSave": "名前を保存",
+    "clientNameSaved": "保存して同期しました",
+    "clientNamePending": "端末に保存しました。後で自動的に同期します。",
     "title": "設定",
     "sub": "アプリの動作：ブラウザーからの利用、ウィンドウとトレイ、ログイン時の起動、アップデート。",
     "autostartTitle": "ログイン時に起動",
@@ -1305,6 +1312,7 @@
       "providerNotGranted": "このアカウントにはその認証情報の種類が付与されていません。"
     },
     "settings": {
+      "invalidClientName": "名前は100文字以内で、制御文字を含めることはできません。",
       "unknownProxyMode": "不明なプロキシモード：{{value}}。",
       "badConsumeMode": "モードは direct / market / auto のいずれかにしてください。"
     },

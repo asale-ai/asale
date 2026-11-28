@@ -1185,6 +1185,7 @@ impl ConfigSource for RestConfigSource {
             let body = json!({
                 "device_id": self.device_id,
                 "device_pubkey": self.device_pubkey,
+                "client_name": crate::commands::client_name(&self.store).await?,
                 "rebind_sig": rebind_proof(&self.identity, &self.device_id),
             });
             let resp = http

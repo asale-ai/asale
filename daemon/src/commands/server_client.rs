@@ -21,6 +21,7 @@ pub(crate) async fn finish_auth(state: &AppState, v: &Value) -> R<Value> {
     keychain::set("access_token", access).map_err(err)?;
     keychain::set("refresh_token", refresh).map_err(err)?;
     super::forget_account_cache(state).await;
+    state.client_identity_wakeup.notify_one();
     Ok(json!({
         "user_id": v["user_id"],
         "email": v["email"],

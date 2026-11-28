@@ -1024,6 +1024,13 @@
     "backToSignIn": "返回登入"
   },
   "settings": {
+    "clientIdentityTitle": "用戶端識別",
+    "clientName": "用戶端名稱",
+    "clientNameHint": "留空時使用機器名稱。",
+    "clientIp": "伺服器記錄的 IP",
+    "clientNameSave": "儲存名稱",
+    "clientNameSaved": "已儲存並同步",
+    "clientNamePending": "已儲存於本機，稍後自動同步。",
     "title": "設定",
     "sub": "應用行為：瀏覽器存取、視窗與系統列、開機自啟、軟體更新。",
     "autostartTitle": "開機自動啟動",
@@ -1305,6 +1312,7 @@
       "providerNotGranted": "目前帳號未獲授權使用該憑證類型。"
     },
     "settings": {
+      "invalidClientName": "名稱最多 100 個字元，且不能包含控制字元。",
       "unknownProxyMode": "未知的代理模式：{{value}}。",
       "badConsumeMode": "模式必須是 direct、market 或 auto。"
     },

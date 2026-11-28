@@ -2,10 +2,76 @@
 //! preference, free-form settings, and the consume-mode switch.
 
 use crate::state::AppState;
-use asale_client_core::http;
+use asale_client_core::{http, store::LocalStore};
 use serde_json::{json, Value};
 use super::{R, err, now_secs};
 use crate::cmd_err;
+use std::sync::OnceLock;
+
+const CLIENT_NAME: &str = "client_name";
+const MAX_CLIENT_NAME: usize = 100;
+
+fn machine_name() -> &'static str {
+    static NAME: OnceLock<String> = OnceLock::new();
+    NAME.get_or_init(|| {
+        let hostname = hostname::get().unwrap_or_default();
+        let name: String = hostname.to_string_lossy().trim().chars()
+            .filter(|c| !c.is_control())
+            .take(MAX_CLIENT_NAME)
+            .collect();
+        if name.trim().is_empty() { "asale-client".into() } else { name.trim().into() }
+    })
+}
+
+pub(crate) async fn client_name(store: &LocalStore) -> anyhow::Result<String> {
+    let saved = store.get_setting(CLIENT_NAME).await?.unwrap_or_default();
+    Ok(if saved.trim().is_empty() { machine_name().into() } else { saved })
+}
+
+pub async fn client_identity_settings(state: &AppState) -> R<Value> {
+    let saved = state.store.get_setting(CLIENT_NAME).await.map_err(err)?.unwrap_or_default();
+    let device_id = state.device_id();
+    let ip = state.client_identity_ip.read().await.as_ref()
+        .filter(|(id, _)| id == &device_id)
+        .map(|(_, ip)| ip.clone());
+    Ok(json!({ "name": saved, "default_name": machine_name(), "ip": ip }))
+}
+
+pub async fn set_client_name(state: &AppState, name: String) -> R<Value> {
+    let name = name.trim();
+    if name.chars().count() > MAX_CLIENT_NAME || name.chars().any(char::is_control) {
+        return Err(cmd_err!("errors.settings.invalidClientName", "Client name must be at most 100 characters and contain no control characters"));
+    }
+    state.store.set_setting(CLIENT_NAME, name).await.map_err(err)?;
+    let synced = sync_client_identity(state).await.unwrap_or(false);
+    let mut result = client_identity_settings(state).await?;
+    result["synced"] = json!(synced);
+    Ok(result)
+}
+
+/// Refresh the server-observed IP and publish the saved name. Works without
+/// an open seller session and does not rotate the publisher's token.
+pub(crate) async fn sync_client_identity(state: &AppState) -> R<bool> {
+    let _sync = state.client_identity_sync.lock().await;
+    if crate::keychain::get("access_token").map_err(err)?.is_none() {
+        return Ok(false);
+    }
+    let device_id = state.device_id();
+    let pubkey = state.identity().public_key_b64();
+    let body = json!({
+        "device_id": device_id,
+        "device_pubkey": pubkey,
+        "client_name": client_name(&state.store).await.map_err(err)?,
+    });
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        super::server_client::authed(state, reqwest::Method::PUT, "/api/v1/devices", Some(body)),
+    ).await.map_err(err)??;
+    if let Some(ip) = response["client_ip"].as_str() {
+        *state.client_identity_ip.write().await = Some((device_id, ip.into()));
+    }
+    Ok(true)
+}
 
 /// Return the client endpoint config.
 pub fn client_config(state: &AppState) -> Value {
