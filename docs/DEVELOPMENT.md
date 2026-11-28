@@ -195,6 +195,10 @@ skipping `pnpm build` would produce a service that answers "no UI embedded".
 The archive is what `https://asale.ai/dl/install.sh` downloads, matched by the regexes in
 the site repo's `src/lib/downloads.ts` — renaming it means changing that table too.
 
+Linux publishes this archive for both x86_64 and arm64. The arm64 one is cross-built on the
+same runner (`--target aarch64-unknown-linux-gnu`, linked by the same zig that pins the glibc
+floor), so the archive name follows the target triple rather than `uname -m`.
+
 ---
 
 ## Releasing and auto-update

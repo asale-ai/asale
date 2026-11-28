@@ -15,8 +15,10 @@
 # Every job also produces `asale-cli-<version>-<platform>.{tar.gz,zip}`: the `asale`
 # command line plus the `asaled` service, neither of which links webkit/GTK. That archive
 # is the whole install on a machine with no desktop — asaled serves the web UI itself — and
-# it is what https://asale.ai/dl/install.sh downloads. Linux is x86_64 only for now; arm64
-# boxes have to build it themselves with `./scripts/package.sh --cli-only`.
+# it is what https://asale.ai/dl/install.sh downloads. Linux ships this archive for both
+# x86_64 and arm64 (the desktop bundles stay x86_64-only): the arm64 one is cross-built on
+# the same runner with the same zig glibc pin, so servers on either architecture install
+# natively.
 #
 # The Linux job ships two different glibc floors, on purpose:
 #
@@ -339,6 +341,20 @@ jobs:
       - name: Package (macOS / Linux)
         if: runner.os != 'Windows'
         run: ./scripts/package.sh ${{ (env.PACKAGE != 'true' || (github.event_name == 'workflow_dispatch' && !inputs.sign)) && '--no-sign' || '' }}
+
+      # The CLI archive is what `asale update` and the daemon's background updater
+      # install, and it carries native binaries — so Linux needs one per architecture.
+      # zig links arm64 from the same runner (cargo-zigbuild is already installed for
+      # the glibc floor); desktop bundles stay x86_64-only, so this is `--cli-only`.
+      # package.sh names the archive from the target triple, not from the runner.
+      - name: Package CLI (Linux arm64)
+        if: env.PACKAGE == 'true' && runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          ./scripts/package.sh --cli-only --target aarch64-unknown-linux-gnu
+          mkdir -p "${{ matrix.bundle }}/cli"
+          cp target/aarch64-unknown-linux-gnu/release/bundle/cli/asale-cli-*-linux-aarch64.tar.gz \
+             "${{ matrix.bundle }}/cli/"
 
       # Authenticode signing tooling. Only needed when the Azure credentials are actually
       # configured — the previous step wrote them to $GITHUB_ENV only if non-empty, so this

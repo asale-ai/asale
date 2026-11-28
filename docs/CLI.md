@@ -215,8 +215,9 @@ machine. Quit the app from its tray icon and the port frees up.
 
 ## Building it yourself
 
-Prebuilt binaries are macOS (universal), Windows x86_64 and Linux x86_64. On any
-other architecture — an arm64 server, for instance — build the pair from source:
+Prebuilt binaries are macOS (universal), Windows x86_64, and Linux x86_64 and
+arm64. On any other architecture — a riscv64 server, for instance — build the
+pair from source:
 
 ```sh
 git clone https://github.com/asale-ai/asale && cd asale

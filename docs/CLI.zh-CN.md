@@ -196,8 +196,8 @@ asale status >/dev/null || echo "asale 掉了：$(hostname)"
 
 ## 自己构建
 
-预编译产物只有 macOS（通用）、Windows x86_64、Linux x86_64。其他架构（比如 arm64 服务器）
-自己编这一对二进制：
+预编译产物只有 macOS（通用）、Windows x86_64、Linux x86_64 和 arm64。其他架构（比如
+riscv64 服务器）自己编这一对二进制：
 
 ```sh
 git clone https://github.com/asale-ai/asale && cd asale
